@@ -26,7 +26,10 @@ class WireAuthor(BaseModel):
 
     ``agent_id`` is set when the author is a persona webhook whose display name
     matches a registered agent. ``is_human_owner`` is set when the author is
-    the configured human owner user.
+    the configured human owner user. ``avatar_url`` is the author's effective
+    avatar URL (per-guild member avatar, falling back to user avatar, falling
+    back to Discord's default) — used by downstream consumers that want to
+    render the author visually (e.g. reply-embed icons).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -38,6 +41,7 @@ class WireAuthor(BaseModel):
     webhook_id: int | None = None
     agent_id: str | None = None
     is_human_owner: bool = False
+    avatar_url: str | None = None
 
 
 class WireMessage(BaseModel):

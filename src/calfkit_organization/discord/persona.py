@@ -14,6 +14,14 @@ the bot can recognize and reuse its own webhooks across restarts.
 
 The bot user must have the ``Manage Webhooks`` permission in any
 channel where this sender is used.
+
+**Inline replies caveat.** Discord webhooks cannot produce real
+``type: 19`` reply messages — the ``message_reference`` field is
+silently dropped on webhook execute. See
+https://github.com/discord/discord-api-docs/issues/2251. When a caller
+passes :class:`ReplyContext`, the sender approximates the inline-reply
+UI by attaching a small embed (author + truncated snippet + jump link)
+above the message, matching PluralKit's approach.
 """
 
 from __future__ import annotations
@@ -22,9 +30,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Literal, Self
 
-import aiohttp
 import discord
 
 from calfkit_organization.discord.messages import SentMessage
@@ -39,6 +46,14 @@ _WEBHOOK_NAME = "calfkit"
 
 # Reason recorded in Discord's audit log when we create a webhook.
 _AUDIT_REASON = "calfkit-organization persona sender"
+
+# Embed author-name and button-label visual limits. The hard Discord caps
+# are higher (256 chars for embed author name, 80 for button labels) but
+# we truncate well below to keep both styles on a single visual line.
+_EMBED_SNIPPET_MAX_LEN = 60
+_BUTTON_LABEL_MAX_LEN = 80
+
+ReplyStyle = Literal["embed", "button"]
 
 
 def dicebear_avatar_url(seed: str) -> str:
@@ -65,6 +80,126 @@ class Persona:
 
     name: str
     avatar_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyContext:
+    """Context for rendering a faked inline reply.
+
+    Discord webhooks cannot produce real ``type: 19`` reply messages
+    (see module docstring). Two approximation styles are supported via
+    the ``style`` field:
+
+    - ``"embed"`` (default, PluralKit-style): a small embed above-or-below
+      the message with the original author's avatar, name, content
+      snippet, and a clickable jump link.
+    - ``"button"`` (Connections-Bot-style): a single Link button below
+      the message labelled e.g. "↩ Replying to @user" that opens the
+      original. Less visually noisy than an embed; requires a click to
+      see the original.
+
+    Attributes:
+        message_id: Discord ID of the message being replied to.
+        channel_id: Channel ID of that message (used to build the jump URL).
+        guild_id: Guild ID (used to build the jump URL).
+        author_display_name: Display name of the original author.
+        content_snippet: The original message content; truncated by the
+            sender before embedding.
+        author_avatar_url: Avatar URL of the original author. Rendered
+            as the embed icon when ``style="embed"``; ignored when
+            ``style="button"`` (Discord link buttons cannot show user
+            avatars).
+        style: Which UI element to render the reply as. See class doc.
+    """
+
+    message_id: int
+    channel_id: int
+    guild_id: int
+    author_display_name: str
+    content_snippet: str
+    author_avatar_url: str | None = None
+    style: ReplyStyle = "embed"
+
+
+def _jump_url(reply_to: ReplyContext) -> str:
+    """Discord deep-link to a specific message in a guild channel."""
+    return (
+        f"https://discord.com/channels/"
+        f"{reply_to.guild_id}/{reply_to.channel_id}/{reply_to.message_id}"
+    )
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """Collapse whitespace and truncate to ``max_len`` with an ellipsis.
+
+    Both embed author lines and button labels render newlines/extra
+    whitespace literally, so we collapse first to keep visuals on one line.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 1].rstrip() + "…"
+
+
+def _build_reply_embed(reply_to: ReplyContext) -> discord.Embed:
+    """Build a single-line PluralKit-style inline-reply embed.
+
+    The whole author line acts as a jump link to the original message
+    (Discord's "click the message link to jump" UX). The color stripe
+    uses the Discord dark-theme channel color so it blends with the
+    background and reads as metadata rather than as a prominent embed
+    card — closer to a real inline-reply badge than a content embed.
+    The original author's avatar is rendered as the icon next to the
+    author line when present.
+    """
+    snippet = _truncate(reply_to.content_snippet, _EMBED_SNIPPET_MAX_LEN)
+    embed = discord.Embed(color=discord.Color.dark_theme())
+    # Compose the visible reply line. ``↪`` evokes Discord's native reply
+    # marker. The whole line links to the original via the author URL.
+    label = f"↪ {reply_to.author_display_name}"
+    if snippet:
+        label = f"{label}: {snippet}"
+    if reply_to.author_avatar_url is not None:
+        embed.set_author(name=label, url=_jump_url(reply_to), icon_url=reply_to.author_avatar_url)
+    else:
+        embed.set_author(name=label, url=_jump_url(reply_to))
+    return embed
+
+
+def _build_reply_button(reply_to: ReplyContext) -> discord.ui.View:
+    """Build a single Link-button View labelled "↩ Replying to @user: <snippet>".
+
+    Connections-Bot-style. Renders as one rounded button below the
+    message; clicking opens the original via the same Discord
+    deep-link the embed uses. Link buttons do not generate
+    interactions, so no callback handler or persistent view is needed.
+
+    The label includes the original message's content snippet (collapsed
+    to one line, truncated to fit Discord's 80-char button-label limit)
+    so the recipient sees what's being replied to without clicking.
+    When the original message has no content (e.g. attachment-only),
+    the snippet is omitted and only the author line remains.
+
+    Requires the webhook to be application-owned (which any webhook
+    created by our bot via ``channel.create_webhook`` is); generic
+    incoming webhooks created via Discord's UI cannot carry components.
+    """
+    base = f"↩ Replying to @{reply_to.author_display_name}"
+    # Collapse whitespace in the snippet before composition so the final
+    # truncation operates on a clean single-line string. _truncate handles
+    # the actual cap and ellipsis insertion.
+    snippet = " ".join(reply_to.content_snippet.split())
+    raw_label = f"{base}: {snippet}" if snippet else base
+    label = _truncate(raw_label, _BUTTON_LABEL_MAX_LEN)
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            url=_jump_url(reply_to),
+            label=label,
+        )
+    )
+    return view
 
 
 class DiscordPersonaSender:
@@ -130,7 +265,7 @@ class DiscordPersonaSender:
         content: str,
         *,
         thread_id: int | None = None,
-        reply_to_message_id: int | None = None,
+        reply_to: ReplyContext | None = None,
     ) -> SentMessage:
         """Send a message rendered under ``persona``'s identity.
 
@@ -142,10 +277,11 @@ class DiscordPersonaSender:
             content: Plain message text. Discord's 2000-character limit applies.
             thread_id: When set, posts into this thread inside ``channel_id``.
                 The webhook still lives on the parent channel.
-            reply_to_message_id: When set, renders the message as an inline
-                reply to that message ID. Routes through a raw HTTP call to
-                the webhook execute endpoint because ``discord.Webhook.send``
-                in discord.py 2.7.1 does not expose ``message_reference``.
+            reply_to: When set, prepends a PluralKit-style embed that
+                visually approximates an inline reply. Discord webhooks
+                cannot produce real ``type: 19`` reply messages, so this
+                embed (author + snippet + jump link) is the closest
+                possible UX. See :class:`ReplyContext`.
 
         Returns:
             :class:`SentMessage`. Its ``channel_id`` field is ``thread_id``
@@ -166,16 +302,6 @@ class DiscordPersonaSender:
 
         webhook = await self._get_or_create_webhook(channel_id)
 
-        if reply_to_message_id is not None:
-            return await self._send_via_raw_http(
-                webhook=webhook,
-                persona=persona,
-                content=content,
-                channel_id=channel_id,
-                reply_to_message_id=reply_to_message_id,
-                thread_id=thread_id,
-            )
-
         # discord.utils.MISSING is the library's "argument omitted" sentinel.
         # Passing None would explicitly clear the field; MISSING means
         # "use the webhook's default" (which is what we want when the
@@ -183,76 +309,33 @@ class DiscordPersonaSender:
         thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
         avatar = persona.avatar_url if persona.avatar_url is not None else discord.utils.MISSING
 
+        embeds: Any = discord.utils.MISSING
+        view: Any = discord.utils.MISSING
+        if reply_to is not None:
+            if reply_to.style == "embed":
+                embeds = [_build_reply_embed(reply_to)]
+            else:  # "button"
+                view = _build_reply_button(reply_to)
+
         sent = await webhook.send(
             content=content,
             username=persona.name,
             avatar_url=avatar,
             thread=thread,
+            embeds=embeds,
+            view=view,
             wait=True,  # required so the response carries the message ID
         )
 
         message_channel = thread_id if thread_id is not None else channel_id
         logger.debug(
-            "sent persona message id=%s persona=%s channel=%s",
+            "sent persona message id=%s persona=%s channel=%s reply=%s",
             sent.id,
             persona.name,
             message_channel,
+            reply_to.message_id if reply_to is not None else None,
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
-
-    @staticmethod
-    async def _send_via_raw_http(
-        webhook: discord.Webhook,
-        persona: Persona,
-        content: str,
-        channel_id: int,
-        reply_to_message_id: int,
-        thread_id: int | None,
-    ) -> SentMessage:
-        """Execute the webhook via raw HTTP to attach ``message_reference``.
-
-        discord.py 2.7.1 does not expose ``message_reference`` on
-        :meth:`discord.Webhook.send`, even though Discord's webhook execute
-        endpoint supports it. We POST directly to the webhook URL (which
-        embeds its token, so no bot auth header is needed) with the
-        reference in the JSON body.
-        """
-        url = f"{webhook.url}?wait=true"
-        if thread_id is not None:
-            url += f"&thread_id={thread_id}"
-
-        # Discord snowflakes can exceed JavaScript's safe-integer range (2^53)
-        # so they MUST be serialized as JSON strings — otherwise Discord's
-        # parser may lose precision and silently drop the reference.
-        payload: dict[str, Any] = {
-            "content": content,
-            "username": persona.name,
-            "message_reference": {
-                "message_id": str(reply_to_message_id),
-                "channel_id": str(channel_id),
-                "fail_if_not_exists": False,
-            },
-        }
-        if persona.avatar_url is not None:
-            payload["avatar_url"] = persona.avatar_url
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise discord.HTTPException(resp, body)
-                data = await resp.json()
-
-        message_channel = thread_id if thread_id is not None else channel_id
-        sent_id = int(data["id"])
-        logger.debug(
-            "sent persona reply id=%s persona=%s channel=%s reply_to=%s",
-            sent_id,
-            persona.name,
-            message_channel,
-            reply_to_message_id,
-        )
-        return SentMessage(id=sent_id, channel_id=message_channel)
 
     async def _get_or_create_webhook(self, channel_id: int) -> discord.Webhook:
         """Return our webhook for ``channel_id``, discovering or creating as needed."""

@@ -54,6 +54,7 @@ def fake_message():
         author_name: str = "alice",
         author_display_name: str | None = None,
         author_is_bot: bool = False,
+        author_avatar_url: str = "https://cdn.discordapp.com/embed/avatars/0.png",
         webhook_id: int | None = None,
         content: str = "hello",
         created_at: datetime | None = None,
@@ -68,6 +69,7 @@ def fake_message():
             name=author_name,
             display_name=author_display_name or author_name,
             bot=author_is_bot,
+            display_avatar=SimpleNamespace(url=author_avatar_url),
         )
         return SimpleNamespace(
             id=message_id,
@@ -96,6 +98,7 @@ def fake_interaction():
         user_name: str = "alice",
         user_display_name: str | None = None,
         user_is_bot: bool = False,
+        user_avatar_url: str = "https://cdn.discordapp.com/embed/avatars/0.png",
         created_at: datetime | None = None,
     ) -> Any:
         if thread_parent_id is not None:
@@ -107,6 +110,7 @@ def fake_interaction():
             name=user_name,
             display_name=user_display_name or user_name,
             bot=user_is_bot,
+            display_avatar=SimpleNamespace(url=user_avatar_url),
         )
         return SimpleNamespace(
             id=interaction_id,

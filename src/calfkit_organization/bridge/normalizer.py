@@ -65,6 +65,21 @@ def _resolve_channel_id(channel: Any) -> int:
     return parent_id if parent_id is not None else channel.id
 
 
+def _resolve_avatar_url(author: Any) -> str | None:
+    """Return the author's effective avatar URL, or ``None`` if unavailable.
+
+    discord.py exposes ``display_avatar`` on all user-like types
+    (User/Member/Webhook author), preferring the per-guild member avatar
+    when set and falling back to the user avatar and then Discord's
+    default. Duck-typed via ``getattr`` so tests using bare
+    ``SimpleNamespace`` fakes can omit the attribute.
+    """
+    display_avatar = getattr(author, "display_avatar", None)
+    if display_avatar is None:
+        return None
+    return getattr(display_avatar, "url", None)
+
+
 class MessageNormalizer:
     """Translates ``discord.Message`` events into :class:`WireMessage`."""
 
@@ -169,6 +184,7 @@ class MessageNormalizer:
             webhook_id=webhook_id,
             agent_id=agent_id,
             is_human_owner=is_human_owner,
+            avatar_url=_resolve_avatar_url(author),
         )
 
 
@@ -223,6 +239,7 @@ class SlashNormalizer:
             webhook_id=None,
             agent_id=None,
             is_human_owner=is_human_owner,
+            avatar_url=_resolve_avatar_url(user),
         )
 
         created_at = getattr(interaction, "created_at", None) or datetime.now(UTC)

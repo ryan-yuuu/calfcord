@@ -19,6 +19,8 @@ from calfkit_organization.discord.messages import IncomingMessage, SentMessage
 from calfkit_organization.discord.persona import (
     DiscordPersonaSender,
     Persona,
+    ReplyContext,
+    ReplyStyle,
     dicebear_avatar_url,
 )
 from calfkit_organization.discord.receiver import DiscordReceiver, MessageHandler
@@ -33,6 +35,8 @@ __all__ = [
     "IncomingMessage",
     "MessageHandler",
     "Persona",
+    "ReplyContext",
+    "ReplyStyle",
     "SentMessage",
     "dicebear_avatar_url",
 ]

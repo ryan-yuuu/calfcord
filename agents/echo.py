@@ -42,7 +42,12 @@ from dotenv import load_dotenv
 
 from calfkit_organization.agents.definition import parse_agent_md
 from calfkit_organization.bridge.wire import WireMessage
-from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
+from calfkit_organization.discord.persona import (
+    DiscordPersonaSender,
+    Persona,
+    ReplyContext,
+    ReplyStyle,
+)
 from calfkit_organization.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
@@ -106,10 +111,12 @@ class EchoNode(BaseNodeDef):
         subscribe_topics: list[str],
         persona: Persona,
         persona_sender: DiscordPersonaSender,
+        reply_style: ReplyStyle,
     ) -> None:
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics)
         self._persona_sender = persona_sender
         self._persona = persona
+        self._reply_style = reply_style
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         wire = WireMessage.model_validate(ctx.deps.provided_deps["discord"])
@@ -118,7 +125,15 @@ class EchoNode(BaseNodeDef):
             persona=self._persona,
             channel_id=wire.channel_id,
             content=f"echo: {wire.content}",
-            reply_to_message_id=wire.message_id,
+            reply_to=ReplyContext(
+                message_id=wire.message_id,
+                channel_id=wire.channel_id,
+                guild_id=wire.guild_id,
+                author_display_name=wire.author.display_name,
+                content_snippet=wire.content,
+                author_avatar_url=wire.author.avatar_url,
+                style=self._reply_style,
+            ),
         )
         logger.info(
             "echoed event_id=%s reply_to=%s reply_id=%s channel=%s",
@@ -140,12 +155,28 @@ def _resolve_channel_ids() -> list[int]:
     return [int(part.strip()) for part in raw.split(",") if part.strip()]
 
 
+def _resolve_reply_style() -> ReplyStyle:
+    """Pick the inline-reply UI style for this echo run.
+
+    Defaults to ``"button"`` so the current diagnostic run shows the
+    Link-button option without env-var setup. Set
+    ``ECHO_REPLY_STYLE=embed`` to switch to the PluralKit-style embed.
+    """
+    raw = (os.getenv("ECHO_REPLY_STYLE") or "button").lower()
+    if raw not in ("embed", "button"):
+        raise SystemExit(
+            f"ECHO_REPLY_STYLE must be 'embed' or 'button', got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
+
+
 async def _amain() -> None:
     definition = parse_agent_md(Path(__file__).with_name("echo.md"))
     persona = Persona(name=definition.display_name, avatar_url=definition.avatar_url)
 
     settings = DiscordSettings()  # type: ignore[call-arg]
     channel_ids = _resolve_channel_ids()
+    reply_style = _resolve_reply_style()
     subscribe_topics = [f"discord.channel.{cid}" for cid in channel_ids]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
@@ -156,6 +187,7 @@ async def _amain() -> None:
                 subscribe_topics=subscribe_topics,
                 persona=persona,
                 persona_sender=persona_sender,
+                reply_style=reply_style,
             )
             # AND-semantics: both gates must accept. Authorship check first so
             # we short-circuit on self/unknown-bot before doing content-based
@@ -165,9 +197,10 @@ async def _amain() -> None:
 
             worker = Worker(client, [node])
             logger.info(
-                "echo agent starting on channels=%s broker=%s",
+                "echo agent starting on channels=%s broker=%s reply_style=%s",
                 channel_ids,
                 server_urls,
+                reply_style,
             )
             await worker.run()
 

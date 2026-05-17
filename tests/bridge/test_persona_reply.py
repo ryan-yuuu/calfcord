@@ -1,155 +1,209 @@
-"""Unit tests for the raw-HTTP inline-reply shim in DiscordPersonaSender.
+"""Unit tests for the PluralKit-style reply embed builder.
 
-Spins up an in-process aiohttp test server pretending to be the Discord
-webhook execute endpoint, then exercises ``_send_via_raw_http`` directly
-to verify request shape and response parsing.
+Discord webhooks cannot produce real ``type: 19`` reply messages (the
+``message_reference`` field is silently dropped on webhook execute; see
+https://github.com/discord/discord-api-docs/issues/2251). The persona
+sender approximates the inline-reply UI with a small embed at the top
+of the message; these tests pin the embed shape so the visual contract
+doesn't silently regress.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import pytest
 
 import discord
-import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestServer
 
-from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
-
-
-async def _make_webhook_server(captured: list[dict], status: int = 200, response_body: dict | None = None) -> TestServer:
-    """Start an in-process aiohttp server that mimics Discord's webhook execute endpoint."""
-
-    async def handler(request: web.Request) -> web.Response:
-        body = await request.json()
-        captured.append({"body": body, "query": dict(request.query)})
-        if status >= 400:
-            return web.Response(status=status, text="bad request")
-        return web.json_response(response_body or {"id": "999", "channel_id": "200"})
-
-    app = web.Application()
-    app.router.add_post("/{path:.*}", handler)
-    server = TestServer(app)
-    await server.start_server()
-    return server
+from calfkit_organization.discord.persona import (
+    ReplyContext,
+    _build_reply_button,
+    _build_reply_embed,
+    _truncate,
+)
 
 
-@pytest.fixture
-async def captured_requests() -> list[dict]:
-    return []
+class TestTruncate:
+    def test_short_text_passes_through(self) -> None:
+        assert _truncate("hello", 60) == "hello"
+
+    def test_collapses_whitespace(self) -> None:
+        assert _truncate("hello   world\n\nfoo", 60) == "hello world foo"
+
+    def test_truncates_with_ellipsis(self) -> None:
+        long = "a" * 100
+        result = _truncate(long, 10)
+        assert len(result) == 10
+        assert result.endswith("…")
+
+    def test_empty_string(self) -> None:
+        assert _truncate("", 60) == ""
+
+    def test_whitespace_only_collapses_to_empty(self) -> None:
+        assert _truncate("   \n  \t  ", 60) == ""
 
 
-async def test_sends_message_reference_in_body(captured_requests: list[dict]):
-    server = await _make_webhook_server(captured_requests)
-    try:
-        webhook = SimpleNamespace(url=str(server.make_url("/webhooks/123/token-abc")))
-        persona = Persona(name="Aksel (Scheduler)")
-
-        sent = await DiscordPersonaSender._send_via_raw_http(
-            webhook=webhook,
-            persona=persona,
-            content="reply body",
-            channel_id=200,
-            reply_to_message_id=42,
-            thread_id=None,
+class TestBuildReplyEmbed:
+    @pytest.fixture
+    def context(self) -> ReplyContext:
+        return ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="hello world",
         )
 
-        assert sent.id == 999
-        assert sent.channel_id == 200
-        assert len(captured_requests) == 1
-        body = captured_requests[0]["body"]
-        assert body["content"] == "reply body"
-        assert body["username"] == "Aksel (Scheduler)"
-        # IDs must be JSON strings — Discord snowflakes can exceed 2^53
-        # and lose precision if serialized as numbers.
-        assert body["message_reference"] == {
-            "message_id": "42",
-            "channel_id": "200",
-            "fail_if_not_exists": False,
-        }
-        assert isinstance(body["message_reference"]["message_id"], str)
-        assert isinstance(body["message_reference"]["channel_id"], str)
-        # The wait=true query param is what makes Discord return the created message.
-        assert captured_requests[0]["query"]["wait"] == "true"
-    finally:
-        await server.close()
+    def test_embed_has_author_with_jump_url(self, context: ReplyContext) -> None:
+        embed = _build_reply_embed(context)
+        assert embed.author.url == "https://discord.com/channels/777/888/999"
+
+    def test_embed_author_includes_arrow_name_and_snippet(self, context: ReplyContext) -> None:
+        embed = _build_reply_embed(context)
+        assert embed.author.name == "↪ alice: hello world"
+
+    def test_embed_color_blends_with_dark_theme(self, context: ReplyContext) -> None:
+        """Dark-theme color stripe blends with the channel background so the
+        embed reads as a thin reply badge, not a prominent content card."""
+        embed = _build_reply_embed(context)
+        assert embed.color == discord.Color.dark_theme()
+
+    def test_avatar_url_used_as_author_icon(self, context: ReplyContext) -> None:
+        with_avatar = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="hello",
+            author_avatar_url="https://cdn.discordapp.com/avatars/123/abc.png",
+        )
+        embed = _build_reply_embed(with_avatar)
+        assert embed.author.icon_url == "https://cdn.discordapp.com/avatars/123/abc.png"
+
+    def test_no_avatar_url_omits_icon(self, context: ReplyContext) -> None:
+        """When the wire didn't carry an avatar URL, the icon is left unset."""
+        embed = _build_reply_embed(context)
+        assert embed.author.icon_url is None
+
+    def test_long_content_truncated(self, context: ReplyContext) -> None:
+        long_context = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="x" * 200,
+        )
+        embed = _build_reply_embed(long_context)
+        # Author name is "↪ alice: " + snippet; snippet alone is capped at 60.
+        snippet_part = embed.author.name.removeprefix("↪ alice: ")
+        assert len(snippet_part) <= 60
+        assert snippet_part.endswith("…")
+
+    def test_empty_snippet_omits_colon(self, context: ReplyContext) -> None:
+        empty_context = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="",
+        )
+        embed = _build_reply_embed(empty_context)
+        # No trailing ": " when there's nothing to quote — just the arrow + author.
+        assert embed.author.name == "↪ alice"
+
+    def test_newlines_in_snippet_collapsed(self, context: ReplyContext) -> None:
+        multiline = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="line one\nline two\n\nline four",
+        )
+        embed = _build_reply_embed(multiline)
+        # All whitespace collapsed so the embed stays on one line in Discord.
+        assert "\n" not in embed.author.name
+        assert "line one line two line four" in embed.author.name
 
 
-async def test_includes_thread_id_query_param_when_set(captured_requests: list[dict]):
-    server = await _make_webhook_server(captured_requests)
-    try:
-        webhook = SimpleNamespace(url=str(server.make_url("/webhooks/123/token-abc")))
-        persona = Persona(name="Finn (Finance)")
-
-        sent = await DiscordPersonaSender._send_via_raw_http(
-            webhook=webhook,
-            persona=persona,
-            content="x",
-            channel_id=200,
-            reply_to_message_id=42,
-            thread_id=500,
+class TestBuildReplyButton:
+    @pytest.fixture
+    def context(self) -> ReplyContext:
+        return ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="hello world",
+            style="button",
         )
 
-        assert sent.channel_id == 500, "SentMessage.channel_id is the thread when thread_id is set"
-        assert captured_requests[0]["query"]["thread_id"] == "500"
-    finally:
-        await server.close()
+    def test_view_has_single_button(self, context: ReplyContext) -> None:
+        view = _build_reply_button(context)
+        assert len(view.children) == 1
+        assert isinstance(view.children[0], discord.ui.Button)
 
+    def test_button_is_link_style(self, context: ReplyContext) -> None:
+        """Link buttons don't fire interactions — no callback or persistent View needed."""
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.style == discord.ButtonStyle.link
 
-async def test_includes_avatar_url_when_set(captured_requests: list[dict]):
-    server = await _make_webhook_server(captured_requests)
-    try:
-        webhook = SimpleNamespace(url=str(server.make_url("/webhooks/123/token-abc")))
-        persona = Persona(name="Aksel", avatar_url="https://example.com/avatar.png")
+    def test_button_url_is_jump_link(self, context: ReplyContext) -> None:
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.url == "https://discord.com/channels/777/888/999"
 
-        await DiscordPersonaSender._send_via_raw_http(
-            webhook=webhook,
-            persona=persona,
-            content="x",
-            channel_id=200,
-            reply_to_message_id=42,
-            thread_id=None,
+    def test_button_label_includes_author_and_snippet(self, context: ReplyContext) -> None:
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.label == "↩ Replying to @alice: hello world"
+
+    def test_button_label_omits_colon_when_snippet_empty(self) -> None:
+        """Attachment-only / empty-content originals show just the author line."""
+        context = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="",
+            style="button",
         )
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.label == "↩ Replying to @alice"
 
-        assert captured_requests[0]["body"]["avatar_url"] == "https://example.com/avatar.png"
-    finally:
-        await server.close()
-
-
-async def test_omits_avatar_url_when_none(captured_requests: list[dict]):
-    server = await _make_webhook_server(captured_requests)
-    try:
-        webhook = SimpleNamespace(url=str(server.make_url("/webhooks/123/token-abc")))
-        persona = Persona(name="Aksel", avatar_url=None)
-
-        await DiscordPersonaSender._send_via_raw_http(
-            webhook=webhook,
-            persona=persona,
-            content="x",
-            channel_id=200,
-            reply_to_message_id=42,
-            thread_id=None,
+    def test_button_label_collapses_whitespace_in_snippet(self) -> None:
+        context = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="line one\nline two",
+            style="button",
         )
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.label is not None
+        assert "\n" not in button.label
+        assert "line one line two" in button.label
 
-        assert "avatar_url" not in captured_requests[0]["body"]
-    finally:
-        await server.close()
-
-
-async def test_raises_http_exception_on_error_status(captured_requests: list[dict]):
-    server = await _make_webhook_server(captured_requests, status=403)
-    try:
-        webhook = SimpleNamespace(url=str(server.make_url("/webhooks/123/token-abc")))
-        persona = Persona(name="Aksel")
-
-        with pytest.raises(discord.HTTPException):
-            await DiscordPersonaSender._send_via_raw_http(
-                webhook=webhook,
-                persona=persona,
-                content="x",
-                channel_id=200,
-                reply_to_message_id=42,
-                thread_id=None,
-            )
-    finally:
-        await server.close()
+    def test_button_label_truncated_to_80_chars(self) -> None:
+        context = ReplyContext(
+            message_id=999,
+            channel_id=888,
+            guild_id=777,
+            author_display_name="alice",
+            content_snippet="x" * 200,
+            style="button",
+        )
+        view = _build_reply_button(context)
+        button = view.children[0]
+        assert isinstance(button, discord.ui.Button)
+        assert button.label is not None
+        # Discord button label hard cap is 80; we enforce ≤ 80.
+        assert len(button.label) <= 80
+        assert button.label.endswith("…")
