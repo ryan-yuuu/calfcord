@@ -93,7 +93,19 @@ class TestLoadOrBootstrapState:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_DEFAULT_CHANNEL_ID", raising=False)
         with pytest.raises(BootstrapError, match="CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS"):
+            await _load_or_bootstrap_state(store, "echo")
+
+    async def test_missing_state_and_env_mentions_default_channel_id(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The fallback should be discoverable from the error message."""
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_DEFAULT_CHANNEL_ID", raising=False)
+        with pytest.raises(BootstrapError, match="DISCORD_DEFAULT_CHANNEL_ID"):
             await _load_or_bootstrap_state(store, "echo")
 
     async def test_empty_env_var_exits(
@@ -126,3 +138,62 @@ class TestLoadOrBootstrapState:
             state = await _load_or_bootstrap_state(store, "echo")
         assert state.channels == [42]
         assert any("ignoring" in r.message for r in caplog.records)
+
+    async def test_bootstrap_falls_back_to_default_channel_id(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the per-agent var is unset, DISCORD_DEFAULT_CHANNEL_ID seeds state."""
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "555")
+        state = await _load_or_bootstrap_state(store, "echo")
+        assert state.channels == [555]
+        assert store.path.exists()
+
+    async def test_bootstrap_default_channel_id_supports_comma_list(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parser is comma-aware so a multi-channel dev env works too."""
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "111, 222 ,333")
+        state = await _load_or_bootstrap_state(store, "echo")
+        assert state.channels == [111, 222, 333]
+
+    async def test_per_agent_env_var_wins_over_default_channel_id(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit per-agent intent beats shared dev fallback."""
+        monkeypatch.setenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", "111")
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "999")
+        state = await _load_or_bootstrap_state(store, "echo")
+        assert state.channels == [111]
+
+    async def test_default_channel_id_bootstrap_logs_source(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Log line names the env var actually used so reader knows the source."""
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "555")
+        with caplog.at_level(logging.WARNING):
+            await _load_or_bootstrap_state(store, "echo")
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("DISCORD_DEFAULT_CHANNEL_ID" in r.message for r in warnings)
+
+    async def test_empty_default_channel_id_exits(
+        self,
+        store: AgentStateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whitespace-only DISCORD_DEFAULT_CHANNEL_ID doesn't accidentally bootstrap."""
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", " , , ")
+        with pytest.raises(BootstrapError, match="parsed to zero channels"):
+            await _load_or_bootstrap_state(store, "echo")

@@ -25,8 +25,8 @@ from discord import app_commands
 
 from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.normalizer import SlashNormalizer
-from calfkit_organization.bridge.publisher import KafkaPublisher
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +38,12 @@ class SlashCommandManager:
         self,
         client: discord.Client,
         registry: AgentRegistry,
-        publisher: KafkaPublisher,
+        roundtrip: BridgeRoundTrip,
         slash_normalizer: SlashNormalizer,
     ) -> None:
         self._client = client
         self._registry = registry
-        self._publisher = publisher
+        self._roundtrip = roundtrip
         self._normalizer = slash_normalizer
         self._tree = app_commands.CommandTree(client)
 
@@ -102,7 +102,7 @@ class SlashCommandManager:
                 message_arg=message,
                 followup_message_id=followup.id,
             )
-            await self._publisher.publish(wire)
+            await self._roundtrip.handle(wire)
             logger.info(
                 "slash dispatched agent=%s interaction_id=%s followup_id=%s event_id=%s",
                 spec.agent_id,

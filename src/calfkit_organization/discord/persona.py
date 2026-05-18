@@ -30,12 +30,15 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import discord
 
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.settings import DiscordSettings
+
+if TYPE_CHECKING:
+    from calfkit_organization.bridge.wire import WireMessage
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +122,24 @@ class ReplyContext:
     content_snippet: str
     author_avatar_url: str | None = None
     style: ReplyStyle = "embed"
+
+    @classmethod
+    def from_wire(cls, wire: WireMessage, style: ReplyStyle = "button") -> Self:
+        """Build a :class:`ReplyContext` from a :class:`WireMessage`.
+
+        Used wherever an agent replies inline to the inbound event that
+        triggered it. The default ``style="button"`` matches the reply
+        rendering used across the project's agents.
+        """
+        return cls(
+            message_id=wire.message_id,
+            channel_id=wire.channel_id,
+            guild_id=wire.guild_id,
+            author_display_name=wire.author.display_name,
+            content_snippet=wire.content,
+            author_avatar_url=wire.author.avatar_url,
+            style=style,
+        )
 
 
 def _jump_url(reply_to: ReplyContext) -> str:

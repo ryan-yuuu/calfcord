@@ -284,7 +284,7 @@ wheels = [
 
 [[package]]
 name = "calfkit"
-version = "0.2.6"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -302,9 +302,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/13/6d/3a067e0e298ea3bd37d676198486882460fd194625dcb8d1fedf566ce8a2/calfkit-0.2.6.tar.gz", hash = "sha256:00d391ca2eeefba3b05e90b390e51356834834cd8a2bbbcb64f13428ba0372b2", size = 443675, upload-time = "2026-05-17T03:01:44.805Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/9b/bee5019e42a9c81d6b6a787c477a4d7f06f9d2436cb83880850ae9a1ad22/calfkit-0.3.0.tar.gz", hash = "sha256:db8273f1611212796bca5a9740b85d24c17606865f20739a67bcc334272dfa65", size = 448061, upload-time = "2026-05-18T07:09:37.922Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/a6/e087cf57f1157f6f8ceede680e2d2c8b0f7b758c1d17e2e16e260cc9b0b8/calfkit-0.2.6-py3-none-any.whl", hash = "sha256:cfd4818f0515bd67c5d6b2bcaa3ea8efe191d1a83e52cfd4064c33fc60129632", size = 561002, upload-time = "2026-05-17T03:01:42.403Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/83/63fe161fde2016d0ca546cbf563547d27876c9d98aec9ea345bec7996875/calfkit-0.3.0-py3-none-any.whl", hash = "sha256:bd9315c33a3a88ce08b31728fd1eb498bbdb66f0fd03fd679a3f04abbd43892b", size = 563505, upload-time = "2026-05-18T07:09:35.809Z" },
 ]
 
 [[package]]
@@ -327,7 +327,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "calfkit", specifier = ">=0.2.6" },
+    { name = "calfkit", specifier = ">=0.3.0" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },

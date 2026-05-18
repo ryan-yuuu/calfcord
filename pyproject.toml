@@ -5,7 +5,7 @@ description = "Multi-agent organization on Discord."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "calfkit>=0.2.6",
+    "calfkit>=0.3.0",
     "discord-py>=2.7.1",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",

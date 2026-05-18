@@ -55,6 +55,7 @@ _AGENTS_DIR_ENV = "CALFKIT_AGENTS_DIR"
 _STATE_DIR_ENV = "CALFKIT_STATE_DIR"
 _AGENTS_DIR_DEFAULT = "agents"
 _STATE_DIR_DEFAULT = "state/agents"
+_DEFAULT_CHANNEL_ID_ENV = "DISCORD_DEFAULT_CHANNEL_ID"
 
 
 class BootstrapError(RuntimeError):
@@ -123,28 +124,62 @@ async def _load_or_bootstrap_state(
     store: AgentStateStore,
     agent_id: str,
 ) -> AgentRuntimeState:
+    """Load the state file or bootstrap it from an env var.
+
+    Bootstrap source priority when the state file is absent:
+
+        1. ``CALFKIT_AGENT_<NAME>_BOOTSTRAP_CHANNELS`` — the per-agent
+           explicit-seed env var. Recommended for production where each
+           agent's channels are intentional.
+        2. ``DISCORD_DEFAULT_CHANNEL_ID`` — the shared example/dev channel
+           env var (also used by ``examples/`` scripts and ``agents/echo.py``).
+           Convenient for local smoke tests where a single channel is wired
+           up for every agent.
+
+    If both are unset and the state file does not exist, raises
+    :class:`BootstrapError` with a hint pointing to either var.
+    """
     env_var = bootstrap_env_var(agent_id)
     raw_env = os.getenv(env_var)
+    raw_default = os.getenv(_DEFAULT_CHANNEL_ID_ENV)
 
     try:
         state = await store.load()
     except FileNotFoundError as e:
-        if not raw_env:
+        if raw_env:
+            channels = _parse_channel_ids(raw_env, env_var=env_var)
+            if not channels:
+                raise BootstrapError(f"{env_var} is set but parsed to zero channels") from e
+            source = env_var
+            cleanup_hint = (
+                f"clear {env_var} after first boot to prevent accidental re-seed "
+                f"if the state file is later deleted"
+            )
+        elif raw_default:
+            channels = _parse_channel_ids(raw_default, env_var=_DEFAULT_CHANNEL_ID_ENV)
+            if not channels:
+                raise BootstrapError(
+                    f"{_DEFAULT_CHANNEL_ID_ENV} is set but parsed to zero channels"
+                ) from e
+            source = _DEFAULT_CHANNEL_ID_ENV
+            cleanup_hint = (
+                f"set {env_var}=<channel_ids> for explicit per-agent bootstrap; "
+                f"{_DEFAULT_CHANNEL_ID_ENV} is a shared dev fallback"
+            )
+        else:
             raise BootstrapError(
-                f"no state file at {store.path} and {env_var} is unset; "
-                f"set {env_var}=<comma,separated,channel,ids> to bootstrap."
+                f"no state file at {store.path}; set {env_var}=<comma,separated,channel,ids> "
+                f"or {_DEFAULT_CHANNEL_ID_ENV} to bootstrap."
             ) from e
-        channels = _parse_channel_ids(raw_env, env_var=env_var)
-        if not channels:
-            raise BootstrapError(f"{env_var} is set but parsed to zero channels") from e
+
         state = AgentRuntimeState(channels=channels)
         await store.save(state)
         logger.warning(
-            "bootstrapped state at %s with channels=%s — clear %s after first boot "
-            "to prevent accidental re-seed if the state file is later deleted",
+            "bootstrapped state at %s with channels=%s from %s — %s",
             store.path,
             channels,
-            env_var,
+            source,
+            cleanup_hint,
         )
         return state
 

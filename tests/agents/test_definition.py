@@ -75,6 +75,21 @@ class TestAgentDefinitionValidators:
         d = _make_definition(tools=["calendar", "email"])
         assert d.tools == ("calendar", "email")
 
+    def test_provider_defaults_to_none(self) -> None:
+        """Unset provider lets the factory's default win at build time."""
+        d = _make_definition()
+        assert d.provider is None
+
+    @pytest.mark.parametrize("provider", ["anthropic", "openai"])
+    def test_provider_accepts_supported_values(self, provider: str) -> None:
+        d = _make_definition(provider=provider)
+        assert d.provider == provider
+
+    @pytest.mark.parametrize("bad_provider", ["cohere", "Anthropic", "gpt", ""])
+    def test_provider_rejects_unsupported_values(self, bad_provider: str) -> None:
+        with pytest.raises(ValidationError, match="provider"):
+            _make_definition(provider=bad_provider)
+
     def test_model_dump_by_alias_uses_yaml_key(self) -> None:
         """Pin the YAML-facing contract: ``model_dump(by_alias=True)`` emits ``name``.
 

@@ -14,6 +14,9 @@ import pytest
 
 import discord
 
+from datetime import UTC, datetime
+
+from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.persona import (
     ReplyContext,
     _build_reply_button,
@@ -207,3 +210,69 @@ class TestBuildReplyButton:
         # Discord button label hard cap is 80; we enforce ≤ 80.
         assert len(button.label) <= 80
         assert button.label.endswith("…")
+
+
+class TestFromWire:
+    """``ReplyContext.from_wire`` is the canonical constructor for reply
+    rendering from an inbound bridge event. Pinning its mapping prevents
+    silent regressions when ``WireMessage`` or ``WireAuthor`` grow new
+    fields."""
+
+    @pytest.fixture
+    def wire(self) -> WireMessage:
+        return WireMessage(
+            event_id="evt-1",
+            kind="message",
+            message_id=12345,
+            channel_id=6789,
+            guild_id=4242,
+            content="hello world",
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+                avatar_url="https://cdn.discordapp.com/avatars/111/abc.png",
+            ),
+            created_at=datetime.now(UTC),
+        )
+
+    def test_maps_all_fields(self, wire: WireMessage) -> None:
+        ctx = ReplyContext.from_wire(wire)
+        assert ctx.message_id == wire.message_id
+        assert ctx.channel_id == wire.channel_id
+        assert ctx.guild_id == wire.guild_id
+        assert ctx.author_display_name == wire.author.display_name
+        assert ctx.content_snippet == wire.content
+        assert ctx.author_avatar_url == wire.author.avatar_url
+
+    def test_default_style_is_button(self, wire: WireMessage) -> None:
+        """The project's convention; matches echo and the new bridge handler."""
+        ctx = ReplyContext.from_wire(wire)
+        assert ctx.style == "button"
+
+    def test_style_argument_overrides_default(self, wire: WireMessage) -> None:
+        ctx = ReplyContext.from_wire(wire, style="embed")
+        assert ctx.style == "embed"
+
+    def test_no_author_avatar_propagates_none(self) -> None:
+        """When the bridge couldn't resolve an avatar, the reply context
+        also gets ``None`` so the renderer can omit the icon."""
+        wire = WireMessage(
+            event_id="evt-2",
+            kind="message",
+            message_id=12345,
+            channel_id=6789,
+            guild_id=4242,
+            content="hello",
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+                avatar_url=None,
+            ),
+            created_at=datetime.now(UTC),
+        )
+        ctx = ReplyContext.from_wire(wire)
+        assert ctx.author_avatar_url is None

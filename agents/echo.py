@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable
 from pathlib import Path
 
 from calfkit.client import Client
@@ -41,6 +40,7 @@ from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfkit_organization.agents.definition import parse_agent_md
+from calfkit_organization.agents.gates import make_addressable_gate, make_addressed_to_me_gate
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.persona import (
     DiscordPersonaSender,
@@ -51,54 +51,6 @@ from calfkit_organization.discord.persona import (
 from calfkit_organization.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
-
-
-def _make_addressable_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
-    """Build the not-from-self / not-from-unknown-bot gate, scoped to ``agent_id``.
-
-    Decision logic:
-        - author.agent_id == agent_id → reject (this agent's own persona;
-          prevents echo→echo loops).
-        - author.is_bot == True AND author.agent_id is None → reject. Covers
-          the bridge bot's direct messages and any third-party bots in the
-          guild that aren't registered agents.
-        - everything else → accept. Includes human users AND other agents'
-          recognized personas (so the echo agent can respond to peers if
-          they ever address it).
-    """
-
-    def _addressable(ctx: SessionRunContext) -> bool:
-        discord = ctx.deps.provided_deps.get("discord")
-        if discord is None:
-            return False
-        author = discord.get("author", {})
-        if author.get("agent_id") == agent_id:
-            return False
-        if author.get("is_bot", False) and not author.get("agent_id"):
-            return False
-        return True
-
-    return _addressable
-
-
-def _make_addressed_to_me_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
-    """Build the slash-addressing gate, scoped to ``agent_id``.
-
-    Decision table:
-        kind="message" → accept (no slash present means the agent is free to respond)
-        kind="slash", slash_target == agent_id → accept
-        kind="slash", slash_target != agent_id → reject (slash was for some other agent)
-    """
-
-    def _addressed_to_me(ctx: SessionRunContext) -> bool:
-        discord = ctx.deps.provided_deps.get("discord")
-        if discord is None:
-            return False
-        if discord.get("kind") == "slash":
-            return discord.get("slash_target") == agent_id
-        return True
-
-    return _addressed_to_me
 
 
 class EchoNode(BaseNodeDef):
@@ -125,15 +77,7 @@ class EchoNode(BaseNodeDef):
             persona=self._persona,
             channel_id=wire.channel_id,
             content=f"echo: {wire.content}",
-            reply_to=ReplyContext(
-                message_id=wire.message_id,
-                channel_id=wire.channel_id,
-                guild_id=wire.guild_id,
-                author_display_name=wire.author.display_name,
-                content_snippet=wire.content,
-                author_avatar_url=wire.author.avatar_url,
-                style=self._reply_style,
-            ),
+            reply_to=ReplyContext.from_wire(wire, style=self._reply_style),
         )
         logger.info(
             "echoed event_id=%s reply_to=%s reply_id=%s channel=%s",
@@ -177,7 +121,7 @@ async def _amain() -> None:
     settings = DiscordSettings()  # type: ignore[call-arg]
     channel_ids = _resolve_channel_ids()
     reply_style = _resolve_reply_style()
-    subscribe_topics = [f"discord.channel.{cid}" for cid in channel_ids]
+    subscribe_topics = [f"discord.channel.{cid}.in" for cid in channel_ids]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
     async with DiscordPersonaSender(settings) as persona_sender:
@@ -192,8 +136,8 @@ async def _amain() -> None:
             # AND-semantics: both gates must accept. Authorship check first so
             # we short-circuit on self/unknown-bot before doing content-based
             # addressed-to-me checks.
-            node.gate(_make_addressable_gate(definition.agent_id))
-            node.gate(_make_addressed_to_me_gate(definition.agent_id))
+            node.gate(make_addressable_gate(definition.agent_id))
+            node.gate(make_addressed_to_me_gate(definition.agent_id))
 
             worker = Worker(client, [node])
             logger.info(

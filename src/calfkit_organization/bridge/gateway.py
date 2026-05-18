@@ -1,7 +1,7 @@
 """Discord ingress gateway daemon and CLI entry point.
 
-Holds the long-lived gateway WebSocket, wires the slash command manager,
-publisher, and normalizers together, and exposes ``main()`` as the script
+Holds the long-lived gateway WebSocket, wires the slash command manager
+and the agent round-trip together, and exposes ``main()`` as the script
 entry point. Run via::
 
     uv run calfkit-bridge
@@ -9,6 +9,13 @@ entry point. Run via::
 The daemon depends on a running Kafka broker reachable at ``CALF_HOST_URL``
 (defaults to ``localhost``) and a Discord bot configured via the
 ``DISCORD_*`` environment variables (see ``.env.example``).
+
+The bridge process now does both halves of the Discord I/O:
+ingress (Discord → normalize → invoke agent over Kafka) and egress
+(agent reply → resolve persona → post via webhook). The named reply topic
+``discord.outbox`` binds the calfkit client's dispatcher so all agent
+ReturnCalls land in one place; :class:`BridgeRoundTrip` is the awaitable
+shim that pairs each ingress with its eventual reply.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import asyncio
 import logging
 import os
 import signal
+from collections import OrderedDict
 from pathlib import Path
 
 import discord
@@ -27,27 +35,30 @@ from calfkit_organization.bridge.normalizer import (
     SlashNormalizer,
     UnknownAgentMentionError,
 )
-from calfkit_organization.bridge.publisher import KafkaPublisher
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 from calfkit_organization.bridge.slash import SlashCommandManager
+from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
 
+_REPLY_TOPIC = "discord.outbox"
+_SEEN_MESSAGE_IDS_CAPACITY = 1024
+
 
 class DiscordIngressGateway:
-    """Long-lived gateway daemon. Translates Discord events into Kafka publishes."""
+    """Long-lived gateway daemon. Translates Discord events into agent invocations."""
 
     def __init__(
         self,
         settings: DiscordSettings,
-        calfkit_client: Client,
+        roundtrip: BridgeRoundTrip,
         registry: AgentRegistry,
     ) -> None:
         self._settings = settings
-        self._calfkit_client = calfkit_client
         self._registry = registry
-        self._publisher = KafkaPublisher(calfkit_client)
+        self._roundtrip = roundtrip
         self._client = _GatewayClient(self)
 
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
@@ -60,7 +71,7 @@ class DiscordIngressGateway:
         self._slash = SlashCommandManager(
             client=self._client,
             registry=registry,
-            publisher=self._publisher,
+            roundtrip=self._roundtrip,
             slash_normalizer=self._slash_normalizer,
         )
         # Native Discord slash commands are disabled. The bridge now uses
@@ -69,6 +80,14 @@ class DiscordIngressGateway:
         # remove any stale slash commands that earlier deploys registered.
         # To re-enable native slashes, uncomment the next line.
         # self._slash.register_all()
+
+        # Bounded LRU of Discord message ids we've already invoked an agent
+        # for. discord.py can redeliver MESSAGE_CREATE on gateway reconnect;
+        # without this guard we'd double-spend on LLM tokens and double-post
+        # to Discord. The bridge handles many channels but redelivery is
+        # bursty around reconnects, so 1024 entries covers any realistic
+        # window.
+        self._seen_message_ids: OrderedDict[int, None] = OrderedDict()
 
     async def start(self) -> None:
         """Connect to the Discord gateway. Blocks until cancelled or disconnect."""
@@ -82,7 +101,6 @@ class DiscordIngressGateway:
         """Disconnect cleanly. Idempotent."""
         if not self._client.is_closed():
             await self._client.close()
-        await self._publisher.close()
 
     async def _on_ready(self) -> None:
         bot_user = self._client.user
@@ -116,6 +134,9 @@ class DiscordIngressGateway:
             and message.webhook_id is None
         ):
             return
+        if self._already_seen(message.id):
+            logger.debug("ignoring redelivered message id=%s", message.id)
+            return
         try:
             wire = self._message_normalizer.normalize(message)
         except UnknownAgentMentionError as err:
@@ -125,9 +146,23 @@ class DiscordIngressGateway:
             logger.exception("failed to normalize message id=%s", message.id)
             return
         try:
-            await self._publisher.publish(wire)
+            await self._roundtrip.handle(wire)
         except Exception:
-            logger.exception("failed to publish message id=%s", message.id)
+            logger.exception("round-trip failed for event_id=%s", wire.event_id)
+
+    def _already_seen(self, message_id: int) -> bool:
+        """Bounded-LRU dedupe of Discord ``message.id``.
+
+        Returns ``True`` if the id has been seen recently. On miss, records
+        it and evicts the oldest entry when at capacity.
+        """
+        if message_id in self._seen_message_ids:
+            self._seen_message_ids.move_to_end(message_id)
+            return True
+        self._seen_message_ids[message_id] = None
+        if len(self._seen_message_ids) > _SEEN_MESSAGE_IDS_CAPACITY:
+            self._seen_message_ids.popitem(last=False)
+        return False
 
     async def _reply_unknown_mention(
         self,
@@ -195,32 +230,42 @@ def main() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
     async def _run() -> None:
-        async with Client.connect(server_urls) as calfkit_client:
-            # Start the broker eagerly so the reply dispatcher's subscriber is active.
-            # (Client._invoke would also lazy-start on first call, but we want the
-            # dispatcher's consumer group reachable from boot for symmetry.)
-            if not calfkit_client.broker._connection:
-                await calfkit_client.broker.start()
+        # The bridge owns its own persona sender (separate from agent processes')
+        # because it posts replies on behalf of every agent. The calfkit client
+        # connects with a named reply topic so the dispatcher hears every
+        # agent ReturnCall in one place.
+        async with DiscordPersonaSender(settings) as persona_sender:
+            async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as calfkit_client:
+                # Start the broker eagerly so the reply dispatcher's subscriber
+                # is active. Client._invoke would also lazy-start on first call,
+                # but we want the dispatcher's consumer group reachable from boot.
+                if not calfkit_client.broker._connection:
+                    await calfkit_client.broker.start()
 
-            gateway = DiscordIngressGateway(settings, calfkit_client, registry)
-
-            stop = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, stop.set)
-
-            gateway_task = asyncio.create_task(gateway.start())
-            stop_task = asyncio.create_task(stop.wait())
-            try:
-                await asyncio.wait(
-                    {gateway_task, stop_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+                roundtrip = BridgeRoundTrip(
+                    calfkit_client=calfkit_client,
+                    registry=registry,
+                    persona_sender=persona_sender,
                 )
-            finally:
-                for t in (gateway_task, stop_task):
-                    if not t.done():
-                        t.cancel()
-                await gateway.close()
+                gateway = DiscordIngressGateway(settings, roundtrip, registry)
+
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, stop.set)
+
+                gateway_task = asyncio.create_task(gateway.start())
+                stop_task = asyncio.create_task(stop.wait())
+                try:
+                    await asyncio.wait(
+                        {gateway_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for t in (gateway_task, stop_task):
+                        if not t.done():
+                            t.cancel()
+                    await gateway.close()
 
     asyncio.run(_run())
 

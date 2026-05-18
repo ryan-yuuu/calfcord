@@ -12,7 +12,8 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
     display_name: "Aksel (Scheduler)"
     description: "Calendar mechanics; book and prep meetings"
     avatar_url: null
-    model: opus
+    provider: anthropic
+    model: claude-sonnet-4-5
     tools: [calendar, email]
     ---
 
@@ -32,11 +33,20 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 import frontmatter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _NAME_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
+
+Provider = Literal["anthropic", "openai"]
+"""Supported LLM provider tags for the ``provider`` frontmatter field.
+
+The factory maps each provider to a concrete model-client class:
+    - ``"anthropic"`` → :class:`calfkit.AnthropicModelClient`
+    - ``"openai"`` → :class:`calfkit.OpenAIModelClient`
+"""
 
 
 class AgentDefinition(BaseModel):
@@ -54,6 +64,7 @@ class AgentDefinition(BaseModel):
     display_name: str
     description: str
     avatar_url: str | None = None
+    provider: Provider | None = None
     model: str | None = None
     tools: tuple[str, ...] = ()
     system_prompt: str
