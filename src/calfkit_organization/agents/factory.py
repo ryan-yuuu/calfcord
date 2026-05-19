@@ -8,6 +8,18 @@ can resolve the responding agent's persona from
 ``NodeResult.emitter_node_id`` without any application-level identity
 stamping.
 
+Two public entry points:
+
+* :meth:`AgentFactory.build_node` returns a bare :class:`Agent`. The
+  ``calfkit-agent`` runner uses this in both single-agent and all-agents
+  modes — the runner constructs the :class:`Worker` itself so it can pack
+  one or many nodes into a single Worker depending on invocation.
+* :meth:`AgentFactory.build` is a thin convenience that wraps
+  :meth:`build_node` in a one-node :class:`Worker`. Kept for callers that
+  want a complete Worker without assembling it themselves (and for the
+  existing ``test_factory.py`` suite); the in-tree runner does not use
+  it.
+
 The factory dispatches on :attr:`AgentDefinition.provider` to choose between
 :class:`calfkit.AnthropicModelClient` and :class:`calfkit.OpenAIModelClient`.
 Each provider has a default model name baked in (see
@@ -191,7 +203,33 @@ class AgentFactory:
         state: AgentRuntimeState,
         store: AgentStateStore,
     ) -> Worker:
-        """Build a :class:`Worker` configured for ``definition`` and ``state``.
+        """Build a single-agent :class:`Worker`.
+
+        Thin convenience wrapper around :meth:`build_node` for callers
+        that want a complete one-node Worker without assembling it
+        themselves. The in-tree ``calfkit-agent`` runner does not use
+        this — it calls :meth:`build_node` directly in both single-agent
+        and all-agents modes so it can pack one or many nodes into a
+        single Worker.
+
+        Raises:
+            ValueError: If ``state.channels`` is empty, or if the resolved
+                provider isn't one of :data:`_PROVIDER_DEFAULT_MODELS`.
+        """
+        return Worker(self._calfkit_client, [self.build_node(definition, state, store)])
+
+    def build_node(
+        self,
+        definition: AgentDefinition,
+        state: AgentRuntimeState,
+        store: AgentStateStore,
+    ) -> Agent:
+        """Build one :class:`Agent` node from ``definition`` and ``state``.
+
+        Use this when assembling several agents into a single :class:`Worker`
+        (multi-node co-tenancy). Each node gets its own Kafka consumer group
+        keyed on its ``node_id``, so co-tenant nodes do not contend for
+        partitions.
 
         Raises:
             ValueError: If ``state.channels`` is empty, or if the resolved
@@ -242,7 +280,7 @@ class AgentFactory:
         # not yet wired (see module docstring).
         del store
 
-        return Worker(self._calfkit_client, [agent])
+        return agent
 
     def _resolve_provider(self, definition: AgentDefinition) -> Provider:
         return resolve_provider(definition, default_provider=self._default_provider)

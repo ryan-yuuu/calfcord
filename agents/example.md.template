@@ -1,0 +1,101 @@
+---
+# ============================================================================
+# agents/<name>.md — full schema reference
+# ============================================================================
+#
+# This file is a TEMPLATE, not a live agent. The bridge's agent loader only
+# picks up files ending in ".md", so this ".md.template" file is ignored on
+# boot. To create a real agent, copy this file to "agents/<your-name>.md"
+# and edit the fields below.
+#
+# IMPORTANT — field names are snake_case (e.g. `thinking_effort`), even
+# though the Discord slash command uses kebab-case (`/thinking-effort`).
+# The `extra="forbid"` validator rejects misspelled keys at boot time so
+# typos surface immediately rather than silently falling back to defaults.
+#
+# Field-ordering note: when the `/thinking-effort` slash rewrites this
+# file, python-frontmatter dumps through PyYAML's safe_dump and keys end
+# up alphabetized. Comments are NOT preserved on round-trip. Treat the
+# comments in this template as documentation, not as something that
+# survives in live agent files.
+
+# ----------------------------------------------------------------------------
+# Identity (all four required; immutable after first deploy — the slash
+# command and channel routing both index by these).
+# ----------------------------------------------------------------------------
+
+# Internal identifier. Must match the filename stem (so `name: scribe`
+# means the file is `agents/scribe.md`). Format: [a-z0-9_-]{1,32}.
+name: example
+
+# Discord slash command. Must start with `/`. The bridge currently uses
+# @<name> text-prefix invocation by default and only registers
+# /thinking-effort; per-agent invocation slashes (this field's value)
+# are wired in code but disabled.
+slash: /example
+
+# What Discord users see as the bot's name on this agent's webhook
+# replies. 1-80 chars. "Clyde" is rejected by Discord webhooks.
+display_name: Example
+
+# Short blurb shown in Discord's slash-command picker. 1-100 chars.
+description: An example agent demonstrating the .md frontmatter schema.
+
+# ----------------------------------------------------------------------------
+# Appearance (optional)
+# ----------------------------------------------------------------------------
+
+# Avatar URL for the persona webhook reply. `null` or omitted means
+# Discord's default avatar.
+avatar_url: https://api.dicebear.com/9.x/glass/png?seed=example
+
+# ----------------------------------------------------------------------------
+# LLM (optional — see CALFKIT_AGENT_DEFAULT_PROVIDER / _DEFAULT_MODEL
+# env vars and DEFAULT_PROVIDER in agents/factory.py for fallbacks)
+# ----------------------------------------------------------------------------
+
+# Which provider's model client to construct. One of: "anthropic", "openai".
+provider: anthropic
+
+# Provider-specific model name. Examples: "claude-sonnet-4-5",
+# "claude-opus-4-7", "gpt-5-mini", "gpt-5-nano". Omit to use the
+# provider's project default.
+model: claude-sonnet-4-5
+
+# ----------------------------------------------------------------------------
+# Tools (optional — declared for future use; not wired in v1)
+# ----------------------------------------------------------------------------
+
+# List of tool names. Currently logged as a warning and otherwise ignored.
+tools: []
+
+# ----------------------------------------------------------------------------
+# Thinking effort (optional)
+# ----------------------------------------------------------------------------
+
+# Operator-tunable reasoning/thinking-budget tier. One of:
+#
+#   none   - extended thinking disabled
+#   low    - Anthropic budget=4000  | OpenAI reasoning_effort=minimal
+#   medium - Anthropic budget=10000 | OpenAI reasoning_effort=low
+#   high   - Anthropic budget=31999 | OpenAI reasoning_effort=medium
+#   xhigh  - Anthropic budget=48000 | OpenAI reasoning_effort=high
+#   max    - Anthropic budget=63999 | OpenAI reasoning_effort=high
+#
+# Omit the field entirely to skip the override (the agent uses whatever
+# the model client / provider defaults to). Setting it to "none" is
+# explicit — the operator chose to disable extended thinking.
+#
+# The /thinking-effort Discord slash command rewrites this field at
+# runtime. Slash and @-mention paths pick up the new value on the next
+# message; ambient channel messages need an agent restart to see it
+# (the tier is baked into the calfkit Agent constructor at agent boot).
+thinking_effort: medium
+---
+
+You are an example agent. The body of this .md file (everything after the
+closing `---` of the frontmatter) is the system prompt fed verbatim to the
+LLM on every run. Nothing in here is templated or substituted.
+
+Be concise, helpful, and replace this body with the personality and
+instructions you want the LLM to embody.

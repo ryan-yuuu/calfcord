@@ -12,6 +12,13 @@ runtime startup so this file and the bridge's registry cannot drift. The
 system-prompt body of ``echo.md`` is unused here — this runtime echoes
 content directly without invoking an LLM.
 
+**Do not run this script alongside ``calfkit-agent`` (all-mode).** The
+all-agents runner will spin up a factory-built ``echo`` node for
+``agents/echo.md`` using ``group_id=echo``; this script registers the same
+consumer group for the same channels. Running both at once causes the two
+processes to contend for the same Kafka partitions. Pick one runtime per
+environment: this script *or* the all-mode runner.
+
 Configuration (environment variables):
 
     DISCORD_BOT_TOKEN              required — REST access for persona sends
