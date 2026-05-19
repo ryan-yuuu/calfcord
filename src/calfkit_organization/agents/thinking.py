@@ -6,7 +6,7 @@ Two consumers share this mapper:
   declared ``thinking_effort`` from ``agents/<name>.md`` into the calfkit
   ``Agent`` constructor at agent boot (tier 2). This is the effort that
   applies to ambient messages.
-* :class:`calfkit_organization.bridge.roundtrip.BridgeRoundTrip` — forwards
+* :class:`calfkit_organization.bridge.ingress.BridgeIngress` — forwards
   the same effort as a per-call override (tier 3) on slash invocations
   and ``@<agent_id>`` mentions, so a runtime ``/thinking-effort`` change
   takes effect on the next message without restarting the agent process.

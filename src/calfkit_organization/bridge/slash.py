@@ -7,7 +7,7 @@ can be registered:
   registered by :meth:`register_thinking_effort`. Rewrites the
   ``thinking_effort`` field of the agent's ``.md`` frontmatter via
   :meth:`AgentRegistry.set_thinking_effort`, and swaps the in-memory
-  :class:`AgentDefinition` in the registry so the next round-trip picks
+  :class:`AgentDefinition` in the registry so the next invocation picks
   up the new value. The frontmatter is validated **before** the disk
   write so a malformed ``.md`` surfaces immediately rather than at next
   agent boot. Authorization is restricted to
@@ -17,9 +17,11 @@ can be registered:
   ``@<agent_id>`` text-prefix invocation, but the builder is preserved
   here for future use. When enabled, dispatch defers the interaction,
   posts a followup as the reply anchor, normalizes to a
-  :class:`WireMessage`, and hands off to :class:`BridgeRoundTrip` —
-  whose calfkit reply dispatcher resolves the response within the 15
-  minute followup window.
+  :class:`WireMessage`, and hands off to :class:`BridgeIngress` for
+  fire-and-forget publication. The agent's reply is posted later by
+  the outbox consumer, not by this callback — so the 15-minute Discord
+  followup window is no longer the LLM's deadline (the followup echo
+  is posted before the LLM runs; the reply is posted via webhook).
 """
 
 from __future__ import annotations
@@ -31,9 +33,9 @@ import discord
 from discord import app_commands
 
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
+from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +50,14 @@ class SlashCommandManager:
         self,
         client: discord.Client,
         registry: AgentRegistry,
-        roundtrip: BridgeRoundTrip,
+        ingress: BridgeIngress,
         slash_normalizer: SlashNormalizer,
         *,
         owner_user_id: int | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
-        self._roundtrip = roundtrip
+        self._ingress = ingress
         self._normalizer = slash_normalizer
         self._owner_user_id = owner_user_id
         self._tree = app_commands.CommandTree(client)
@@ -251,7 +253,7 @@ class SlashCommandManager:
                 message_arg=message,
                 followup_message_id=followup.id,
             )
-            await self._roundtrip.handle(wire)
+            await self._ingress.handle(wire)
             logger.info(
                 "slash dispatched agent=%s interaction_id=%s followup_id=%s event_id=%s",
                 spec.agent_id,

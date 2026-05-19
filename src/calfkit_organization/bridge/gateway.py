@@ -1,8 +1,8 @@
 """Discord ingress gateway daemon and CLI entry point.
 
 Holds the long-lived gateway WebSocket, wires the slash command manager
-and the agent round-trip together, and exposes ``main()`` as the script
-entry point. Run via::
+and the agent ingress publisher together, and exposes ``main()`` as the
+script entry point. Run via::
 
     uv run calfkit-bridge
 
@@ -10,12 +10,22 @@ The daemon depends on a running Kafka broker reachable at ``CALF_HOST_URL``
 (defaults to ``localhost``) and a Discord bot configured via the
 ``DISCORD_*`` environment variables (see ``.env.example``).
 
-The bridge process now does both halves of the Discord I/O:
-ingress (Discord → normalize → invoke agent over Kafka) and egress
-(agent reply → resolve persona → post via webhook). The named reply topic
-``discord.outbox`` binds the calfkit client's dispatcher so all agent
-ReturnCalls land in one place; :class:`BridgeRoundTrip` is the awaitable
-shim that pairs each ingress with its eventual reply.
+The bridge process does both halves of the Discord I/O:
+
+* **Ingress** — Discord events normalize into :class:`WireMessage` and
+  fire-and-forget through :class:`BridgeIngress` onto Kafka.
+* **Egress** — every agent reply landing on ``discord.outbox`` is posted
+  to Discord by a long-lived calfkit consumer
+  (:func:`build_outbox_consumer`). Replies are no longer awaited
+  inline; this is what lets multiple agents respond to the same
+  inbound event without losing all but the fastest reply (calfkit's
+  reply dispatcher dedupes by ``correlation_id``, so the request/reply
+  shape we used before was inherently single-agent).
+
+The consumer's handler is registered on the same calfkit
+:class:`~calfkit.Client` connection that the ingress publishes through.
+We deliberately register handlers without calling
+:meth:`Worker.run` — see the rationale at the call site in :func:`main`.
 """
 
 from __future__ import annotations
@@ -29,14 +39,17 @@ from pathlib import Path
 
 import discord
 from calfkit.client import Client
+from calfkit.worker import Worker
 
+from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.normalizer import (
     MessageNormalizer,
     SlashNormalizer,
     UnknownAgentMentionError,
 )
+from calfkit_organization.bridge.outbox import build_outbox_consumer
+from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 from calfkit_organization.bridge.slash import SlashCommandManager
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.settings import DiscordSettings
@@ -53,12 +66,12 @@ class DiscordIngressGateway:
     def __init__(
         self,
         settings: DiscordSettings,
-        roundtrip: BridgeRoundTrip,
+        ingress: BridgeIngress,
         registry: AgentRegistry,
     ) -> None:
         self._settings = settings
         self._registry = registry
-        self._roundtrip = roundtrip
+        self._ingress = ingress
         self._client = _GatewayClient(self)
 
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
@@ -71,7 +84,7 @@ class DiscordIngressGateway:
         self._slash = SlashCommandManager(
             client=self._client,
             registry=registry,
-            roundtrip=self._roundtrip,
+            ingress=self._ingress,
             slash_normalizer=self._slash_normalizer,
             owner_user_id=settings.owner_user_id,
         )
@@ -148,9 +161,9 @@ class DiscordIngressGateway:
             logger.exception("failed to normalize message id=%s", message.id)
             return
         try:
-            await self._roundtrip.handle(wire)
+            await self._ingress.handle(wire)
         except Exception:
-            logger.exception("round-trip failed for event_id=%s", wire.event_id)
+            logger.exception("ingress publish failed for event_id=%s", wire.event_id)
 
     def _already_seen(self, message_id: int) -> bool:
         """Bounded-LRU dedupe of Discord ``message.id``.
@@ -234,22 +247,51 @@ def main() -> None:
     async def _run() -> None:
         # The bridge owns its own persona sender (separate from agent processes')
         # because it posts replies on behalf of every agent. The calfkit client
-        # connects with a named reply topic so the dispatcher hears every
-        # agent ReturnCall in one place.
+        # connects with a named reply topic so calfkit's reply dispatcher hears
+        # every agent ReturnCall — even though we no longer await its futures
+        # (the outbox consumer below handles every reply), the dispatcher's
+        # subscriber is still registered as a side-effect of Client.connect.
+        # Its "no pending future" WARNINGs on every reply are expected; see
+        # calfkit_organization.bridge.outbox.
         async with DiscordPersonaSender(settings) as persona_sender:
             async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as calfkit_client:
-                # Start the broker eagerly so the reply dispatcher's subscriber
-                # is active. Client._invoke would also lazy-start on first call,
-                # but we want the dispatcher's consumer group reachable from boot.
-                if not calfkit_client.broker._connection:
-                    await calfkit_client.broker.start()
-
-                roundtrip = BridgeRoundTrip(
+                pending_wires = PendingWires()
+                ingress = BridgeIngress(
                     calfkit_client=calfkit_client,
                     registry=registry,
-                    persona_sender=persona_sender,
+                    pending_wires=pending_wires,
                 )
-                gateway = DiscordIngressGateway(settings, roundtrip, registry)
+                consumer_node = build_outbox_consumer(
+                    persona_sender=persona_sender,
+                    registry=registry,
+                    pending_wires=pending_wires,
+                )
+
+                # Register the consumer's handler on the broker *before*
+                # broker.start() so its consumer group joins ahead of the
+                # gateway accepting Discord events. Otherwise an agent reply
+                # arriving in the brief window after publish but before the
+                # consumer-group has joined would be missed (subscribers
+                # default to auto_offset_reset="latest").
+                #
+                # We use Worker only for handler registration — not Worker.run.
+                # Calling Worker.run would (a) call register_handlers again
+                # (which errors on the second call), and (b) start an inner
+                # FastStream serve loop whose signal handling overlaps with
+                # the loop we install below. broker.start() activates every
+                # registered subscriber on its own, which is what we need.
+                worker = Worker(calfkit_client, [consumer_node])
+                worker.register_handlers()
+                # ``broker.running`` is the public-ish state flag faststream
+                # sets True at the end of start() and False in stop(). Guarding
+                # on it (rather than calling start() unconditionally) matters
+                # because faststream's ``KafkaSubscriber.start`` is *not*
+                # idempotent — a second call would build a fresh aiokafka
+                # consumer, drop the previous reference, and re-subscribe.
+                if not calfkit_client.broker.running:
+                    await calfkit_client.broker.start()
+
+                gateway = DiscordIngressGateway(settings, ingress, registry)
 
                 stop = asyncio.Event()
                 loop = asyncio.get_running_loop()

@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, MagicMock
 import frontmatter
 import pytest
 
+from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 from calfkit_organization.bridge.slash import (
     _THINKING_EFFORT_COMMAND_NAME,
     SlashCommandManager,
@@ -82,7 +82,7 @@ def manager(agents_dir: Path) -> SlashCommandManager:
     return SlashCommandManager(
         client=_fake_discord_client(),
         registry=registry,
-        roundtrip=MagicMock(spec=BridgeRoundTrip),
+        ingress=MagicMock(spec=BridgeIngress),
         slash_normalizer=MagicMock(),
         owner_user_id=_OWNER_USER_ID,
     )
@@ -111,7 +111,7 @@ class TestAuthorization:
         manager = SlashCommandManager(
             client=_fake_discord_client(),
             registry=registry,
-            roundtrip=MagicMock(spec=BridgeRoundTrip),
+            ingress=MagicMock(spec=BridgeIngress),
             slash_normalizer=MagicMock(),
             owner_user_id=None,
         )
@@ -150,7 +150,7 @@ class TestPersistence:
         manager = SlashCommandManager(
             client=_fake_discord_client(),
             registry=registry,
-            roundtrip=MagicMock(spec=BridgeRoundTrip),
+            ingress=MagicMock(spec=BridgeIngress),
             slash_normalizer=MagicMock(),
             owner_user_id=_OWNER_USER_ID,
         )
