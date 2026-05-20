@@ -39,11 +39,11 @@ import asyncio
 import logging
 
 import discord
-
 from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
 
+from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireMessage
@@ -99,52 +99,45 @@ async def private_chat(
     target_agent_id: str,
     content: str,
 ) -> str:
-    """Send a private message to another agent and return their reply.
+    """Send a private message to another agent and get their reply.
+
+    Use this to collaborate one-on-one with a peer agent — delegate a
+    sub-task, ask a focused question, or get input only they can
+    provide. The exchange is also posted to a shared audit channel so
+    userss observing the organization can see agents collaborate.
+
+    The peer receives ``content`` as a fresh user prompt and does not
+    see your prior conversations. Make the message self-contained:
+    include any context, constraints, or examples the peer needs to
+    answer well.
 
     Args:
-        ctx: Injected by calfkit's tool dispatch. Carries the caller's
-            ``agent_name`` (set from the ``x-calf-emitter`` Kafka header)
-            and ``deps.provided_deps["discord"]`` (the calling agent's
-            originating wire).
-        target_agent_id: ID of the agent to message. Must exist in the
-            registry; must differ from the caller.
-        content: The message body. Sent to the target as its new
-            ``user_prompt`` — the target's conversation history does not
-            include the caller's prior context.
+        target_agent_id: The peer agent's id (e.g. ``"scribe"``). Must
+            be a registered agent and must not be your own id.
+        content: The message text to send to the peer.
 
     Returns:
-        The target agent's textual response. Empty string if the target
-        produced no text output.
+        The peer's text reply. May be empty if the peer produced no output.
 
-    Behavior on operational issues (returned as an error string the LLM
-    can read, so the caller can adapt rather than aborting the whole turn —
-    raising would never reach the calling agent because the tool's
-    ``ReturnCall`` would not fire, leaving the caller to wait on its own
-    execute timeout):
-        - Unknown ``target_agent_id`` → ``"error: unknown agent ..."``
-        - ``caller == target`` → ``"error: ... cannot privately chat
-          with itself"``
-        - Target did not reply within timeout → ``"error: target
-          ... did not reply within Ns"``
+        On operational issues the tool returns an error message
+        starting with ``error:`` so you can adapt (retry, pick a
+        different agent, or fall back). Possible errors:
 
-    Raises:
-        RuntimeError: if :func:`init` was not called, or the tool is
-            invoked without a discoverable caller / originating wire.
-            These represent infrastructure problems, not LLM input errors,
-            and are not catchable by the calling LLM.
+        * ``error: unknown agent '<name>'; known agents: ...`` —
+          ``target_agent_id`` is not registered. Fix the id and retry.
+        * ``error: agent '<self>' cannot privately chat with itself`` —
+          pick a different agent.
+        * ``error: target '<name>' did not reply within Ns`` — the peer
+          did not respond in time. Try again or pick another agent.
     """
     if _client is None or _persona_sender is None or _resolver is None or _registry is None:
-        raise RuntimeError(
-            "private_chat tool not initialized; the calfkit-tools runner must call init() at startup"
-        )
+        raise RuntimeError("private_chat tool not initialized; the calfkit-tools runner must call init() at startup")
 
     caller_agent_id = ctx.agent_name
     if caller_agent_id is None:
         # ctx.agent_name is set from the inbound x-calf-emitter header.
         # If it's missing, calfkit's dispatch was bypassed somehow.
-        raise RuntimeError(
-            "private_chat invoked without emitter_node_id; cannot identify caller"
-        )
+        raise RuntimeError("private_chat invoked without emitter_node_id; cannot identify caller")
 
     if caller_agent_id == target_agent_id:
         return f"error: agent {caller_agent_id!r} cannot privately chat with itself"
@@ -160,9 +153,7 @@ async def private_chat(
         # tools). A missing registry entry is an infrastructure bug, not LLM
         # input — raise so it surfaces in logs rather than silently degrading
         # the projection to no-persona.
-        raise RuntimeError(
-            f"caller {caller_agent_id!r} is not in the registry; cannot resolve persona"
-        )
+        raise RuntimeError(f"caller {caller_agent_id!r} is not in the registry; cannot resolve persona")
 
     incoming_wire_dict = ctx.deps.provided_deps.get("discord")
     if not isinstance(incoming_wire_dict, dict):
@@ -222,6 +213,7 @@ async def private_chat(
             },
             output_type=str,
             timeout=_timeout_seconds,
+            temp_instructions=build_temp_instructions(_registry, target_agent_id),
         )
     except asyncio.TimeoutError:
         # Returning as a string (rather than raising) is deliberate: if we
@@ -235,10 +227,7 @@ async def private_chat(
             target_topic,
             _timeout_seconds,
         )
-        return (
-            f"error: target {target_agent_id!r} did not reply within "
-            f"{_timeout_seconds:.0f}s"
-        )
+        return f"error: target {target_agent_id!r} did not reply within {_timeout_seconds:.0f}s"
     response_text = result.output if result.output is not None else ""
 
     await _post_projection(

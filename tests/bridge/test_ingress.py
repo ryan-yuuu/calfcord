@@ -332,3 +332,65 @@ class TestModelSettings:
         assert client.invoke_node.call_args.kwargs["model_settings"] == {
             "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
         }
+
+
+class TestTempInstructions:
+    """Per-call ``temp_instructions`` carries the peer roster for A2A-enabled
+    targets so the LLM knows which peers it can call via ``private_chat``."""
+
+    async def test_no_instructions_when_target_lacks_private_chat(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Default ``_registry()`` agents have no tools; no roster injected."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire(slash_target="scheduler"))
+        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+
+    async def test_no_instructions_for_ambient_messages(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Ambient (no slash_target) reaches every channel subscriber via the
+        same envelope, so a per-target roster doesn't apply. Skip."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire(slash_target=None, kind="message"))
+        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+
+    async def test_instructions_injected_when_target_has_private_chat(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Target with ``private_chat`` in tools sees the peer roster as
+        temp_instructions on this call. Built from the registry per-call so
+        a future hot-add reaches the next invocation immediately."""
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    slash="/scheduler",
+                    display_name="Aksel (Scheduler)",
+                    description="Calendar.",
+                    provider="anthropic",
+                    tools=("private_chat",),
+                    system_prompt="x",
+                ),
+                AgentDefinition(
+                    agent_id="scribe",
+                    slash="/scribe",
+                    display_name="Scribe",
+                    description="Notes.",
+                    provider="openai",
+                    system_prompt="x",
+                ),
+            ]
+        )
+        ingress = BridgeIngress(client, registry, pending_wires)
+        await ingress.handle(_wire(slash_target="scheduler"))
+        instructions = client.invoke_node.call_args.kwargs["temp_instructions"]
+        assert instructions is not None
+        assert "scribe" in instructions
+        assert "scheduler" not in instructions  # self excluded

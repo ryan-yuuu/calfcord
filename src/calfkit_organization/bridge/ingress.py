@@ -36,6 +36,7 @@ from calfkit.client import Client
 
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
+from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
@@ -99,6 +100,7 @@ class BridgeIngress:
         different consumer group, so the actual reply is still observed.
         """
         model_settings = self._resolve_model_settings(wire)
+        temp_instructions = self._resolve_temp_instructions(wire)
         self._pending_wires.put(wire.event_id, wire)
         try:
             handle = await self._client.invoke_node(
@@ -108,6 +110,7 @@ class BridgeIngress:
                 deps={"discord": wire.model_dump(mode="json")},
                 output_type=str,
                 model_settings=model_settings,
+                temp_instructions=temp_instructions,
             )
         except Exception:
             # Publish failed; the agent will not run, so no reply will
@@ -121,6 +124,24 @@ class BridgeIngress:
             raise
 
         handle._future.cancel()
+
+    def _resolve_temp_instructions(self, wire: WireMessage) -> str | None:
+        """Compute the per-call ``temp_instructions`` for ``wire``.
+
+        Only returns content for slash invocations (where we know exactly
+        which agent will pick the call up). For ambient channel messages
+        the same envelope reaches every subscriber, so we can't tailor a
+        per-target roster — those agents fall back to the reactive error
+        path on ``private_chat`` if they reach for it.
+
+        Reads the registry on every call so a future hot-add mechanism
+        (the registry itself doesn't support hot-add yet, but this code
+        path is ready when it does) takes effect immediately.
+        """
+        target = wire.slash_target
+        if target is None:
+            return None
+        return build_temp_instructions(self._registry, target)
 
     def _resolve_model_settings(self, wire: WireMessage) -> dict[str, Any] | None:
         """Compute per-call ``model_settings`` for ``wire``, or ``None``.

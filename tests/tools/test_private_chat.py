@@ -75,15 +75,21 @@ def _ctx(*, caller: str = "alice", wire: WireMessage | None = None) -> ToolConte
     )
 
 
-def _agent(agent_id: str) -> AgentDefinition:
+def _agent(agent_id: str, *, tools: tuple[str, ...] = ()) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
         slash=f"/{agent_id}",
         display_name=f"{agent_id.title()} Bot",
         description="test",
         avatar_url=f"https://example.com/{agent_id}.png",
+        tools=tools,
         system_prompt="x",
     )
+
+
+# Test below uses ``_agent_with_tools`` as an alias for ``_agent(..., tools=...)``
+# to keep the call sites readable when tools matter.
+_agent_with_tools = _agent
 
 
 @pytest.fixture
@@ -194,6 +200,32 @@ class TestHappyPath:
         deps["client"].execute_node.return_value = _result("ok")
         await pc.private_chat(_ctx(), "bob", "x")
         assert deps["client"].execute_node.await_args.kwargs["timeout"] == 30.0
+
+    async def test_passes_temp_instructions_for_target(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """When invoking the target, the tool injects the peer-roster
+        temp_instructions so the target (if A2A-enabled itself) sees who
+        else it can chain-call. Built from the registry per-call so a
+        hot-added agent reaches the next invocation immediately."""
+        # Re-wire registry so bob declares private_chat (so a roster gets
+        # built) and there's a third agent for it to see.
+        deps["registry"].by_id.side_effect = lambda agent_id: {
+            "alice": _agent_with_tools("alice", tools=("private_chat",)),
+            "bob": _agent_with_tools("bob", tools=("private_chat",)),
+            "carol": _agent_with_tools("carol"),
+        }.get(agent_id)
+        deps["registry"].all.return_value = [
+            _agent_with_tools("alice", tools=("private_chat",)),
+            _agent_with_tools("bob", tools=("private_chat",)),
+            _agent_with_tools("carol"),
+        ]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        instructions = deps["client"].execute_node.await_args.kwargs["temp_instructions"]
+        assert instructions is not None
+        assert "carol" in instructions
+        assert "bob" not in instructions  # target excluded from its own roster
 
     async def test_resolves_pair_channel_for_caller_and_target(
         self, deps: dict[str, Any]
