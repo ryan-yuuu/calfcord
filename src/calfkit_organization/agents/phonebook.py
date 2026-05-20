@@ -18,15 +18,23 @@ Add a field here when a downstream consumer needs it; do not pass
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 if TYPE_CHECKING:
     # Type-checking-only import; avoids the same package-init cycle that
     # bites peer_roster (bridge.* transitively imports agents.factory).
     from calfkit_organization.bridge.registry import AgentRegistry
+
+
+_AGENT_ID_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
+"""Mirrors ``agents.definition._NAME_PATTERN``. Duplicated rather than
+imported because ``definition`` lives upstream of this module in the
+import graph; keeping the regex local means any divergence is caught by
+:meth:`PhonebookEntry._validate_agent_id` at deserialization time."""
 
 
 class PhonebookEntry(BaseModel):
@@ -35,7 +43,10 @@ class PhonebookEntry(BaseModel):
     Mirrors the subset of :class:`AgentDefinition` that any non-bridge
     consumer of ``deps["phonebook"]`` actually needs: enough to render
     a persona, list peers in a roster, and decide which agents have
-    A2A tools available.
+    A2A tools available. Field validators enforce the *same* constraints
+    the source schema does — the wire format must not be looser than its
+    origin or a misbehaving bridge could ship strings downstream
+    consumers reject when posted to Discord.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -45,6 +56,24 @@ class PhonebookEntry(BaseModel):
     avatar_url: str | None = None
     description: str
     tools: tuple[str, ...] = ()
+
+    @field_validator("agent_id")
+    @classmethod
+    def _validate_agent_id(cls, v: str) -> str:
+        if not _AGENT_ID_PATTERN.fullmatch(v):
+            raise ValueError(f"agent_id must match [a-z0-9_-]{{1,32}}, got {v!r}")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, v: str) -> str:
+        # 1–100 mirrors AgentDefinition.description (Discord slash-command
+        # description limit). A wire-format phonebook that admits a longer
+        # string would surface as a Discord error far away from the bridge
+        # that emitted it.
+        if not (1 <= len(v) <= 100):
+            raise ValueError(f"description must be 1-100 chars, got {len(v)}")
+        return v
 
 
 def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:

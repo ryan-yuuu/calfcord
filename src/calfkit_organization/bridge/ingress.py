@@ -80,6 +80,27 @@ class BridgeIngress:
         # than as an uncaught ValueError inside every targeted invocation.
         for spec in registry.all():
             resolve_provider(spec, default_provider=default_provider)
+        # Symmetrically validate that every `tools:` reference in every
+        # .md resolves against TOOL_REGISTRY. The agent runner runs the
+        # same check at its own boot, but the bridge usually starts first
+        # in dev — surfacing typos here gives operators a single
+        # actionable error before any agent process boots.
+        # Lazy import: `calfkit_organization.tools` transitively imports
+        # bridge code, so a top-level import would cycle at boot.
+        from calfkit_organization.tools import TOOL_REGISTRY  # noqa: PLC0415
+
+        unknown: list[tuple[str, str]] = []
+        for spec in registry.all():
+            for tool_name in spec.tools:
+                if tool_name not in TOOL_REGISTRY:
+                    unknown.append((spec.agent_id, tool_name))
+        if unknown:
+            known = sorted(TOOL_REGISTRY)
+            entries = ", ".join(f"{aid!r} declares {tname!r}" for aid, tname in unknown)
+            raise ValueError(
+                f"bridge boot found unknown tool references: {entries}; "
+                f"known tools: {known or '<none registered>'}"
+            )
 
     async def handle(self, wire: WireMessage) -> None:
         """Publish ``wire`` to its channel's ingress topic. Fire-and-forget.
@@ -132,9 +153,10 @@ class BridgeIngress:
             # ever look up this wire. Free the slot.
             self._pending_wires.pop(wire.event_id)
             logger.exception(
-                "ingress publish failed event_id=%s channel=%s",
+                "ingress publish failed event_id=%s channel=%s slash_target=%s",
                 wire.event_id,
                 wire.channel_id,
+                wire.slash_target,
             )
             raise
 

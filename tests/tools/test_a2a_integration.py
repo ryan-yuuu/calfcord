@@ -8,17 +8,29 @@ end up holding the *same* :class:`ToolNodeDef` object that the
 ``calfkit-tools`` runner would mount on its Worker. Any drift between
 the two views — different topics, different schemas — would silently
 break A2A in production.
+
+Also pins the wire-convention round-trip: the dict shape the bridge
+serializes into ``deps`` must validate as a phonebook on the tool side.
+A renamed PhonebookEntry field would silently break A2A in production
+while passing both the bridge-side and tool-side unit tests in
+isolation (each builds its own dict shape).
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.agents.factory import AgentFactory
 from calfkit_organization.agents.state import AgentRuntimeState
+from calfkit_organization.bridge.ingress import BridgeIngress
+from calfkit_organization.bridge.pending_wires import PendingWires
+from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.tools import TOOL_REGISTRY
 from calfkit_organization.tools.private_chat import private_chat_tool
 
@@ -98,3 +110,89 @@ class TestAgentToToolRegistryConsistency:
         # Last topic is the per-agent inbox (the factory appends it after
         # channel topics).
         assert topics[-1] == "agent.scheduler.in"
+
+
+class TestWireConventionRoundTrip:
+    """Pin the cross-deployment dict shape: what the bridge writes into
+    ``deps["phonebook"]`` must validate as a phonebook on the tool side.
+
+    Bridge-side unit tests assert on dict keys (``e["agent_id"]``); tool-side
+    unit tests build their own dicts via ``phonebook_to_deps``. A renamed
+    PhonebookEntry field (e.g. ``display_name`` → ``name``) breaks A2A in
+    production but passes both isolated test surfaces — only this seam test
+    exercises the actual handoff.
+    """
+
+    async def test_phonebook_serialized_by_bridge_validates_at_tool(
+        self,
+    ) -> None:
+        from calfkit_organization.agents.phonebook import phonebook_from_deps
+        from calfkit_organization.tools import private_chat as pc
+
+        # Stub calfkit Client to capture the deps the bridge writes —
+        # no Kafka, no real publish. Reuses the same fixture pattern as
+        # tests/bridge/test_ingress.py.
+        client = MagicMock()
+        handle = MagicMock()
+        handle._future = asyncio.get_event_loop().create_future()
+        client.invoke_node = AsyncMock(return_value=handle)
+
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="alice",
+                    slash="/alice",
+                    display_name="Alice Bot",
+                    description="Scheduler.",
+                    avatar_url="https://example.com/a.png",
+                    tools=("private_chat",),
+                    system_prompt="x",
+                ),
+                AgentDefinition(
+                    agent_id="bob",
+                    slash="/bob",
+                    display_name="Bob Bot",
+                    description="Note-taker.",
+                    tools=(),
+                    system_prompt="y",
+                ),
+            ]
+        )
+        wire = WireMessage(
+            event_id="evt-1",
+            kind="slash",
+            slash_target="alice",
+            message_id=1,
+            channel_id=2,
+            guild_id=3,
+            content="hi",
+            author=WireAuthor(
+                discord_user_id=4,
+                display_name="ryan",
+                is_bot=False,
+                is_webhook=False,
+            ),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        ingress = BridgeIngress(client, registry, PendingWires())
+        await ingress.handle(wire)
+
+        # What the bridge actually published in deps.
+        serialized = client.invoke_node.call_args.kwargs["deps"]["phonebook"]
+
+        # The tool consumes this on the other side. The full round-trip
+        # must succeed AND preserve every field the tool reads.
+        parsed = phonebook_from_deps(serialized)
+        ids = {e.agent_id for e in parsed}
+        assert ids == {"alice", "bob"}
+
+        alice = next(e for e in parsed if e.agent_id == "alice")
+        assert alice.display_name == "Alice Bot"
+        assert alice.avatar_url == "https://example.com/a.png"
+        assert alice.description == "Scheduler."
+        assert alice.tools == ("private_chat",)
+
+        # The tool's ``_lookup`` helper would scan the same parsed list.
+        looked_up = pc._lookup(parsed, "bob")
+        assert looked_up is not None
+        assert looked_up.display_name == "Bob Bot"

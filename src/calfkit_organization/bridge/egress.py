@@ -72,22 +72,54 @@ class A2AChannelResolver:
         return f"a2a-{pair[0]}-{pair[1]}"
 
     async def _discover(self, pair: tuple[str, str]) -> int | None:
-        """Look for an existing channel by name. Returns its ID or None."""
+        """Look for an existing channel by name. Returns its ID or None.
+
+        Discord errors (e.g. ``discord.Forbidden`` if the bot loses guild
+        access, ``HTTPException`` on Discord 5xx) propagate to the caller;
+        we log them here so the failure surfaces in resolver-side logs,
+        not just at the downstream call site that has to cross-reference
+        which pair was being resolved.
+        """
         name = self._channel_name(pair)
-        guild = await self._sender.client.fetch_guild(self._guild_id)
-        for channel in await guild.fetch_channels():
+        try:
+            guild = await self._sender.client.fetch_guild(self._guild_id)
+            channels = await guild.fetch_channels()
+        except discord.DiscordException:
+            logger.warning(
+                "a2a channel discovery failed pair=%s name=%s",
+                pair,
+                name,
+                exc_info=True,
+            )
+            raise
+        for channel in channels:
             if isinstance(channel, discord.TextChannel) and channel.name == name:
                 logger.info("resolved a2a channel name=%s id=%s", name, channel.id)
                 return channel.id
         return None
 
     async def _create(self, pair: tuple[str, str]) -> int:
-        """Create the channel with default permissions. No overwrites."""
+        """Create the channel with default permissions. No overwrites.
+
+        ``discord.Forbidden`` (no Manage Channels permission), ``HTTPException``,
+        and any other Discord error propagate to the caller. Logged here
+        so the resolver-side log records the cause, mirroring
+        :meth:`_discover`.
+        """
         name = self._channel_name(pair)
-        guild = await self._sender.client.fetch_guild(self._guild_id)
-        channel = await guild.create_text_channel(
-            name=name,
-            reason=f"calfkit a2a channel for agents {pair[0]} and {pair[1]}",
-        )
+        try:
+            guild = await self._sender.client.fetch_guild(self._guild_id)
+            channel = await guild.create_text_channel(
+                name=name,
+                reason=f"calfkit a2a channel for agents {pair[0]} and {pair[1]}",
+            )
+        except discord.DiscordException:
+            logger.warning(
+                "a2a channel creation failed pair=%s name=%s",
+                pair,
+                name,
+                exc_info=True,
+            )
+            raise
         logger.info("created a2a channel name=%s id=%s", name, channel.id)
         return channel.id

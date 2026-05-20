@@ -59,8 +59,8 @@ Field summary:
 - `description` — short summary (1–100 chars). Shown to peers in the A2A roster.
 - `avatar_url` — optional persona avatar.
 - `provider` — `anthropic` or `openai`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`.
-- `model` — provider-specific model id. Defaults: `claude-sonnet-4-5` / `gpt-5-mini`.
-- `tools` — optional list of tool names. Resolved against `calfkit_organization.tools.TOOL_REGISTRY` at agent build time. Currently `private_chat` is the only registered tool.
+- `model` — provider-specific model id. The provider-default fallback chain lives in `agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`).
+- `tools` — optional list of tool names. Resolved against `calfkit_organization.tools.TOOL_REGISTRY` at agent build time. See that module for the live list of registered tools.
 - `thinking_effort` — `none` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command.
 
 ## Agent-to-agent communication

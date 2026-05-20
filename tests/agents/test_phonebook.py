@@ -137,3 +137,51 @@ class TestEntryIsFrozen:
         )
         with pytest.raises(ValueError):  # ValidationError <: ValueError
             entry.agent_id = "bob"  # type: ignore[misc]
+
+
+class TestEntryValidators:
+    """Wire-format constraints must not be looser than the source schema —
+    a misbehaving bridge that emits an invalid id or an over-long
+    description should be rejected at deserialization, not by Discord
+    far downstream where the cause is harder to trace."""
+
+    def test_rejects_invalid_agent_id_pattern(self) -> None:
+        with pytest.raises(ValueError, match=r"agent_id must match"):
+            PhonebookEntry(
+                agent_id="HasCaps",  # uppercase fails [a-z0-9_-]
+                display_name="X",
+                description="x",
+            )
+
+    def test_rejects_empty_agent_id(self) -> None:
+        with pytest.raises(ValueError, match=r"agent_id must match"):
+            PhonebookEntry(agent_id="", display_name="X", description="x")
+
+    def test_rejects_overlong_agent_id(self) -> None:
+        with pytest.raises(ValueError, match=r"agent_id must match"):
+            PhonebookEntry(
+                agent_id="a" * 33,  # max 32
+                display_name="X",
+                description="x",
+            )
+
+    def test_rejects_empty_description(self) -> None:
+        with pytest.raises(ValueError, match=r"description must be 1-100"):
+            PhonebookEntry(agent_id="alice", display_name="X", description="")
+
+    def test_rejects_overlong_description(self) -> None:
+        with pytest.raises(ValueError, match=r"description must be 1-100"):
+            PhonebookEntry(
+                agent_id="alice",
+                display_name="X",
+                description="x" * 101,
+            )
+
+    def test_accepts_max_length_description(self) -> None:
+        """Boundary: exactly 100 chars must work."""
+        entry = PhonebookEntry(
+            agent_id="alice",
+            display_name="X",
+            description="x" * 100,
+        )
+        assert len(entry.description) == 100

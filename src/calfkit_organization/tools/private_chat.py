@@ -146,6 +146,15 @@ async def private_chat(
                      correlation_id=correlation_id)
 
     if caller_agent_id == target_agent_id:
+        # Log at INFO so operators tailing the tools log can spot LLMs that
+        # repeatedly try invalid targets (a sign of a bad system prompt or a
+        # hallucinating model). The LLM still sees the error string.
+        logger.info(
+            "private_chat returning recoverable error caller=%s target=%s reason=self-target correlation_id=%s",
+            caller_agent_id,
+            target_agent_id,
+            correlation_id,
+        )
         return f"error: agent {caller_agent_id!r} cannot privately chat with itself"
 
     # Parse the phonebook out of deps. The bridge ingress populates this
@@ -167,6 +176,12 @@ async def private_chat(
     target_entry = _lookup(phonebook, target_agent_id)
     if target_entry is None:
         known = ", ".join(sorted(e.agent_id for e in phonebook))
+        logger.info(
+            "private_chat returning recoverable error caller=%s target=%s reason=unknown-target correlation_id=%s",
+            caller_agent_id,
+            target_agent_id,
+            correlation_id,
+        )
         return f"error: unknown agent {target_agent_id!r}; known agents: {known}"
 
     caller_entry = _lookup(phonebook, caller_agent_id)
@@ -361,8 +376,20 @@ async def _post_projection(
     assert _persona_sender is not None  # guarded by the caller
     # Empty content is legal (some agents may legitimately reply ""), but
     # Discord rejects it. Substitute a visible placeholder so the audit log
-    # makes sense rather than silently dropping the projection entry.
-    payload = content if content else "(empty response)"
+    # makes sense rather than silently dropping the projection entry. Log
+    # at INFO when this happens so operators can spot agents producing
+    # empty responses — could indicate an upstream bug or a confused LLM.
+    if not content:
+        logger.info(
+            "private_chat substituting empty-content placeholder persona=%s caller=%s target=%s correlation_id=%s",
+            persona.name,
+            caller,
+            target,
+            correlation_id,
+        )
+        payload = "(empty response)"
+    else:
+        payload = content
     for attempt in (1, 2):
         try:
             await _persona_sender.send(persona, channel_id=channel_id, content=payload)
@@ -380,7 +407,10 @@ async def _post_projection(
                     exc_info=True,
                 )
             else:
-                logger.warning(
+                # ERROR (not WARNING) on final failure: this is permanent
+                # audit-log data loss, not a transient blip. Alerting hooks
+                # that key off ERROR severity should fire.
+                logger.error(
                     "projection failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; accepting audit gap",
                     persona.name,
                     channel_id,

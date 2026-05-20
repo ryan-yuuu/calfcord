@@ -354,6 +354,93 @@ class TestModelSettings:
         }
 
 
+class TestBootValidation:
+    """At construction, the bridge validates every agent's `tools:` field
+    against ``TOOL_REGISTRY`` so a typo in any `.md` surfaces at bridge
+    boot rather than at agent invocation time. Mirrors the existing
+    provider validation."""
+
+    def test_unknown_tool_in_any_md_fails_at_construction(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    slash="/scheduler",
+                    display_name="Aksel (Scheduler)",
+                    description="Calendar.",
+                    provider="anthropic",
+                    tools=("calndar",),  # typo of "calendar"
+                    system_prompt="x",
+                ),
+            ]
+        )
+        with pytest.raises(ValueError, match="unknown tool"):
+            BridgeIngress(client, registry, pending_wires)
+
+    def test_aggregates_multiple_unknowns_across_agents(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """A multi-typo `.md` set surfaces all offenders in one message —
+        operators fix everything in one pass instead of chasing them
+        boot-by-boot."""
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    slash="/scheduler",
+                    display_name="Aksel",
+                    description="Calendar.",
+                    provider="anthropic",
+                    tools=("calndar",),
+                    system_prompt="x",
+                ),
+                AgentDefinition(
+                    agent_id="scribe",
+                    slash="/scribe",
+                    display_name="Scribe",
+                    description="Notes.",
+                    provider="openai",
+                    tools=("emial",),
+                    system_prompt="x",
+                ),
+            ]
+        )
+        with pytest.raises(ValueError) as excinfo:
+            BridgeIngress(client, registry, pending_wires)
+        assert "calndar" in str(excinfo.value)
+        assert "emial" in str(excinfo.value)
+
+    def test_known_tools_pass(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """`private_chat` is registered; an agent declaring it must
+        construct successfully (regression guard against an over-eager
+        validator that rejects all tools)."""
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scribe",
+                    slash="/scribe",
+                    display_name="Scribe",
+                    description="Notes.",
+                    provider="openai",
+                    tools=("private_chat",),
+                    system_prompt="x",
+                ),
+            ]
+        )
+        ingress = BridgeIngress(client, registry, pending_wires)
+        assert ingress is not None
+
+
 class TestTempInstructions:
     """Per-call ``temp_instructions`` carries the peer roster for A2A-enabled
     targets so the LLM knows which peers it can call via ``private_chat``."""

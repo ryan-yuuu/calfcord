@@ -458,7 +458,10 @@ class TestProjectionBestEffort:
     ) -> None:
         """Each projection post tries twice on persistent Discord failure;
         second-failure log names the channel, caller, target, and (when
-        known) correlation_id so an operator can match a gap to a turn."""
+        known) correlation_id so an operator can match a gap to a turn.
+
+        The final-failure line is at ERROR severity — permanent audit data
+        loss, not a transient blip — so alerting hooks fire."""
         import logging as _logging
 
         deps["client"].execute_node.return_value = _result("ok")
@@ -471,6 +474,8 @@ class TestProjectionBestEffort:
         assert deps["persona_sender"].send.await_count == 4
         final = [r for r in caplog.records if "accepting audit gap" in r.message]
         assert final, "expected a final-failure log line"
+        # Severity pinned: permanent audit loss is ERROR, not WARNING.
+        assert all(r.levelno >= _logging.ERROR for r in final)
         joined = " ".join(r.getMessage() for r in final)
         assert "caller=alice" in joined
         assert "target=bob" in joined
