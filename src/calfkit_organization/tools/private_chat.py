@@ -13,11 +13,15 @@ Flow per invocation:
        changes.
     3. Resolve (or lazily create) the pair's
        ``a2a-{x}-{y}`` channel via :class:`A2AChannelResolver`.
-    4. Post the request projection as the caller's persona (best-effort).
+    4. Post the request projection as the caller's persona (best-effort —
+       persistent transient failures are logged and the RPC still runs).
     5. ``Client.execute_node`` against ``agent.{target}.in`` with deps
        ``{"discord": forwarded_wire, "caller_agent_id": <caller>}``.
        Default 60s timeout — fail-fast on no consumer or timeout.
-    6. Post the response projection as the target's persona (best-effort).
+    6. Post the response projection as the target's persona. Unlike the
+       request projection this is **not** best-effort: persistent failure
+       raises ``RuntimeError`` so the calling LLM never sees a reply that
+       wasn't projected to humans.
     7. Return the target's text output to the caller's LLM.
 
 The module exposes both the bare async function ``private_chat`` (so
@@ -62,6 +66,21 @@ _AGENT_INBOX_TOPIC_TEMPLATE = "agent.{agent_id}.in"
 (``calfkit_organization.agents.factory._AGENT_INBOX_TOPIC_TEMPLATE``).
 Duplicated here rather than imported to keep the tool free of an
 agent-side dependency."""
+
+_MAX_PROJECTION_ATTEMPTS = 2
+"""Total attempts (initial + retries) for a single projection post.
+``discord.py`` already does its own 5 internal retries with escalating
+sleep for 429/5xx (see
+``discord.webhook.async_.AsyncWebhookAdapter.request``); our second pass
+is best-effort cleanup if that budget gets exhausted by a longer-than-
+usual burst. More than two attempts here would stall the tool's worker
+without improving the long-tail recovery odds."""
+
+_PROJECTION_RETRY_DELAY_SECONDS = 2.0
+"""Backoff between projection attempts. Mirrors
+:data:`calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS`
+— same shape of failure (discord.py's internal budget exhausted), same
+constraint (a single-worker consumer can't afford a long sleep)."""
 
 # Module-level injected singletons. Populated only by the calfkit-tools
 # runner's startup via init(). Tests overwrite via monkeypatch.
@@ -283,6 +302,23 @@ async def private_chat(
             _timeout_seconds,
         )
         return f"error: target {target_agent_id!r} did not reply within {_timeout_seconds:.0f}s"
+    except Exception as e:
+        # Catch ``Exception`` (not ``BaseException``) so ``asyncio.CancelledError``
+        # and ``KeyboardInterrupt`` — both ``BaseException`` subclasses in
+        # 3.11 — propagate untouched. Everything else (calfkit
+        # ``DeserializationError``, pydantic ``ValidationError``, broker
+        # ``ConnectionError``, FastStream errors, etc.) is an infra failure
+        # that must funnel through ``_raise_infra`` so operators get the
+        # caller/target/correlation_id at the call site rather than at
+        # calfkit's runtime handler (which has no domain context). Keeps the
+        # documented contract — infra failures raise ``RuntimeError`` — uniform.
+        _raise_infra(
+            f"execute_node failed against {target_topic!r}: {e}",
+            caller=caller_agent_id,
+            target=target_agent_id,
+            correlation_id=correlation_id,
+            cause=e,
+        )
     response_text = result.output if result.output is not None else ""
 
     await _post_projection(
@@ -357,17 +393,33 @@ async def _post_projection(
     target: str,
     correlation_id: str | None,
 ) -> None:
-    """Post a projection message; retry once on Discord errors, then log + accept the gap.
+    """Post a projection message with bounded retry; final-failure handling
+    depends on whether this is the request or response side.
 
     Projections are an audit trail. The Kafka exchange is the system of
-    record, so a transient Discord failure must never abort the A2A turn.
+    record, so a transient Discord failure must never abort the *request*
+    side of an A2A turn — losing that projection at worst leaves a one-
+    sided audit entry, while raising would block the calfkit RPC entirely.
+    The *response* side is different: if the response projection fails the
+    calling LLM would see a reply that was never projected to humans, so
+    that case raises through :func:`_raise_infra` to enforce the
+    "no reply without audit" contract.
 
-    Exception scope: only :class:`discord.DiscordException` (the library's
-    own family) is caught — that covers HTTP errors, rate-limits, gateway
-    issues, etc. ``RuntimeError`` (sender not started) and ``TypeError``
-    (channel id not a text channel) escape because they indicate the
-    projection sub-system is misconfigured, not transiently down — those
-    deserve to surface as the originating bug rather than be swallowed.
+    Discriminator: ``correlation_id is None`` → request side (best-effort,
+    log+accept on final failure). ``correlation_id is not None`` →
+    response side (raise on final failure). The callsite already passes
+    ``None`` before the RPC and the calfkit-assigned id after, so no
+    extra parameter is needed.
+
+    Exception scope: only :class:`discord.HTTPException` (transient HTTP /
+    rate-limit / 5xx) is retried; :class:`discord.NotFound` and
+    :class:`discord.Forbidden` propagate immediately because they signal
+    a permanent operator-actionable condition (channel deleted, bot lost
+    Manage Webhooks) where another attempt is pointless. ``RuntimeError``
+    (sender not started) and ``TypeError`` (channel id not a text channel)
+    also escape — those are misconfiguration, not transient down. Mirrors
+    the explicit-NotFound/Forbidden pattern in
+    :mod:`calfkit_organization.bridge.outbox`.
 
     ``caller``/``target``/``correlation_id`` are logged on failure so an
     operator finding an audit gap on a particular pair channel can
@@ -390,26 +442,38 @@ async def _post_projection(
         payload = "(empty response)"
     else:
         payload = content
-    for attempt in (1, 2):
+    last_exc: discord.HTTPException | None = None
+    for attempt in range(1, _MAX_PROJECTION_ATTEMPTS + 1):
         try:
             await _persona_sender.send(persona, channel_id=channel_id, content=payload)
             return
-        except discord.DiscordException:
-            if attempt < 2:
+        except (discord.NotFound, discord.Forbidden):
+            # Permanent: channel gone or bot lost Manage Webhooks. Retrying
+            # changes nothing; let the caller (and the operator's logs) see
+            # the original exception type so the diagnosis is direct.
+            raise
+        except discord.HTTPException as e:
+            last_exc = e
+            if attempt < _MAX_PROJECTION_ATTEMPTS:
                 logger.warning(
-                    "projection attempt=%d failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; retrying",
+                    "projection attempt=%d failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; retrying in %.1fs",
                     attempt,
                     persona.name,
                     channel_id,
                     caller,
                     target,
                     correlation_id,
+                    _PROJECTION_RETRY_DELAY_SECONDS,
                     exc_info=True,
                 )
-            else:
-                # ERROR (not WARNING) on final failure: this is permanent
-                # audit-log data loss, not a transient blip. Alerting hooks
-                # that key off ERROR severity should fire.
+                await asyncio.sleep(_PROJECTION_RETRY_DELAY_SECONDS)
+                continue
+            # Final attempt failed: branch on side.
+            if correlation_id is None:
+                # Request side: accept the audit gap so the calfkit RPC
+                # still happens. README documents this as best-effort.
+                # ERROR (not WARNING) — permanent audit data loss, not a
+                # transient blip; alerting hooks keyed off ERROR fire.
                 logger.error(
                     "projection failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; accepting audit gap",
                     persona.name,
@@ -419,6 +483,16 @@ async def _post_projection(
                     correlation_id,
                     exc_info=True,
                 )
+                return
+            # Response side: raise so the calling LLM never sees a reply
+            # that wasn't projected to humans.
+            _raise_infra(
+                f"a2a audit projection failed after {_MAX_PROJECTION_ATTEMPTS} attempts persona={persona.name!r} channel={channel_id}",
+                caller=caller,
+                target=target,
+                correlation_id=correlation_id,
+                cause=last_exc,
+            )
 
 
 # Calfkit's ``@agent_tool`` decorator wraps the bare async function in a

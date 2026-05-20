@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -26,6 +27,16 @@ from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.tools import private_chat as pc
+
+
+def _http_exc(exc_cls: type[discord.HTTPException], status: int) -> discord.HTTPException:
+    """Build a discord HTTPException-family instance without hitting the network.
+
+    Mirrors :func:`tests.bridge.test_outbox._http_exc` — both modules need
+    synthetic HTTPException instances; the duplicated helper is cheaper
+    than a shared test-fixtures package for two callsites."""
+    response = SimpleNamespace(status=status, reason="Test")
+    return exc_cls(response, {"message": "synthetic"})
 
 
 def _wire(
@@ -440,73 +451,206 @@ class TestInfraErrors:
 
 
 class TestProjectionBestEffort:
-    async def test_projection_failure_does_not_abort(
+    """Request-side projection (pre-RPC) is best-effort: the calfkit RPC
+    runs even if it fails, so the LLM still gets a reply. README documents
+    this. Response-side projection lives in :class:`TestResponseProjectionRaises`.
+    """
+
+    async def test_request_projection_transient_failure_does_not_abort(
         self, deps: dict[str, Any]
     ) -> None:
-        """A transient Discord projection error must never lose the A2A call."""
+        """A persistent transient Discord error on the *request* projection
+        is logged and accepted; the tool still completes the RPC and returns
+        the reply. Response projection then succeeds normally."""
         deps["client"].execute_node.return_value = _result("bob's reply")
+        # First projection (request, correlation_id=None): both attempts fail.
+        # Second projection (response, correlation_id set): both attempts succeed.
         deps["persona_sender"].send = AsyncMock(
-            side_effect=discord.DiscordException("transient")
+            side_effect=[
+                _http_exc(discord.HTTPException, 503),  # request attempt 1
+                _http_exc(discord.HTTPException, 503),  # request attempt 2
+                None,  # response attempt 1
+            ]
         )
-        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
+            out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert out == "bob's reply"
 
-    async def test_projection_retries_once_then_logs_with_correlation(
+    async def test_request_projection_persistent_failure_logs_accepting_gap(
         self,
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Each projection post tries twice on persistent Discord failure;
-        second-failure log names the channel, caller, target, and (when
-        known) correlation_id so an operator can match a gap to a turn.
-
-        The final-failure line is at ERROR severity — permanent audit data
-        loss, not a transient blip — so alerting hooks fire."""
+        """When the *request* projection exhausts both attempts the final
+        log line includes the ``accepting audit gap`` marker so operators
+        can spot the per-channel data loss. Severity is ERROR so alerting
+        hooks fire — this is permanent audit loss, not a transient blip.
+        Response side is mocked to succeed so we isolate request-side
+        behavior here.
+        """
         import logging as _logging
 
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
-            side_effect=discord.DiscordException("persistent")
+            side_effect=[
+                _http_exc(discord.HTTPException, 503),  # request attempt 1
+                _http_exc(discord.HTTPException, 503),  # request attempt 2
+                None,  # response attempt 1 succeeds
+            ]
         )
-        with caplog.at_level(_logging.WARNING):
-            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        # 2 attempts per projection × 2 projections = 4 send calls.
-        assert deps["persona_sender"].send.await_count == 4
+        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
+            with caplog.at_level(_logging.WARNING):
+                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # 2 attempts on request projection + 1 attempt on response = 3 send calls.
+        assert deps["persona_sender"].send.await_count == 3
         final = [r for r in caplog.records if "accepting audit gap" in r.message]
-        assert final, "expected a final-failure log line"
-        # Severity pinned: permanent audit loss is ERROR, not WARNING.
+        assert final, "expected a final-failure log line for the request projection"
         assert all(r.levelno >= _logging.ERROR for r in final)
         joined = " ".join(r.getMessage() for r in final)
         assert "caller=alice" in joined
         assert "target=bob" in joined
 
     async def test_projection_succeeds_on_retry(self, deps: dict[str, Any]) -> None:
-        """First attempt fails, second succeeds: the retry actually works.
-        Pins the ``return`` inside the retry loop so a refactor that broke
-        the early-return would surface here."""
+        """First attempt fails with a transient HTTP error, second succeeds:
+        the retry actually works. Pins the ``return`` inside the retry loop
+        so a refactor that broke the early-return would surface here."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                discord.DiscordException("transient"),  # first projection, attempt 1 fails
-                None,  # first projection, attempt 2 succeeds
-                None,  # second projection, attempt 1 succeeds
+                _http_exc(discord.HTTPException, 503),  # request attempt 1 fails
+                None,  # request attempt 2 succeeds
+                None,  # response attempt 1 succeeds
             ]
         )
-        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert deps["persona_sender"].send.await_count == 3
+
+    async def test_retry_sleeps_with_module_constant(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Backoff between attempts must use ``_PROJECTION_RETRY_DELAY_SECONDS``.
+        Pins the constant so a future refactor that drops the sleep (or
+        changes the value silently) breaks here rather than at runtime
+        where a tight retry loop would stall the worker on a 5xx burst."""
+        deps["client"].execute_node.return_value = _result("ok")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 503),  # request attempt 1 fails
+                None,  # request attempt 2 succeeds
+                None,  # response attempt 1 succeeds
+            ]
+        )
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep_mock:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        sleep_mock.assert_awaited_once_with(pc._PROJECTION_RETRY_DELAY_SECONDS)
 
     async def test_non_discord_projection_error_propagates(
         self, deps: dict[str, Any]
     ) -> None:
         """RuntimeError / TypeError from the persona sender indicate
         infrastructure misconfiguration (sender not started, channel id not
-        a text channel) — they must NOT be swallowed as "best-effort."""
+        a text channel) — they must NOT be swallowed as "best-effort"."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=RuntimeError("sender not started")
         )
         with pytest.raises(RuntimeError, match="sender not started"):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+
+    async def test_forbidden_propagates_without_retry(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``discord.Forbidden`` is a permanent operator-actionable signal
+        (bot lost Manage Webhooks). Retrying changes nothing; the catch
+        must let it propagate immediately so the original exception type
+        reaches the logs."""
+        deps["client"].execute_node.return_value = _result("ok")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=_http_exc(discord.Forbidden, 403)
+        )
+        with pytest.raises(discord.Forbidden):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Exactly one send call — no retry on permanent permission failures.
+        assert deps["persona_sender"].send.await_count == 1
+
+    async def test_not_found_propagates_without_retry(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Same principle as Forbidden — ``discord.NotFound`` (channel /
+        webhook deleted) is permanent; retrying is pointless."""
+        deps["client"].execute_node.return_value = _result("ok")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=_http_exc(discord.NotFound, 404)
+        )
+        with pytest.raises(discord.NotFound):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert deps["persona_sender"].send.await_count == 1
+
+
+class TestResponseProjectionRaises:
+    """The response projection (post-RPC) is *not* best-effort: if it fails
+    after both attempts, the calling LLM would see a reply that was never
+    audited. The tool must raise instead so that contract holds.
+    """
+
+    async def test_response_projection_persistent_failure_raises_infra(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Both response-projection attempts fail → ``RuntimeError`` whose
+        message names the retry budget exhaustion, and whose ``__cause__``
+        chains back to the original ``discord.HTTPException`` for debug.
+        The caller/target/correlation triple is verified in
+        :meth:`test_response_projection_failure_logs_correlation_caller_target`
+        — the log line is the operator-facing surface; the exception
+        message stays focused on the failure mode."""
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        original = _http_exc(discord.HTTPException, 503)
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                None,  # request projection succeeds
+                original,  # response attempt 1
+                _http_exc(discord.HTTPException, 503),  # response attempt 2
+            ]
+        )
+        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(RuntimeError, match="a2a audit projection failed") as ei:
+                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert isinstance(ei.value.__cause__, discord.HTTPException)
+        # Message names the retry budget so a refactor that changes the
+        # attempt count surfaces here.
+        assert f"after {pc._MAX_PROJECTION_ATTEMPTS} attempts" in str(ei.value)
+
+    async def test_response_projection_failure_logs_correlation_caller_target(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The ERROR log emitted by ``_raise_infra`` must carry the
+        caller/target/correlation_id triple — that's the only way an
+        operator finding an audit gap can match the failure to a turn."""
+        import logging as _logging
+
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                None,  # request projection succeeds
+                _http_exc(discord.HTTPException, 503),
+                _http_exc(discord.HTTPException, 503),
+            ]
+        )
+        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
+            with caplog.at_level(_logging.ERROR):
+                with pytest.raises(RuntimeError):
+                    await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "caller=alice" in joined
+        assert "target=bob" in joined
+        # ``result.correlation_id == "tool-corr"`` per ``_result`` helper.
+        assert "correlation_id=tool-corr" in joined
 
 
 class TestInit:
@@ -563,6 +707,62 @@ class TestExecuteNodeFailures:
         await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # Only the request projection attempted (1 send call).
         assert deps["persona_sender"].send.await_count == 1
+
+    async def test_connection_error_wrapped_as_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """A broker ``ConnectionError`` (Kafka unreachable, FastStream lost
+        the connection, etc.) is an infra failure that must funnel through
+        ``_raise_infra`` so the documented "infra → RuntimeError" contract
+        holds. The original exception is preserved as ``__cause__`` for
+        debuggability."""
+        original = ConnectionError("kafka unreachable")
+        deps["client"].execute_node.side_effect = original
+        with pytest.raises(RuntimeError, match="execute_node failed") as ei:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        msg = str(ei.value)
+        # Caller/target/correlation context isn't in the exception message
+        # itself (``_raise_infra`` logs it at ERROR severity) — the topic
+        # is, which carries the target agent id. Pin both layers.
+        assert "agent.bob.in" in msg
+        assert ei.value.__cause__ is original
+
+    async def test_generic_runtime_error_wrapped_via_raise_infra(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A generic ``RuntimeError`` from inside ``execute_node`` (e.g. a
+        calfkit internal) is re-wrapped via ``_raise_infra`` — same caller/
+        target/correlation context appears in the ERROR log, and the
+        wrapped exception's ``__cause__`` is the original."""
+        import logging as _logging
+
+        original = RuntimeError("some calfkit internal")
+        deps["client"].execute_node.side_effect = original
+        with caplog.at_level(_logging.ERROR):
+            with pytest.raises(RuntimeError) as ei:
+                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Wrapped, not the same instance.
+        assert ei.value is not original
+        assert ei.value.__cause__ is original
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "caller=alice" in joined
+        assert "target=bob" in joined
+        # ``ctx.deps.correlation_id == "corr-1"`` (set by ``_ctx``).
+        assert "correlation_id=corr-1" in joined
+
+    async def test_cancelled_error_propagates_untouched(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``asyncio.CancelledError`` inherits from ``BaseException`` in
+        3.11+, not ``Exception``. The infra-funnel catch must not swallow
+        cancellation — a cancelled task that gets converted to
+        ``RuntimeError`` looks like a real infra bug to upstream callers
+        and breaks structured-concurrency semantics."""
+        deps["client"].execute_node.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
 
 
 class TestResolverFailure:
