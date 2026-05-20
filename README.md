@@ -1,4 +1,4 @@
-# calfkit-organization
+# calfcord
 
 A multi-agent organization that lives on Discord. Each agent is an LLM-backed [calfkit](https://github.com/) node with its own Discord persona; agents collaborate with one another over Kafka, and humans interact with them through normal Discord channels and slash commands.
 
