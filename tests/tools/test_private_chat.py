@@ -232,13 +232,26 @@ class TestHappyPath:
         self, deps: dict[str, Any]
     ) -> None:
         """The phonebook must ride along to the target so a chain-calling
-        target (B → C) doesn't lose its view of the organization."""
-        phonebook = [_entry("alice"), _entry("bob"), _entry("carol")]
+        target (B → C) doesn't lose its view of the organization. The
+        chain target's roster depends on ``tools``, ``display_name``,
+        and ``avatar_url`` per entry — assert the full shape survives,
+        not just the ids."""
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+            _entry("carol"),
+        ]
         deps["client"].execute_node.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
         passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
-        ids = sorted(e["agent_id"] for e in passed_deps["phonebook"])
+        propagated = passed_deps["phonebook"]
+        ids = sorted(e["agent_id"] for e in propagated)
         assert ids == ["alice", "bob", "carol"]
+        # Find bob in the propagated list and confirm full identity rode along.
+        propagated_bob = next(e for e in propagated if e["agent_id"] == "bob")
+        assert propagated_bob["tools"] == ["private_chat"]
+        assert propagated_bob["display_name"] == "Bob Bot"
+        assert propagated_bob["avatar_url"] == "https://example.com/bob.png"
 
     async def test_resolves_pair_channel_for_caller_and_target(
         self, deps: dict[str, Any]
@@ -365,6 +378,65 @@ class TestInfraErrors:
             await pc.private_chat(
                 _ctx(caller="ghost", phonebook=phonebook), "bob", "x"
             )
+
+    async def test_malformed_phonebook_wrapped_as_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Pydantic ValidationError from a malformed phonebook entry must
+        be normalized to RuntimeError so the infra-bug contract holds —
+        upstream code distinguishes infra bugs from LLM-recoverable
+        errors by exception type, not by string parsing."""
+        ctx = ToolContext(
+            deps=Deps(
+                correlation_id="c",
+                provided_deps={
+                    "discord": _wire().model_dump(mode="json"),
+                    # Schema-invalid entry: missing required fields.
+                    "phonebook": [{"agent_id": "alice"}],
+                },
+            ),
+            agent_name="alice",
+        )
+        with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
+            await pc.private_chat(ctx, "bob", "x")
+
+    async def test_non_list_phonebook_wrapped_as_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``phonebook_from_deps`` raises a plain ``ValueError`` for a
+        non-list payload; the tool must also normalize that to
+        RuntimeError so callers don't have to handle two exception
+        families for the same infra bug."""
+        ctx = ToolContext(
+            deps=Deps(
+                correlation_id="c",
+                provided_deps={
+                    "discord": _wire().model_dump(mode="json"),
+                    "phonebook": "not a list",
+                },
+            ),
+            agent_name="alice",
+        )
+        with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
+            await pc.private_chat(ctx, "bob", "x")
+
+    async def test_malformed_wire_wrapped_as_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Same normalization for a malformed discord wire — a missing
+        required field should not leak ``ValidationError`` to the LLM."""
+        ctx = ToolContext(
+            deps=Deps(
+                correlation_id="c",
+                provided_deps={
+                    "discord": {"only": "garbage"},  # missing every required field
+                    "phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK),
+                },
+            ),
+            agent_name="alice",
+        )
+        with pytest.raises(RuntimeError, match="malformed deps\\['discord'\\]"):
+            await pc.private_chat(ctx, "bob", "x")
 
 
 class TestProjectionBestEffort:
@@ -503,3 +575,24 @@ class TestResolverFailure:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         deps["client"].execute_node.assert_not_called()
         deps["persona_sender"].send.assert_not_called()
+
+    async def test_resolver_failure_logs_caller_and_target(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The resolver itself logs only the success path. The
+        private_chat layer adds caller/target context on failure so an
+        operator looking at the tools log knows which A2A turn was
+        affected."""
+        import logging as _logging
+
+        deps["resolver"].resolve_or_create.side_effect = discord.Forbidden(
+            MagicMock(status=403), "missing permission"
+        )
+        with caplog.at_level(_logging.ERROR):
+            with pytest.raises(discord.Forbidden):
+                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "caller=alice" in joined
+        assert "target=bob" in joined

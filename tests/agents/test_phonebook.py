@@ -111,3 +111,29 @@ class TestRoundtripThroughDeps:
         ]
         round_tripped = phonebook_from_deps(phonebook_to_deps(original))
         assert round_tripped == original
+
+    def test_from_deps_normalizes_invalid_entries_to_validation_error(self) -> None:
+        """Entries that fail schema validation raise pydantic's
+        ``ValidationError`` (a ``ValueError`` subclass). Callers that
+        want a single exception type can catch ``ValueError`` to cover
+        both list-shape and per-entry failures. Pinned so the
+        ``ValidationError <: ValueError`` relationship is part of the
+        documented contract."""
+        with pytest.raises(ValueError):
+            phonebook_from_deps([{"agent_id": "alice"}])  # missing required fields
+
+
+class TestEntryIsFrozen:
+    """``PhonebookEntry`` is the bridge's snapshot of the registry. The
+    bridge serializes it into deps and downstream consumers expect a
+    stable view — accidental mutation by a tool process must fail
+    loudly, not corrupt the source snapshot."""
+
+    def test_cannot_reassign_field(self) -> None:
+        entry = PhonebookEntry(
+            agent_id="alice",
+            display_name="Alice",
+            description="x",
+        )
+        with pytest.raises(ValueError):  # ValidationError <: ValueError
+            entry.agent_id = "bob"  # type: ignore[misc]

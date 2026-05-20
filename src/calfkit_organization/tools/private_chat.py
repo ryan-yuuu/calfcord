@@ -42,6 +42,7 @@ import discord
 from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
+from pydantic import ValidationError
 
 from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_from_deps, phonebook_to_deps
@@ -132,14 +133,17 @@ async def private_chat(
         * ``error: target '<name>' did not reply within Ns`` — the peer
           did not respond in time. Try again or pick another agent.
     """
+    correlation_id = ctx.deps.correlation_id
     if _client is None or _persona_sender is None or _resolver is None:
-        raise RuntimeError("private_chat tool not initialized; the calfkit-tools runner must call init() at startup")
+        _raise_infra("tool not initialized; the calfkit-tools runner must call init() at startup",
+                     correlation_id=correlation_id)
 
     caller_agent_id = ctx.agent_name
     if caller_agent_id is None:
         # ctx.agent_name is set from the inbound x-calf-emitter header.
         # If it's missing, calfkit's dispatch was bypassed somehow.
-        raise RuntimeError("private_chat invoked without emitter_node_id; cannot identify caller")
+        _raise_infra("invoked without emitter_node_id; cannot identify caller",
+                     correlation_id=correlation_id)
 
     if caller_agent_id == target_agent_id:
         return f"error: agent {caller_agent_id!r} cannot privately chat with itself"
@@ -148,14 +152,17 @@ async def private_chat(
     # on every invocation; the agent's dispatch propagates it into the
     # tool's ctx unchanged. The tool's deployment cannot itself read
     # agents/*.md — this is the only source of identity information we
-    # have.
+    # have. A missing OR malformed phonebook is normalized to RuntimeError
+    # so all infra-bug signals are one exception type (the contract).
     phonebook_raw = ctx.deps.provided_deps.get("phonebook")
     if phonebook_raw is None:
-        raise RuntimeError(
-            "private_chat invoked without deps['phonebook']; the bridge ingress is "
-            "expected to populate this key on every publish"
-        )
-    phonebook = phonebook_from_deps(phonebook_raw)
+        _raise_infra("invoked without deps['phonebook']; the bridge ingress is expected to populate this key on every publish",
+                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
+    try:
+        phonebook = phonebook_from_deps(phonebook_raw)
+    except (ValueError, ValidationError) as e:
+        _raise_infra(f"received malformed deps['phonebook']: {e}",
+                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id, cause=e)
 
     target_entry = _lookup(phonebook, target_agent_id)
     if target_entry is None:
@@ -168,17 +175,18 @@ async def private_chat(
         # tools). A missing phonebook entry is an infrastructure bug, not
         # LLM input — raise so it surfaces in logs rather than silently
         # degrading the projection to no-persona.
-        raise RuntimeError(
-            f"caller {caller_agent_id!r} is not in the phonebook; cannot resolve persona"
-        )
+        _raise_infra(f"caller {caller_agent_id!r} is not in the phonebook; cannot resolve persona",
+                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
 
     incoming_wire_dict = ctx.deps.provided_deps.get("discord")
     if not isinstance(incoming_wire_dict, dict):
-        raise RuntimeError(
-            "private_chat invoked without deps['discord']; the bridge ingress is "
-            "expected to populate this key before any agent runs"
-        )
-    incoming_wire = WireMessage.model_validate(incoming_wire_dict)
+        _raise_infra("invoked without deps['discord']; the bridge ingress is expected to populate this key before any agent runs",
+                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
+    try:
+        incoming_wire = WireMessage.model_validate(incoming_wire_dict)
+    except ValidationError as e:
+        _raise_infra(f"received malformed deps['discord']: {e}",
+                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id, cause=e)
 
     # Forward a mutated wire to the target: slash_target points at them
     # (so addressed_to_me_gate accepts), kind=slash (so the gate's slash
@@ -197,8 +205,20 @@ async def private_chat(
     # Channel resolution is NOT best-effort: without an audit channel we
     # don't even have a place to put projections, and the auditing
     # invariant is part of the design intent. If this fails (e.g. the
-    # bot lacks Manage Channels), the operator must see it.
-    a2a_channel_id = await _resolver.resolve_or_create(caller_agent_id, target_agent_id)
+    # bot lacks Manage Channels), the operator must see it — log with
+    # caller/target context at this layer because the resolver only
+    # logs the success path.
+    try:
+        a2a_channel_id = await _resolver.resolve_or_create(caller_agent_id, target_agent_id)
+    except discord.DiscordException:
+        logger.error(
+            "a2a channel resolution failed caller=%s target=%s correlation_id=%s",
+            caller_agent_id,
+            target_agent_id,
+            correlation_id,
+            exc_info=True,
+        )
+        raise
 
     caller_persona = Persona(name=caller_entry.display_name, avatar_url=caller_entry.avatar_url)
     target_persona = Persona(name=target_entry.display_name, avatar_url=target_entry.avatar_url)
@@ -274,6 +294,43 @@ def _lookup(
 ) -> PhonebookEntry | None:
     """Find an entry by id. Returns ``None`` if not present."""
     return next((e for e in phonebook if e.agent_id == agent_id), None)
+
+
+def _raise_infra(
+    message: str,
+    *,
+    correlation_id: str,
+    caller: str | None = None,
+    target: str | None = None,
+    cause: Exception | None = None,
+) -> None:
+    """Log infra context at ERROR and raise ``RuntimeError``.
+
+    Every infrastructure-bug signal in ``private_chat`` funnels through
+    here so operators get the caller/target/correlation_id context at
+    the call site (the natural place to grep) rather than at calfkit's
+    runtime handler (which has no domain context). ``RuntimeError`` is
+    the documented infra-bug exception type — callers upstream rely on
+    this to distinguish infra bugs from LLM-recoverable errors (which
+    are returned as ``"error: ..."`` strings instead of raised).
+
+    Always raises; the ``None`` return annotation is a lie pytest-style
+    to keep callers from needing dead-code returns after the call. The
+    NoReturn annotation would be more honest but adds an import for
+    little benefit at this scale.
+    """
+    logger.error(
+        "private_chat infra error: %s caller=%s target=%s correlation_id=%s",
+        message,
+        caller,
+        target,
+        correlation_id,
+        exc_info=cause is not None,
+    )
+    full_message = f"private_chat {message}"
+    if cause is not None:
+        raise RuntimeError(full_message) from cause
+    raise RuntimeError(full_message)
 
 
 async def _post_projection(
