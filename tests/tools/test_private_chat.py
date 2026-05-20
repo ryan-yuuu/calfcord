@@ -230,6 +230,21 @@ class TestHappyPath:
         )
         assert second_content == "(empty response)"
 
+    async def test_none_target_response_treated_as_empty(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``NodeResult.output`` is ``OutputT | None`` per calfkit's type —
+        the ``output is not None`` guard at the response site needs its own
+        test so a future ``result.output or ""`` refactor (which would
+        coerce falsy values differently) doesn't slip through."""
+        deps["client"].execute_node.return_value = _result(None)
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert out == ""
+        second_content = (
+            deps["persona_sender"].send.await_args_list[1].kwargs["content"]
+        )
+        assert second_content == "(empty response)"
+
 
 class TestInputErrors:
     async def test_self_target_returns_error_string(
@@ -356,6 +371,41 @@ class TestProjectionBestEffort:
         )
         with pytest.raises(RuntimeError, match="sender not started"):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+
+
+class TestInit:
+    """``init()`` is the only path the runner uses to wire dependencies.
+    A regression that swapped parameters (e.g. registry vs resolver) would
+    silently break A2A at runtime — pin the bindings."""
+
+    def test_init_binds_each_arg_to_its_singleton(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Reset to sentinel state so we observe init's writes.
+        monkeypatch.setattr(pc, "_client", None)
+        monkeypatch.setattr(pc, "_persona_sender", None)
+        monkeypatch.setattr(pc, "_resolver", None)
+        monkeypatch.setattr(pc, "_registry", None)
+        monkeypatch.setattr(pc, "_timeout_seconds", -1.0)
+
+        client = MagicMock(spec=Client)
+        persona_sender = MagicMock(spec=DiscordPersonaSender)
+        resolver = MagicMock(spec=A2AChannelResolver)
+        registry = MagicMock(spec=AgentRegistry)
+
+        pc.init(
+            client=client,
+            persona_sender=persona_sender,
+            resolver=resolver,
+            registry=registry,
+            timeout_seconds=42.0,
+        )
+
+        assert pc._client is client
+        assert pc._persona_sender is persona_sender
+        assert pc._resolver is resolver
+        assert pc._registry is registry
+        assert pc._timeout_seconds == 42.0
 
 
 class TestExecuteNodeFailures:

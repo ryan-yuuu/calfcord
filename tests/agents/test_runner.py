@@ -512,29 +512,33 @@ class TestRunWorker:
         with pytest.raises(RuntimeError, match="kafka broker drop"):
             await _run_worker(worker, num_agents=2)
 
-    async def test_clean_worker_return_does_not_raise(self) -> None:
-        """If worker.run() returns normally (rare — worker.run is meant
-        to run until cancelled), _run_worker must exit without raising."""
+    async def test_clean_worker_return_raises_runtime_error(self) -> None:
+        """A clean ``worker.run()`` return without a shutdown signal is
+        unexpected — ``worker.run`` is meant to be infinite. Treat as a
+        crash so supervisors configured for ``Restart=on-failure`` restart
+        us; without this, the process exits 0 and the supervisor leaves
+        us down."""
         worker = MagicMock()
         worker.run = AsyncMock(return_value=None)
 
-        await _run_worker(worker, num_agents=1)
+        with pytest.raises(RuntimeError, match="returned unexpectedly"):
+            await _run_worker(worker, num_agents=1)
 
-    async def test_clean_worker_return_logs_warning(
+    async def test_clean_worker_return_logs_error(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A worker.run() that returns without exception is unexpected
-        (run is meant to be infinite); log a warning so operators notice."""
+        """The synthetic RuntimeError must be logged at ERROR so operators
+        see it in the same band as a real crash, not buried at warning."""
         worker = MagicMock()
         worker.run = AsyncMock(return_value=None)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
             await _run_worker(worker, num_agents=1)
 
         assert any(
-            "returned without an exception" in r.message
+            "returned unexpectedly" in r.message
             for r in caplog.records
-            if r.levelno >= logging.WARNING
+            if r.levelno >= logging.ERROR
         )
 
     async def test_worker_exception_is_logged_with_exc_info(

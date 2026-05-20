@@ -372,7 +372,16 @@ async def _run_worker(worker: Worker, *, num_agents: int) -> None:
                     exc_info=worker_exc,
                 )
             else:
-                logger.warning("worker.run() returned without an exception; exiting")
+                # A clean return from ``worker.run()`` without a shutdown
+                # signal is unexpected. Treat as a crash so supervisors
+                # configured for ``Restart=on-failure`` actually restart —
+                # without this synthetic raise, the process exits 0 and
+                # the supervisor leaves us down (the failure mode the
+                # module docstring explicitly says we prevent).
+                worker_exc = RuntimeError(
+                    "worker.run() returned unexpectedly without a shutdown signal"
+                )
+                logger.error("%s; exiting non-zero", worker_exc)
         else:
             logger.info("shutdown signal received, draining %d agent(s)", num_agents)
     finally:

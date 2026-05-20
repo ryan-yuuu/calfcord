@@ -1,17 +1,19 @@
 """Unit tests for ``calfkit-tools`` runner helpers.
 
-Covers only the pure helpers (``_resolve_timeout``, ``_resolve_tool_nodes``).
-The full ``_amain`` requires Discord auth, a Kafka broker, and an agents
-directory — too heavy for a unit test. Operators will see boot failures
-of those in stderr; the contracts worth pinning are the local validation
-helpers.
+Covers the pure helpers (``_resolve_timeout``, ``_resolve_tool_nodes``) and
+the ``_run_worker`` shutdown contract. The full ``_amain`` requires
+Discord auth, a Kafka broker, and an agents directory — too heavy for a
+unit test. Operators will see boot failures of those in stderr; the
+contracts worth pinning are the local validation helpers and the
+supervisor-restart invariant.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from calfkit.worker import Worker
 
 from calfkit_organization.tools import private_chat, runner
 
@@ -54,3 +56,43 @@ class TestResolveToolNodes:
         responding to nothing, but otherwise looking healthy in logs."""
         with pytest.raises(SystemExit, match="empty"):
             runner._resolve_tool_nodes({})
+
+
+class TestDefaultTimeoutValue:
+    def test_default_is_60_seconds(self) -> None:
+        """Pin the literal — the design discussion settled on 60s. A future
+        change to e.g. 600s should be a deliberate decision the test forces
+        a reader to confirm, not a silent edit that passes existing tests
+        because they only compared against the constant."""
+        assert private_chat.DEFAULT_TIMEOUT_SECONDS == 60.0
+
+
+class TestRunWorkerShutdownContract:
+    """The supervisor-restart invariant: any non-signal exit from the
+    worker must raise out of ``_run_worker`` so the process exits
+    non-zero. Pins both the crash path and the unexpected-clean-return
+    path; without one of these tests a future refactor that re-swallowed
+    either case would not surface."""
+
+    async def test_worker_crash_propagates(self) -> None:
+        """An exception inside ``worker.run()`` must escape ``_run_worker``
+        so the surrounding ``asyncio.run`` exits non-zero."""
+        crash = ValueError("simulated kafka drop")
+        worker = MagicMock(spec=Worker)
+        worker.run = AsyncMock(side_effect=crash)
+        with pytest.raises(ValueError, match="simulated kafka drop"):
+            await runner._run_worker(worker)
+
+    async def test_worker_unexpected_clean_return_raises(self) -> None:
+        """A clean ``worker.run()`` return without a shutdown signal is
+        unexpected — must synthesize a RuntimeError so supervisors
+        configured for ``Restart=on-failure`` restart us."""
+        worker = MagicMock(spec=Worker)
+
+        async def returns_immediately() -> None:
+            return None
+
+        worker.run = AsyncMock(side_effect=returns_immediately)
+        with pytest.raises(RuntimeError, match="returned unexpectedly"):
+            await runner._run_worker(worker)
+
