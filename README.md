@@ -98,6 +98,8 @@ Per-agent runtime state lives in `state/agents/<name>.json` (channel subscriptio
 
 Tools timeout override: `CALFKIT_TOOLS_TIMEOUT_SECONDS` (default 60).
 
+A2A category override: `CALFKIT_A2A_CHANNEL_CATEGORY` (default unset). When set, the tools process places every newly-created `a2a-<x>-<y>` audit channel under a Discord category with that name, creating the category lazily on first use. Edit the category's permission overwrites once in the Discord UI to lock down audit visibility — child channels inherit those overwrites. Existing channels with the canonical name are reused regardless of their current category, so this is non-disruptive to enable on a running deployment.
+
 ## Running locally
 
 ```bash

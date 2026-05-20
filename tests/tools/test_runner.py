@@ -44,6 +44,42 @@ class TestResolveTimeout:
             runner._resolve_timeout()
 
 
+class TestResolveCategoryName:
+    """``CALFKIT_A2A_CHANNEL_CATEGORY`` reading. Opt-in, empty-as-unset."""
+
+    def test_unset_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_CATEGORY", raising=False)
+        assert runner._resolve_category_name() is None
+
+    def test_set_returns_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "private-a2a")
+        assert runner._resolve_category_name() == "private-a2a"
+
+    def test_empty_string_treated_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator who leaves the line blank in ``.env`` should
+        get the default uncategorized behavior, not a category literally
+        named ``""``."""
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "")
+        assert runner._resolve_category_name() is None
+
+    def test_whitespace_only_treated_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "   ")
+        assert runner._resolve_category_name() is None
+
+    def test_leading_trailing_whitespace_stripped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quoting in shell/env files commonly leaves stray whitespace;
+        normalize so ``"  private-a2a "`` and ``"private-a2a"`` are
+        equivalent rather than two different Discord categories."""
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "  private-a2a  ")
+        assert runner._resolve_category_name() == "private-a2a"
+
+
 class TestResolveToolNodes:
     def test_returns_nodes_from_populated_registry(self) -> None:
         node = MagicMock()

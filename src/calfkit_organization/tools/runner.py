@@ -52,6 +52,7 @@ _REPLY_TOPIC = "calfkit.tools.reply"
 ``discord.outbox`` so target-agent ReturnCalls route here, not to the
 bridge's outbox consumer (which would project them to Discord twice)."""
 _TIMEOUT_ENV = "CALFKIT_TOOLS_TIMEOUT_SECONDS"
+_CATEGORY_ENV = "CALFKIT_A2A_CHANNEL_CATEGORY"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -74,6 +75,20 @@ def _resolve_timeout() -> float:
     if value <= 0:
         raise SystemExit(f"{_TIMEOUT_ENV} must be positive, got {value}")
     return value
+
+
+def _resolve_category_name() -> str | None:
+    """Read ``CALFKIT_A2A_CHANNEL_CATEGORY`` or return ``None``.
+
+    Empty / whitespace-only values are treated as unset so an operator
+    who leaves the line blank in ``.env`` gets the default uncategorized
+    behavior rather than a category literally named "" or " ".
+    """
+    raw = os.getenv(_CATEGORY_ENV)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
 
 
 def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
@@ -144,6 +159,7 @@ async def _amain() -> None:
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     timeout_seconds = _resolve_timeout()
+    category_name = _resolve_category_name()
 
     async with (
         DiscordSender(settings) as sender,
@@ -159,7 +175,9 @@ async def _amain() -> None:
         if not client.broker.running:
             await client.broker.start()
 
-        resolver = A2AChannelResolver(sender, settings.guild_id)
+        resolver = A2AChannelResolver(
+            sender, settings.guild_id, category_name=category_name
+        )
         private_chat.init(
             client=client,
             persona_sender=persona_sender,
@@ -171,11 +189,12 @@ async def _amain() -> None:
 
         worker = Worker(client, tool_nodes)
         logger.info(
-            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s timeout_s=%.1f",
+            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s timeout_s=%.1f a2a_category=%s",
             sorted(TOOL_REGISTRY),
             server_urls,
             _REPLY_TOPIC,
             timeout_seconds,
+            category_name,
         )
         await _run_worker(worker)
 
