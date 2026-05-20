@@ -1,14 +1,38 @@
 """Construct a runnable calfkit :class:`Worker` from an :class:`AgentDefinition`.
 
 The factory builds a vanilla :class:`calfkit.Agent` node — no subclassing —
-configured to subscribe to ``discord.channel.{cid}.in`` for each channel in
-the agent's persisted state, plus a single per-agent inbox topic
-``agent.{agent_id}.in`` used by the ``calfkit-tools`` runner to invoke the
-agent for A2A traffic without round-tripping through Discord. The agent's
-identity rides on every outbound publish via calfkit's ``x-calf-emitter``
-Kafka header, so the bridge egress can resolve the responding agent's
-persona from ``NodeResult.emitter_node_id`` without any application-level
-identity stamping.
+configured to subscribe to:
+
+* a per-agent **private return topic** ``{agent_id}.private.return`` at
+  index ``[0]`` of ``subscribe_topics`` (so it is also the callback topic
+  for tool ``Call`` and ``TailCall`` envelopes — see below);
+* ``discord.channel.{cid}.in`` for each channel in the agent's persisted
+  state;
+* a single per-agent inbox topic ``agent.{agent_id}.in`` used by the
+  ``calfkit-tools`` runner to invoke the agent for A2A traffic without
+  round-tripping through Discord.
+
+The agent's identity rides on every outbound publish via calfkit's
+``x-calf-emitter`` Kafka header, so the bridge egress can resolve the
+responding agent's persona from ``NodeResult.emitter_node_id`` without
+any application-level identity stamping.
+
+**Why the private return topic at index [0]:** calfkit's
+:class:`~calfkit.nodes.base.BaseNodeDef` uses ``subscribe_topics[0]`` as
+the callback topic for tool ``Call`` envelopes and as the target for
+``TailCall`` retries (see ``calfkit/nodes/base.py`` ``_publish_action``
+and ``calfkit/nodes/agent.py`` ``TailCall`` construction). When two
+agents co-tenant on the same channel topic (the multi-agent ambient
+fan-out this project relies on), making that shared channel the
+callback would deliver each agent's tool return to *every* co-tenant,
+causing each peer to also run its LLM on the originating agent's state
+and emit a duplicate (and often incorrect) reply to the user. Putting a
+per-agent private topic at ``[0]`` keeps tool returns scoped to the
+agent that initiated the call; the channel topics still live at
+``[1:]`` so ambient fan-out is unaffected. The name matches calfkit's
+own (currently unused) :attr:`BaseNodeDef._return_topic` so the
+workaround dovetails with an upstream fix if calfkit later wires that
+attribute in.
 
 Tools declared in the agent's ``.md`` frontmatter under ``tools:`` are
 resolved against :data:`calfkit_organization.tools.TOOL_REGISTRY` and
@@ -89,6 +113,15 @@ _AGENT_INBOX_TOPIC_TEMPLATE = "agent.{agent_id}.in"
 """Per-agent private inbox topic. The ``calfkit-tools`` runner publishes
 A2A invocations here so an agent can be reached without routing through
 Discord. Subscribed to by every agent in addition to its channel topics."""
+_PRIVATE_RETURN_TOPIC_TEMPLATE = "{agent_id}.private.return"
+"""Per-agent private return topic. Placed at ``subscribe_topics[0]`` so
+calfkit's :class:`~calfkit.nodes.base.BaseNodeDef` uses it as the
+callback for tool ``Call`` envelopes (and as the ``TailCall`` retry
+target). Only this agent's Worker subscribes to the topic, so a tool
+return cannot leak into a co-tenant agent's handler — see the module
+docstring for the failure mode this prevents. Matches calfkit's own
+unused :attr:`BaseNodeDef._return_topic` naming for forward
+compatibility with an upstream fix."""
 
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "claude-sonnet-4-5",
@@ -275,14 +308,24 @@ class AgentFactory:
 
         provider = self._resolve_provider(definition)
         model_name = self._resolve_model(definition, provider)
+        # Per-agent private return topic at index [0]: calfkit uses
+        # ``subscribe_topics[0]`` as the callback for tool ``Call``
+        # envelopes and the ``TailCall`` retry target. Channel topics
+        # are shared across co-tenant agents (the ambient fan-out
+        # pattern), so they must NOT be index 0 or each agent would
+        # receive the others' tool returns and emit duplicate replies.
+        # See the module docstring for the full failure mode.
         subscribe_topics = [
-            self._subscribe_topic_template.format(cid=cid) for cid in state.channels
+            _PRIVATE_RETURN_TOPIC_TEMPLATE.format(agent_id=definition.agent_id)
         ]
+        subscribe_topics.extend(
+            self._subscribe_topic_template.format(cid=cid) for cid in state.channels
+        )
         # Per-agent inbox: the ``calfkit-tools`` runner publishes A2A
         # invocations to this topic so the LLM-driven ``private_chat``
         # tool can reach this agent without round-tripping through Discord.
-        # Appended last so channel topics retain their existing order in
-        # logs and assertions.
+        # Appended last so the channel slice (``[1:-1]``) retains its
+        # existing order in logs and assertions.
         subscribe_topics.append(_AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=definition.agent_id))
         model_settings = build_model_settings(provider, definition.thinking_effort)
 

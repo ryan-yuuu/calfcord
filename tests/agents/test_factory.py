@@ -92,7 +92,8 @@ class TestBuild:
 
     def test_subscribe_topics_use_in_suffix(self) -> None:
         """Bridge publishes to ``discord.channel.{cid}.in``; agent must match.
-        Per-agent inbox ``agent.{id}.in`` is always appended for A2A."""
+        Per-agent private return topic is at index [0]; per-agent inbox
+        ``agent.{id}.in`` is appended last for A2A."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
@@ -105,6 +106,7 @@ class TestBuild:
             MagicMock(),
         )
         assert worker._nodes[0].subscribe_topics == [
+            "scheduler.private.return",
             "discord.channel.100.in",
             "discord.channel.200.in",
             "discord.channel.300.in",
@@ -113,7 +115,8 @@ class TestBuild:
 
     def test_subscribe_topic_template_override(self) -> None:
         """The template is configurable for tests / alternate deployments.
-        The per-agent inbox is independent of the channel template."""
+        The per-agent inbox and private return topic are independent of
+        the channel template."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
@@ -127,6 +130,7 @@ class TestBuild:
             MagicMock(),
         )
         assert worker._nodes[0].subscribe_topics == [
+            "scheduler.private.return",
             "my.test.channel.100",
             "agent.scheduler.in",
         ]
@@ -145,6 +149,52 @@ class TestBuild:
             MagicMock(),
         )
         assert worker._nodes[0].subscribe_topics[-1] == "agent.researcher.in"
+
+    def test_private_return_topic_is_at_index_zero(self) -> None:
+        """Calfkit uses ``subscribe_topics[0]`` as the callback topic for
+        tool ``Call`` envelopes (``base.py:_publish_action``) and as the
+        ``TailCall`` retry target (``agent.py``). If a co-tenant agent's
+        channel topic ever ended up at index 0, the other agent would
+        receive every tool return and emit duplicate replies — pin the
+        ordering invariant here so a future refactor that reorders the
+        list trips this test first."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(agent_id="researcher"),
+            AgentRuntimeState(channels=[100, 200]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].subscribe_topics[0] == "researcher.private.return"
+
+    def test_private_return_topic_is_per_agent(self) -> None:
+        """Two co-tenant agents must get distinct private return topics —
+        otherwise the workaround collapses back to the shared-topic bug.
+        The topic name is derived from agent_id, so distinct ids produce
+        distinct topics by construction; this guard pins that contract."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker_a = factory.build(
+            _definition(agent_id="alpha"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        worker_b = factory.build(
+            _definition(agent_id="bravo"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker_a._nodes[0].subscribe_topics[0] != worker_b._nodes[0].subscribe_topics[0]
+        assert worker_a._nodes[0].subscribe_topics[0] == "alpha.private.return"
+        assert worker_b._nodes[0].subscribe_topics[0] == "bravo.private.return"
 
     def test_gates_registered_in_short_circuit_order(self) -> None:
         """Addressable gate first (cheap), addressed-to-me second (content-based)."""
