@@ -68,7 +68,12 @@ from calfkit_organization.agents.gates import make_addressable_gate, make_addres
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.discord.persona import DiscordPersonaSender
-from calfkit_organization.tools import TOOL_REGISTRY
+
+# NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
+# Tool modules transitively import bridge code, and bridge imports agents.factory
+# for DEFAULT_PROVIDER/resolve_provider — a top-level import here would cycle.
+# Lazy import defers the resolution to factory construction time, by which point
+# all modules have finished loading.
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +220,11 @@ class AgentFactory:
         self._default_model = default_model
         self._model_client_factory = model_client_factory or _default_model_client_factory
         self._subscribe_topic_template = subscribe_topic_template
-        self._tool_registry = TOOL_REGISTRY if tool_registry is None else tool_registry
+        if tool_registry is None:
+            from calfkit_organization.tools import TOOL_REGISTRY
+
+            tool_registry = TOOL_REGISTRY
+        self._tool_registry = tool_registry
 
     def build(
         self,

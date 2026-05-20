@@ -21,6 +21,15 @@ from __future__ import annotations
 
 from calfkit.nodes.tool import ToolNodeDef
 
+# The registry is intentionally defined BEFORE any tool module is imported.
+# Tool modules transitively import bridge code, which imports agent code,
+# which imports the agent factory, which imports back into this module —
+# the registry name must already exist by that point so the cycle resolves
+# to an empty dict (then mutated below once the imports complete).
 TOOL_REGISTRY: dict[str, ToolNodeDef] = {}
-"""Tool name → :class:`ToolNodeDef`. Populated by importing tool modules
-below. Keep entries in alphabetical order for easy scanning."""
+"""Tool name → :class:`ToolNodeDef`. Keep entries in alphabetical order
+for easy scanning."""
+
+from calfkit_organization.tools.private_chat import private_chat_tool  # noqa: E402
+
+TOOL_REGISTRY["private_chat"] = private_chat_tool

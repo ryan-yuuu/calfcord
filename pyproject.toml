@@ -15,6 +15,7 @@ dependencies = [
 [project.scripts]
 calfkit-bridge = "calfkit_organization.bridge.gateway:main"
 calfkit-agent = "calfkit_organization.agents.runner:main"
+calfkit-tools = "calfkit_organization.tools.runner:main"
 
 [build-system]
 requires = ["hatchling"]
