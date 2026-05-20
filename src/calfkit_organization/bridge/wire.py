@@ -11,6 +11,20 @@ Both models are frozen — once normalized, a wire message is immutable.
     - Add-only fields are non-breaking. Do not bump the version.
     - Field renames or removals require bumping ``schema_version`` AND a
       CHANGELOG entry. Consumers must tolerate the bump.
+
+A2A invocations:
+    The ``calfkit-tools`` ``private_chat`` tool reuses this schema when it
+    invokes another agent on ``agent.{agent_id}.in``. It forwards the
+    caller's originating wire with three fields overridden:
+    ``slash_target`` set to the target agent's id, ``kind`` set to
+    ``"slash"`` (so the existing ``addressed_to_me`` gate accepts), and
+    ``content`` set to the A2A payload. Channel id, author, and
+    message_id are preserved from the caller's original Discord context.
+    A companion deps key ``caller_agent_id: str`` names the originating
+    *agent* (distinct from ``author``, which always reflects the original
+    human or webhook that started the chain). Agents that want to
+    distinguish "human ↔ me" from "peer ↔ me" should read
+    ``deps.get("caller_agent_id")``.
 """
 
 from __future__ import annotations
