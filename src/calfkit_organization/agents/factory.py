@@ -18,21 +18,20 @@ responding agent's persona from ``NodeResult.emitter_node_id`` without
 any application-level identity stamping.
 
 **Why the private return topic at index [0]:** calfkit's
-:class:`~calfkit.nodes.base.BaseNodeDef` uses ``subscribe_topics[0]`` as
-the callback topic for tool ``Call`` envelopes and as the target for
-``TailCall`` retries (see ``calfkit/nodes/base.py`` ``_publish_action``
-and ``calfkit/nodes/agent.py`` ``TailCall`` construction). When two
+:class:`~calfkit.nodes.base.BaseNodeDef` treats
+``subscribe_topics[0]`` as the callback topic for tool ``Call``
+envelopes and as the target for ``TailCall`` retries. When two
 agents co-tenant on the same channel topic (the multi-agent ambient
 fan-out this project relies on), making that shared channel the
-callback would deliver each agent's tool return to *every* co-tenant,
-causing each peer to also run its LLM on the originating agent's state
-and emit a duplicate (and often incorrect) reply to the user. Putting a
-per-agent private topic at ``[0]`` keeps tool returns scoped to the
-agent that initiated the call; the channel topics still live at
-``[1:]`` so ambient fan-out is unaffected. The name matches calfkit's
-own (currently unused) :attr:`BaseNodeDef._return_topic` so the
-workaround dovetails with an upstream fix if calfkit later wires that
-attribute in.
+callback would deliver each agent's tool return to *every*
+co-tenant, causing each peer to also run its LLM on the originating
+agent's state and emit a duplicate (and often incorrect) reply to
+the user. Putting a per-agent private topic at ``[0]`` keeps tool
+returns scoped to the agent that initiated the call; the channel
+topics still live at ``[1:]`` so ambient fan-out is unaffected. The
+name matches calfkit's own :attr:`BaseNodeDef._return_topic`
+attribute so this workaround dovetails with an upstream fix that
+wires the attribute in.
 
 Tools declared in the agent's ``.md`` frontmatter under ``tools:`` are
 resolved against :data:`calfkit_organization.tools.TOOL_REGISTRY` and
@@ -80,6 +79,7 @@ import logging
 import os
 from collections.abc import Callable
 
+from calfkit._vendor.pydantic_ai import ToolOutput
 from calfkit.client import Client
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import ToolNodeDef
@@ -89,9 +89,11 @@ from calfkit.worker import Worker
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider
 from calfkit_organization.agents.gates import make_addressable_gate, make_addressed_to_me_gate
+from calfkit_organization.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.discord.persona import DiscordPersonaSender
+from calfkit_organization.topics import AMBIENT_INGRESS_TOPIC
 
 # NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
 # Tool modules transitively import bridge code, and bridge imports agents.factory
@@ -120,8 +122,9 @@ callback for tool ``Call`` envelopes (and as the ``TailCall`` retry
 target). Only this agent's Worker subscribes to the topic, so a tool
 return cannot leak into a co-tenant agent's handler — see the module
 docstring for the failure mode this prevents. Matches calfkit's own
-unused :attr:`BaseNodeDef._return_topic` naming for forward
-compatibility with an upstream fix."""
+:attr:`BaseNodeDef._return_topic` attribute (defined but not yet
+wired into the publish path) for forward compatibility with an
+upstream fix."""
 
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "claude-sonnet-4-5",
@@ -208,7 +211,7 @@ class AgentFactory:
 
     def __init__(
         self,
-        persona_sender: DiscordPersonaSender,
+        persona_sender: DiscordPersonaSender | None,
         calfkit_client: Client,
         *,
         default_provider: Provider = DEFAULT_PROVIDER,
@@ -223,8 +226,11 @@ class AgentFactory:
             persona_sender: Held for future use (e.g. when agents gain
                 direct-send capabilities for non-bridge-mediated flows).
                 Currently unused — the bridge's own persona sender posts
-                replies. Accepted here so the constructor signature stays
-                stable as the factory's responsibilities grow.
+                replies, and the router build path doesn't post to
+                Discord at all. Pass ``None`` from the router runner;
+                pass a real :class:`DiscordPersonaSender` from the
+                assistant runner so this stays available when the
+                "future use" arrives.
             calfkit_client: The calfkit :class:`Client` the agent worker
                 connects through.
             default_provider: Fallback provider when neither
@@ -283,8 +289,8 @@ class AgentFactory:
     def build_node(
         self,
         definition: AgentDefinition,
-        state: AgentRuntimeState,
-        store: AgentStateStore,
+        state: AgentRuntimeState | None,
+        store: AgentStateStore | None,
     ) -> Agent:
         """Build one :class:`Agent` node from ``definition`` and ``state``.
 
@@ -293,16 +299,30 @@ class AgentFactory:
         keyed on its ``node_id``, so co-tenant nodes do not contend for
         partitions.
 
+        Routers (``definition.role == "router"``) take a separate build
+        path: single-topic subscription on the configured ambient topic,
+        no standard gates, ``ToolOutput`` final-output type, explicit
+        ``publish_topic``. See :meth:`_build_router_node`. Routers
+        accept ``state=None``/``store=None`` because their subscription
+        list does not depend on per-channel state.
+
         Raises:
-            ValueError: If ``state.channels`` is empty, or if the resolved
-                provider isn't one of :data:`_PROVIDER_DEFAULT_MODELS`
-                (typically only reachable via env-var override with an
-                unknown value).
+            ValueError: If ``definition.role == "assistant"`` and
+                ``state`` is ``None`` or ``state.channels`` is empty
+                (assistants must subscribe to at least one channel),
+                or if the resolved provider isn't one of
+                :data:`_PROVIDER_DEFAULT_MODELS` (typically only
+                reachable via env-var override with an unknown
+                value), or if a router definition violates
+                router-specific invariants.
         """
-        if not state.channels:
+        if definition.role == "router":
+            return self._build_router_node(definition)
+
+        if state is None or not state.channels:
             raise ValueError(
                 f"agent {definition.agent_id!r} has no channels in state; "
-                "an agent must subscribe to at least one channel"
+                "an assistant must subscribe to at least one channel"
             )
         tools = self._resolve_tools(definition)
 
@@ -324,8 +344,6 @@ class AgentFactory:
         # Per-agent inbox: the ``calfkit-tools`` runner publishes A2A
         # invocations to this topic so the LLM-driven ``private_chat``
         # tool can reach this agent without round-tripping through Discord.
-        # Appended last so the channel slice (``[1:-1]``) retains its
-        # existing order in logs and assertions.
         subscribe_topics.append(_AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=definition.agent_id))
         model_settings = build_model_settings(provider, definition.thinking_effort)
 
@@ -350,11 +368,89 @@ class AgentFactory:
         agent.gate(make_addressable_gate(definition.agent_id))
         agent.gate(make_addressed_to_me_gate(definition.agent_id))
 
-        # `store` is accepted for forward compatibility. Calfkit's Worker
-        # registers subscribers once at start; runtime channel changes are
-        # not yet wired (see module docstring).
-        del store
+        # ``store`` is accepted for forward compatibility but unused;
+        # see module docstring on why runtime channel changes aren't
+        # wired yet. We deliberately do not bind it locally.
+        _ = store
 
+        return agent
+
+    def _build_router_node(
+        self,
+        definition: AgentDefinition,
+    ) -> Agent:
+        """Build the router :class:`Agent` node.
+
+        Router invariants enforced by :class:`AgentDefinition`:
+            - ``tools`` is empty (the router uses :class:`ToolOutput`,
+              not function tools)
+            - ``publish_topic`` is non-None (declares the router's own
+              output topic; the fan-out consumer subscribes there)
+
+        Differences from the assistant build path:
+            - No state channels required (router subscribes to a single
+              fixed ambient ingress topic, not per-channel topics).
+            - No standard gates (no self-recognition, no
+              addressed-to-me check — the router is the only consumer
+              of its ingress topic, so every envelope is for it).
+            - ``final_output_type=ToolOutput(RoutingDecision,
+              name=ROUTER_OUTPUT_TOOL_NAME)`` so the LLM's structured
+              output terminates the agent loop in one turn (pydantic-ai
+              recognizes the tool call as the agent's terminal output
+              under ``end_strategy="early"``).
+            - ``publish_topic`` is set, so FastStream's ``@publisher``
+              wrapping mirrors the agent's ``ReturnCall`` to that topic.
+              The duplicate publish to ``frame.callback_topic`` lands
+              on a throwaway topic with no consumer (see
+              ``bridge/ingress.py``).
+
+        Router builds need no per-channel state (single fixed ambient
+        topic) and no on-disk state store (router state is
+        env-driven). Callers should reach this method via
+        :meth:`build_node` with ``state=None``/``store=None`` rather
+        than building a never-used :class:`AgentStateStore`.
+
+        Note on env-var precedence: the router definition's
+        ``provider``/``model`` are populated by
+        :func:`build_router_definition` from ``CALFKIT_ROUTER_*``
+        env vars (with defaults). Those values are always non-None,
+        so the assistant-targeted ``CALFKIT_AGENT_DEFAULT_*`` env
+        vars never apply on this path. A future refactor that lets
+        the router definition leave ``provider`` or ``model`` as
+        ``None`` would silently start picking up the assistant
+        defaults — keep them non-None.
+        """
+        provider = self._resolve_provider(definition)
+        model_name = self._resolve_model(definition, provider)
+        model_settings = build_model_settings(provider, definition.thinking_effort)
+
+        subscribe_topics = [AMBIENT_INGRESS_TOPIC]
+
+        logger.info(
+            "building router agent=%s provider=%s model=%s topic=%s publish_topic=%s",
+            definition.agent_id,
+            provider,
+            model_name,
+            subscribe_topics[0],
+            definition.publish_topic,
+        )
+
+        agent = Agent(
+            node_id=definition.agent_id,
+            system_prompt=definition.system_prompt,
+            subscribe_topics=subscribe_topics,
+            publish_topic=definition.publish_topic,
+            model_client=self._model_client_factory(provider, model_name),
+            model_settings=model_settings,
+            final_output_type=ToolOutput(RoutingDecision, name=ROUTER_OUTPUT_TOOL_NAME),
+        )
+        # No standard gates: the router is the only consumer of its
+        # ingress topic, so every envelope is for it.
+        # :meth:`BridgeIngress.handle`'s ambient branch already drops
+        # ``is_bot`` / ``is_webhook`` authors before publishing
+        # (preventing agent-on-agent reply storms), and a
+        # "self-author" loop is impossible because the router never
+        # publishes back to its own subscribe topic.
         return agent
 
     def _resolve_provider(self, definition: AgentDefinition) -> Provider:

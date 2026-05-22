@@ -33,14 +33,13 @@ and other strictly deployment-specific state still live outside the .md
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Literal
 
 import frontmatter
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-_NAME_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
+from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
 
 Provider = Literal["anthropic", "openai"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.
@@ -57,6 +56,18 @@ Six abstract levels mapped to provider-specific reasoning/thinking
 parameters in :mod:`calfkit_organization.agents.thinking`. Tier names
 parallel Claude Code's effort vocabulary; ``xhigh`` is a calfkit-specific
 step between ``high`` and ``max``.
+"""
+
+AgentRole = Literal["assistant", "router"]
+"""Agent role — distinguishes ordinary assistant agents from the built-in
+routing agent.
+
+``"assistant"`` (default) is what every user-defined ``agents/*.md`` file
+produces. ``"router"`` is reserved for the singleton built-in router
+agent constructed by :func:`calfkit_organization.router.definition.build_router_definition`;
+the factory wires routers differently (single-topic subscription, no
+standard gates, ``ToolOutput`` final-output type, explicit
+``publish_topic``).
 """
 
 
@@ -82,18 +93,34 @@ class AgentDefinition(BaseModel):
     model: str | None = None
     tools: tuple[str, ...] = ()
     thinking_effort: ThinkingEffort | None = None
+    role: AgentRole = "assistant"
+    """Agent role. Defaults to ``"assistant"`` — ordinary user-defined
+    agent. ``"router"`` is reserved for the singleton built-in routing
+    agent; the factory uses a different wiring path for routers (no
+    standard gates, single-topic subscription, ``ToolOutput`` final
+    output type). User-authored ``agents/*.md`` should not set this
+    field; the validator does not forbid it but operators wiring a
+    second router will hit a registry boot error in :class:`AgentRegistry`."""
+    publish_topic: str | None = Field(default=None, min_length=1)
+    """Optional explicit Kafka publish topic for the agent's
+    ``ReturnCall``. Used by routers to declare their structured-output
+    destination (where the fan-out consumer subscribes). ``None`` for
+    assistant agents — they emit ``ReturnCall`` to the inbound frame's
+    ``callback_topic`` (i.e., the bridge's ``discord.outbox``), which
+    is the standard calfkit dispatch pattern."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by
-    :func:`parse_agent_md`; ``None`` for in-memory test constructions.
-    ``exclude=True`` prevents accidental round-trip into a YAML dump;
-    ``repr=False`` keeps logs tidy. Required for the ``/thinking-effort``
-    slash command's rewrite."""
+    :func:`parse_agent_md`; ``None`` for in-memory test constructions
+    and for the built-in router (which is constructed in code, not
+    parsed from disk). ``exclude=True`` prevents accidental round-trip
+    into a YAML dump; ``repr=False`` keeps logs tidy. Required for the
+    ``/thinking-effort`` slash command's rewrite."""
 
     @field_validator("agent_id")
     @classmethod
     def _validate_agent_id(cls, v: str) -> str:
-        if not _NAME_PATTERN.fullmatch(v):
+        if not AGENT_ID_PATTERN.fullmatch(v):
             raise ValueError(f"name must match [a-z0-9_-]{{1,32}}, got {v!r}")
         return v
 
@@ -102,7 +129,7 @@ class AgentDefinition(BaseModel):
     def _validate_slash(cls, v: str) -> str:
         if not v.startswith("/"):
             raise ValueError(f"slash must start with '/', got {v!r}")
-        if not _NAME_PATTERN.fullmatch(v[1:]):
+        if not AGENT_ID_PATTERN.fullmatch(v[1:]):
             raise ValueError(f"slash name (after '/') must match [a-z0-9_-]{{1,32}}, got {v!r}")
         return v
 
@@ -128,6 +155,50 @@ class AgentDefinition(BaseModel):
         if not v.strip():
             raise ValueError("system_prompt (markdown body) must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def _validate_router_constraints(self) -> "AgentDefinition":
+        """Enforce role-specific invariants on ``tools`` and ``publish_topic``.
+
+        Routers:
+            - must declare no ``tools`` (the router uses pydantic-ai's
+              ``ToolOutput`` pattern, where the "tool" is a
+              schema-providing pseudo-tool whose args ARE the output —
+              the body never runs; declaring real function tools
+              alongside would muddy the LLM's tool list and the
+              factory's wiring)
+            - must declare a ``publish_topic`` (the fan-out consumer
+              subscribes there; without it the router has no
+              downstream consumer pathway)
+
+        Assistants:
+            - must NOT declare a ``publish_topic`` (assistants emit
+              ``ReturnCall`` to the inbound frame's ``callback_topic``,
+              not to a fixed published topic; setting one would be a
+              silent no-op that an operator might mistake for working
+              custom-output wiring).
+        """
+        if self.role == "router":
+            if self.tools:
+                raise ValueError(
+                    f"router agent {self.agent_id!r} must declare no tools; "
+                    f"got tools={list(self.tools)!r}"
+                )
+            if not self.publish_topic:
+                raise ValueError(
+                    f"router agent {self.agent_id!r} must declare a "
+                    f"publish_topic; the fan-out consumer subscribes there"
+                )
+        else:  # role == "assistant"
+            if self.publish_topic is not None:
+                raise ValueError(
+                    f"agent {self.agent_id!r} has role='assistant' but "
+                    f"declares publish_topic={self.publish_topic!r}; "
+                    f"publish_topic is reserved for routers — "
+                    f"assistants emit ReturnCall to the inbound "
+                    f"frame's callback_topic (set by the caller)"
+                )
+        return self
 
 
 def parse_agent_md(path: Path) -> AgentDefinition:

@@ -79,9 +79,15 @@ class SlashCommandManager:
         self._tree.add_command(self._build_thinking_effort_command())
 
     def _build_thinking_effort_command(self) -> app_commands.Command:
+        # The built-in router is excluded from the choice list — its
+        # config is env-driven (CALFKIT_ROUTER_*) and its definition
+        # has source_path=None, so the underlying
+        # ``set_thinking_effort`` would raise on selection. Hiding it
+        # from the Discord UI prevents the dead choice.
         agent_choices = [
             app_commands.Choice(name=spec.agent_id, value=spec.agent_id)
             for spec in self._registry.all()
+            if spec.role != "router"
         ]
         effort_choices = [
             app_commands.Choice(name=value, value=value) for value in _THINKING_EFFORT_VALUES

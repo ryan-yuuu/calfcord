@@ -5,17 +5,19 @@ description = "Multi-agent organization on Discord."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "calfkit>=0.3.1",
+    "calfkit~=0.3.1",
     "discord-py>=2.7.1",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
     "python-frontmatter>=1.1.0,<2",
+    "uuid-utils>=0.15.0",
 ]
 
 [project.scripts]
 calfkit-bridge = "calfkit_organization.bridge.gateway:main"
 calfkit-agent = "calfkit_organization.agents.runner:main"
 calfkit-tools = "calfkit_organization.tools.runner:main"
+calfkit-router = "calfkit_organization.router.runner:main"
 
 [build-system]
 requires = ["hatchling"]

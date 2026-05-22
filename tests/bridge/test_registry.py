@@ -103,9 +103,15 @@ class TestFromAgentsDir:
         with pytest.raises(FileNotFoundError):
             AgentRegistry.from_agents_dir(tmp_path / "nonexistent")
 
-    def test_empty_directory_returns_empty_registry(self, tmp_path: Path) -> None:
+    def test_empty_directory_returns_router_only_registry(self, tmp_path: Path) -> None:
+        """An empty agents dir still produces a registry containing the
+        built-in router (appended unconditionally by
+        :meth:`from_agents_dir`). The router-count invariant requires
+        it, and the loader's "no agents" case maps to "router only"."""
         registry = AgentRegistry.from_agents_dir(tmp_path)
-        assert registry.all() == ()
+        all_defs = registry.all()
+        assert len(all_defs) == 1
+        assert all_defs[0].role == "router"
 
     def test_duplicate_slash_in_dir_rejected(self, tmp_path: Path) -> None:
         # Two agents both claim slash /shared — registry catches this.
@@ -157,10 +163,13 @@ class TestSetThinkingEffort:
         # by_slash / by_display_name return the freshly-swapped entry.
         assert registry.by_slash("/scheduler").thinking_effort == "high"
         assert registry.by_display_name("Scheduler").thinking_effort == "high"
-        # all() exposes the new entry exactly once.
+        # all() exposes the swapped scheduler entry exactly once (the
+        # built-in router is also in the registry, but it has a
+        # different agent_id and isn't affected by this mutation).
         all_defs = registry.all()
-        assert len(all_defs) == 1
-        assert all_defs[0].thinking_effort == "high"
+        scheduler_defs = [d for d in all_defs if d.agent_id == "scheduler"]
+        assert len(scheduler_defs) == 1
+        assert scheduler_defs[0].thinking_effort == "high"
 
     async def test_unknown_agent_raises(self, tmp_path: Path) -> None:
         self._write_agent(tmp_path, "scheduler")

@@ -321,3 +321,23 @@ class TestRegister:
         cmd = manager._tree.get_command(_THINKING_EFFORT_COMMAND_NAME)
         assert cmd is not None
         assert cmd.name == _THINKING_EFFORT_COMMAND_NAME
+
+    def test_thinking_effort_choices_exclude_router(
+        self, manager: SlashCommandManager
+    ) -> None:
+        """The built-in router has ``source_path=None`` so the
+        ``set_thinking_effort`` rewrite path would raise on selection.
+        It must not appear in the slash UI's choice list."""
+        # The manager fixture uses `from_agents_dir`, which auto-appends
+        # the built-in router. Verify it's in the registry but NOT in
+        # the choice list.
+        agent_ids = {spec.agent_id for spec in manager._registry.all()}
+        assert "_router" in agent_ids  # registry has it
+        command = manager._build_thinking_effort_command()
+        # The 'agent' parameter's choices come from the `agent_choices`
+        # local. discord.py stores them on the param descriptor.
+        agent_param = command._params["agent"]
+        choice_ids = {c.value for c in agent_param.choices}
+        assert "_router" not in choice_ids
+        assert "scribe" in choice_ids
+        assert "echo" in choice_ids

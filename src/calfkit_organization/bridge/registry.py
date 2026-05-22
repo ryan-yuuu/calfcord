@@ -23,10 +23,18 @@ from typing import Self
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
 from calfkit_organization.agents.loader import load_agents_dir
 from calfkit_organization.agents.md_writer import update_thinking_effort
+from calfkit_organization.router.definition import build_router_definition
 
 
 class AgentRegistry:
-    """In-memory index of :class:`AgentDefinition`s with O(1) lookups."""
+    """In-memory index of :class:`AgentDefinition`s with O(1) lookups.
+
+    Routers (``role == "router"``) are first-class index members but are
+    treated specially: there must be exactly one router in the registry
+    (the built-in singleton). Zero or more-than-one routers indicate a
+    boot-time wiring bug and are rejected here so the failure surfaces
+    immediately rather than at first ambient invocation.
+    """
 
     def __init__(self, definitions: Sequence[AgentDefinition]) -> None:
         self._by_id: dict[str, AgentDefinition] = {}
@@ -44,6 +52,31 @@ class AgentRegistry:
 
         for d in self._all:
             self._index(d)
+
+        # Multi-router detection runs after indexing so duplicate-id
+        # /slash/display_name errors (which also fire if two routers
+        # share those fields) take precedence — operators see the more
+        # actionable "duplicate slash" message before the role error.
+        # Zero-router is NOT rejected here: the "exactly one router"
+        # invariant applies to the production load path
+        # (:meth:`from_agents_dir` appends the built-in router
+        # unconditionally; :meth:`router` raises at lookup time on a
+        # zero-router registry), but in-memory test fixtures that
+        # don't exercise routing should be allowed to omit it. A
+        # multi-router list, by contrast, is always a wiring bug
+        # (only the built-in singleton should declare role="router";
+        # a user-defined ``agents/*.md`` accidentally setting it would
+        # land here too).
+        routers = [d for d in self._all if d.role == "router"]
+        if len(routers) > 1:
+            ids = [r.agent_id for r in routers]
+            raise ValueError(
+                f"AgentRegistry has multiple router agents {ids!r}; "
+                f"exactly one router is allowed (only the built-in "
+                f"router declared via build_router_definition() should "
+                f"set role='router' — check user-authored agents/*.md "
+                f"for an accidental role: router frontmatter field)"
+            )
 
     def _index(self, definition: AgentDefinition) -> None:
         """Insert ``definition`` into all three indexes, rejecting duplicates."""
@@ -83,8 +116,49 @@ class AgentRegistry:
         Delegates parsing to
         :func:`calfkit_organization.agents.loader.load_agents_dir` and adds
         the cross-agent duplicate-detection of :meth:`__init__`.
+
+        The built-in router definition is appended automatically — every
+        registry instance loaded from disk includes the singleton router
+        without any user-side opt-in. A user-defined ``agents/_router.md``
+        file would collide with the built-in's ``agent_id`` (or its
+        reserved ``slash``/``display_name``) and the duplicate-detection
+        in :meth:`_index` would raise at construction time.
         """
-        return cls(load_agents_dir(path))
+        definitions = list(load_agents_dir(path))
+        definitions.append(build_router_definition())
+        return cls(definitions)
+
+    def router(self) -> AgentDefinition:
+        """Return the singleton router :class:`AgentDefinition`.
+
+        :meth:`from_agents_dir` appends the built-in router on every
+        load, so any registry loaded from disk in production carries
+        exactly one. Test fixtures that build the registry directly
+        without a router will get a :class:`ValueError` from this
+        accessor — the failure is intentional and indicates the
+        registry was constructed without the router that production
+        always has.
+
+        The multi-router case can't be reached here: it raises in
+        :meth:`__init__`'s indexing-time validation. The zero-router
+        case CAN be reached (the constructor permits it for test
+        fixtures); it raises lazily here, on first lookup.
+
+        Raises:
+            ValueError: if the registry has no router agent. Operators
+                running production paths see this only on a wiring
+                regression (e.g., a refactor of
+                :meth:`from_agents_dir` that drops the router append).
+        """
+        for d in self._all:
+            if d.role == "router":
+                return d
+        raise ValueError(
+            "AgentRegistry has zero router agents; the registry was "
+            "constructed without one (production paths go through "
+            "AgentRegistry.from_agents_dir which appends "
+            "build_router_definition() automatically)"
+        )
 
     def by_id(self, agent_id: str) -> AgentDefinition | None:
         return self._by_id.get(agent_id)

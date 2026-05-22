@@ -9,6 +9,7 @@ from calfkit_organization.bridge.normalizer import (
     SlashNormalizer,
     UnknownAgentMentionError,
 )
+from calfkit_organization.bridge.registry import AgentRegistry
 
 _BOT_USER_ID = 99
 _OWNER_USER_ID = 1234
@@ -121,6 +122,39 @@ class TestMentionParsing:
         with pytest.raises(UnknownAgentMentionError) as exc_info:
             normalizer.normalize(fake_message(content="@unknown_agent hi"))
         assert exc_info.value.unknown_names == ["unknown_agent"]
+
+    def test_at_router_mention_treated_as_unknown(self, fake_message):
+        """The built-in router agent is registered (so the bridge can
+        find it for routing) but is NOT user-invocable via @-mention.
+        ``@_router foo`` surfaces as ``UnknownAgentMentionError`` so
+        the gateway sends the standard fail-fast reply rather than
+        silently routing to a topic with no consumer."""
+        from calfkit_organization.agents.definition import AgentDefinition  # noqa: PLC0415
+
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    slash="/scheduler",
+                    display_name="Aksel",
+                    description="x",
+                    system_prompt="x",
+                ),
+                AgentDefinition(
+                    agent_id="_router",
+                    slash="/_router",
+                    display_name="Router",
+                    description="Internal routing agent",
+                    role="router",
+                    publish_topic="routing.decisions",
+                    system_prompt="x",
+                ),
+            ]
+        )
+        normalizer = MessageNormalizer(registry, _BOT_USER_ID, _OWNER_USER_ID)
+        with pytest.raises(UnknownAgentMentionError) as exc_info:
+            normalizer.normalize(fake_message(content="@_router hello"))
+        assert exc_info.value.unknown_names == ["_router"]
 
     def test_mention_is_case_insensitive(self, agent_registry, fake_message):
         normalizer = MessageNormalizer(agent_registry, _BOT_USER_ID, _OWNER_USER_ID)

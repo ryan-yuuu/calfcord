@@ -57,6 +57,26 @@ class TestFromRegistry:
         result = phonebook_from_registry(registry)
         assert [e.agent_id for e in result] == ["zeta", "alpha", "mu"]
 
+    def test_filters_out_router(self) -> None:
+        """The built-in router has no A2A inbox; listing it as a peer
+        would invite assistants' LLMs to call private_chat against a
+        topic with no consumer. ``phonebook_from_registry`` filters
+        ``role=router`` defensively."""
+        router = AgentDefinition(
+            agent_id="_router",
+            slash="/_router",
+            display_name="Router",
+            description="Internal routing agent",
+            role="router",
+            publish_topic="routing.decisions",
+            system_prompt="route",
+        )
+        registry = AgentRegistry([_agent("scribe"), router])
+        result = phonebook_from_registry(registry)
+        ids = {e.agent_id for e in result}
+        assert "_router" not in ids
+        assert "scribe" in ids
+
 
 class TestRoundtripThroughDeps:
     def test_to_deps_returns_json_friendly_dicts(self) -> None:

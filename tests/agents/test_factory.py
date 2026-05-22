@@ -591,3 +591,239 @@ class TestToolsWiring:
             )
         assert "calndar" in str(excinfo.value)
         assert "emial" in str(excinfo.value)
+
+
+def _router_definition(
+    *,
+    agent_id: str = "_router",
+    provider: Provider | None = "openai",
+    model: str | None = "gpt-5-nano",
+    thinking_effort: str | None = "none",
+    publish_topic: str = "routing.decisions",
+) -> AgentDefinition:
+    return AgentDefinition(
+        agent_id=agent_id,
+        slash=f"/{agent_id}",
+        display_name="Router",
+        description="Internal routing agent",
+        provider=provider,
+        model=model,
+        thinking_effort=thinking_effort,  # type: ignore[arg-type]
+        role="router",
+        publish_topic=publish_topic,
+        system_prompt="You are the routing agent. Pick the right respondents.",
+    )
+
+
+class TestRouterRole:
+    """Router-role build path: single fixed topic, no gates, ToolOutput.
+
+    Verifies the factory branches correctly on ``role="router"`` and
+    wires the agent with the special-case configuration the routing
+    component needs.
+    """
+
+    def test_router_builds_without_channels(self) -> None:
+        """Routers subscribe to a fixed ambient topic, not per-channel
+        topics — so an empty channels list is acceptable."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _router_definition(),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        assert len(worker._nodes) == 1
+        assert isinstance(worker._nodes[0], Agent)
+
+    def test_router_subscribes_to_ambient_topic_only(self) -> None:
+        """Single subscribe topic: the bridge's ambient ingress.
+        No private return topic at [0], no per-agent inbox."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _router_definition(),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].subscribe_topics == ["discord.ambient.in"]
+
+    def test_router_has_no_standard_gates(self) -> None:
+        """The router is the only consumer of its ingress topic; no
+        self-recognition or addressed-to-me checks are needed."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _router_definition(),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        # The assistant path attaches two gates (addressable +
+        # addressed_to_me); the router path attaches none.
+        assert worker._nodes[0].gates == []
+
+    def test_router_publish_topic_is_set(self) -> None:
+        """The router declares its own output topic; the fan-out
+        consumer subscribes there. Without publish_topic, the agent's
+        ReturnCall would only land on frame.callback_topic — the
+        bridge's throwaway topic, which has no consumer."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _router_definition(publish_topic="routing.decisions"),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].publish_topic == "routing.decisions"
+
+    def test_router_final_output_type_is_tooloutput_routing_decision(self) -> None:
+        """The router's terminal output is a structured RoutingDecision
+        emitted via pydantic-ai's ToolOutput pattern, which terminates
+        the agent loop in one LLM turn (no second-pass narration).
+
+        The tool ``name`` MUST come from the
+        :data:`ROUTER_OUTPUT_TOOL_NAME` constant — the same constant
+        the router's system prompt (``router/prompt.py``) interpolates
+        into rule 5. A hardcoded ``"dispatch"`` here would still pass
+        the prompt-coupling tests today (the literal value is
+        unchanged) but the symbolic coupling would silently break: a
+        future rename of the constant would skip this site."""
+        from calfkit._vendor.pydantic_ai import ToolOutput  # noqa: PLC0415
+
+        from calfkit_organization.agents.routing import (  # noqa: PLC0415
+            ROUTER_OUTPUT_TOOL_NAME,
+            RoutingDecision,
+        )
+
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _router_definition(),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        final_output_type = worker._nodes[0].final_output_type
+        assert isinstance(final_output_type, ToolOutput)
+        assert final_output_type.output is RoutingDecision
+        # Pin against the constant, not the literal — see docstring above.
+        assert final_output_type.name == ROUTER_OUTPUT_TOOL_NAME
+
+    def test_router_model_resolution_uses_definition_fields(self) -> None:
+        """Router still uses the provider/model fallback chain. The
+        definition's explicit values win."""
+        calls, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        factory.build(
+            _router_definition(provider="openai", model="gpt-5-nano"),
+            AgentRuntimeState(channels=[]),
+            MagicMock(),
+        )
+        assert calls == [("openai", "gpt-5-nano")]
+
+
+class TestRouterDefinitionValidation:
+    """Schema-level invariants on the router definition itself.
+
+    The model_validator on AgentDefinition catches:
+        - role=router + tools=... (forbidden)
+        - role=router + publish_topic=None (required)
+    """
+
+    def test_router_with_tools_raises(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="must declare no tools"):
+            AgentDefinition(
+                agent_id="_router",
+                slash="/_router",
+                display_name="Router",
+                description="x",
+                role="router",
+                publish_topic="routing.decisions",
+                tools=("private_chat",),
+                system_prompt="x",
+            )
+
+    def test_router_without_publish_topic_raises(self) -> None:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="must declare a publish_topic"):
+            AgentDefinition(
+                agent_id="_router",
+                slash="/_router",
+                display_name="Router",
+                description="x",
+                role="router",
+                publish_topic=None,
+                system_prompt="x",
+            )
+
+    def test_assistant_role_has_no_router_constraints(self) -> None:
+        """Default role='assistant' allows tools and no publish_topic."""
+        AgentDefinition(
+            agent_id="scribe",
+            slash="/scribe",
+            display_name="Scribe",
+            description="x",
+            tools=("private_chat",),
+            system_prompt="x",
+        )
+
+    def test_assistant_with_publish_topic_raises(self) -> None:
+        """Assistants emit ReturnCall to the inbound frame's
+        callback_topic; setting ``publish_topic`` on them would be a
+        silent no-op. Reject at validation so the misconfiguration is
+        visible."""
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="publish_topic is reserved for routers"):
+            AgentDefinition(
+                agent_id="scribe",
+                slash="/scribe",
+                display_name="Scribe",
+                description="x",
+                publish_topic="some.topic",
+                system_prompt="x",
+            )
+
+    def test_router_with_empty_publish_topic_raises(self) -> None:
+        """``min_length=1`` on the field catches the empty-string case
+        BEFORE the model_validator runs — pydantic's field validation
+        runs first, so the error mentions the field constraint rather
+        than the router-specific message."""
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError):
+            AgentDefinition(
+                agent_id="_router",
+                slash="/_router",
+                display_name="Router",
+                description="x",
+                role="router",
+                publish_topic="",
+                system_prompt="x",
+            )

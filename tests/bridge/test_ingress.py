@@ -93,8 +93,20 @@ def _fresh_handle() -> MagicMock:
 
 @pytest.fixture
 def client() -> MagicMock:
+    """Fake calfkit Client covering both ingress paths.
+
+    The slash branch goes through ``client.invoke_node``; the ambient
+    branch (Phase 4) goes through ``client._invoke`` via
+    :func:`invoke_node_with_metadata`. Both must return a handle whose
+    ``_future`` is a real :class:`asyncio.Future` so the ingress's
+    cancel-after-publish step has something cancellable. The
+    ``reply_topic`` property is also touched by the helper when no
+    explicit reply_topic is passed.
+    """
     c = MagicMock()
     c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
+    c._invoke = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
+    c.reply_topic = "discord.outbox"
     return c
 
 
@@ -269,17 +281,28 @@ class TestModelSettings:
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.invoke_node.call_args.kwargs["model_settings"] is None
 
-    async def test_ambient_message_passes_none(
+    async def test_ambient_message_passes_no_model_settings(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """slash_target=None → bridge doesn't know the recipient → no override."""
+        """slash_target=None → bridge doesn't know the recipient → no
+        override. Phase 4 ambient now goes through ``_invoke`` directly
+        (via :func:`invoke_node_with_metadata`), which does not accept
+        ``model_settings`` at all; the original intent (no per-call
+        thinking override for ambient) is preserved by inspecting that
+        the slash-path ``invoke_node`` was NOT called instead."""
         ingress = BridgeIngress(
             client, _registry(scheduler_effort="max"), pending_wires
         )
         await ingress.handle(_wire(slash_target=None, kind="message"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] is None
+        # Ambient skips the slash path; invoke_node not called.
+        client.invoke_node.assert_not_called()
+        # Ambient path used _invoke; verify no model_settings ever
+        # showed up on its overrides (the helper would surface them
+        # via OverridesState if any were set, but ambient has none).
+        kwargs = client._invoke.await_args.kwargs
+        assert kwargs.get("overrides") is None
 
     async def test_target_missing_from_registry_passes_none(
         self,
@@ -440,6 +463,41 @@ class TestBootValidation:
         ingress = BridgeIngress(client, registry, pending_wires)
         assert ingress is not None
 
+    def test_router_included_registry_passes_boot_validation(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Production registries include the built-in router (via
+        ``AgentRegistry.from_agents_dir``'s auto-append); the boot
+        validation loops at ``BridgeIngress.__init__`` iterate
+        ``registry.all()``, which contains the router. A future
+        refactor of ``resolve_provider`` that broke on the router's
+        attributes (e.g. ``source_path=None``, empty ``tools``)
+        would crash bridge boot in production while every previous
+        test passed. Pin the contract: a router-included registry
+        must construct cleanly."""
+        from calfkit_organization.router.definition import (  # noqa: PLC0415
+            build_router_definition,
+        )
+
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scribe",
+                    slash="/scribe",
+                    display_name="Scribe",
+                    description="Notes.",
+                    provider="openai",
+                    tools=("private_chat",),
+                    system_prompt="x",
+                ),
+                build_router_definition(),
+            ]
+        )
+        ingress = BridgeIngress(client, registry, pending_wires)
+        assert ingress is not None
+
 
 class TestTempInstructions:
     """Per-call ``temp_instructions`` carries the peer roster for A2A-enabled
@@ -455,16 +513,21 @@ class TestTempInstructions:
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
 
-    async def test_no_instructions_for_ambient_messages(
+    async def test_ambient_messages_skip_slash_path(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Ambient (no slash_target) reaches every channel subscriber via the
-        same envelope, so a per-target roster doesn't apply. Skip."""
+        """Ambient (no slash_target) is now routed to the router's
+        ambient ingress (Phase 4), not to a channel topic. The
+        slash-path ``client.invoke_node`` MUST NOT be called for
+        ambient — that would publish to the channel topic and bypass
+        the router entirely. The router-roster ``temp_instructions``
+        injection for ambient is covered by
+        ``tests/bridge/test_ingress_router.py``."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(slash_target=None, kind="message"))
-        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+        client.invoke_node.assert_not_called()
 
     async def test_instructions_injected_when_target_has_private_chat(
         self,

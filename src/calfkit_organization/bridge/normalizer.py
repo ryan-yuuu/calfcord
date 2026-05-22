@@ -29,6 +29,7 @@ from typing import Any, Literal
 import uuid_utils
 
 from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.agents.identifier import AGENT_ID_CHARSET
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 
@@ -37,9 +38,12 @@ logger = logging.getLogger(__name__)
 # Matches "@<agent_id>" where @ starts a whitespace-delimited token — i.e.
 # preceded by start-of-string or whitespace. This excludes embedded @s in
 # things like email addresses ("foo@bar.com"), URLs, or markdown.
-# Character class mirrors the agent_id validator: [a-z0-9_-]+.
+# Character class is derived from ``AGENT_ID_CHARSET`` (the canonical
+# agent_id character set) — the surrounding pattern shape differs from
+# the agent_id validator (no length cap, capture group, no anchors) but
+# the character set must stay in lockstep with the validator.
 # Case-insensitive so "@Echo" and "@ECHO" also match.
-_MENTION_RE = re.compile(r"(?:^|\s)@([a-z0-9_-]+)", re.IGNORECASE)
+_MENTION_RE = re.compile(rf"(?:^|\s)@([{AGENT_ID_CHARSET}]+)", re.IGNORECASE)
 
 
 class UnknownAgentMentionError(ValueError):
@@ -137,6 +141,14 @@ class MessageNormalizer:
         report back to the user. If all mentions resolve, the first
         mention's ``agent_id`` becomes ``slash_target``. If no mentions are
         present, returns ``("message", None)``.
+
+        The built-in router agent (``role="router"``) is treated as
+        unknown here by design: it's not user-invocable via @-mention,
+        only via the ambient ingress topic. Surfacing a router
+        @-mention as ``UnknownAgentMentionError`` produces the standard
+        operator-actionable error reply rather than a silently
+        misrouted message (the router has no Discord persona and
+        wouldn't reply).
         """
         raw_names = _MENTION_RE.findall(content)
         if not raw_names:
@@ -146,7 +158,7 @@ class MessageNormalizer:
         unknown: list[str] = []
         for raw in raw_names:
             spec = self._registry.by_id(raw.lower())
-            if spec is None:
+            if spec is None or spec.role == "router":
                 unknown.append(raw)
             elif slash_target is None:
                 slash_target = spec.agent_id

@@ -18,23 +18,17 @@ Add a field here when a downstream consumer needs it; do not pass
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
+
 if TYPE_CHECKING:
     # Type-checking-only import; avoids the same package-init cycle that
     # bites peer_roster (bridge.* transitively imports agents.factory).
     from calfkit_organization.bridge.registry import AgentRegistry
-
-
-_AGENT_ID_PATTERN = re.compile(r"[a-z0-9_-]{1,32}")
-"""Mirrors ``agents.definition._NAME_PATTERN``. Duplicated rather than
-imported because ``definition`` lives upstream of this module in the
-import graph; keeping the regex local means any divergence is caught by
-:meth:`PhonebookEntry._validate_agent_id` at deserialization time."""
 
 
 class PhonebookEntry(BaseModel):
@@ -60,7 +54,7 @@ class PhonebookEntry(BaseModel):
     @field_validator("agent_id")
     @classmethod
     def _validate_agent_id(cls, v: str) -> str:
-        if not _AGENT_ID_PATTERN.fullmatch(v):
+        if not AGENT_ID_PATTERN.fullmatch(v):
             raise ValueError(f"agent_id must match [a-z0-9_-]{{1,32}}, got {v!r}")
         return v
 
@@ -82,6 +76,15 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
     Called by the bridge ingress on every invocation so a future
     hot-add on the registry takes effect the next time we publish —
     no caching here.
+
+    The router agent is **filtered out** of the phonebook: it has no
+    A2A inbox (``agent.{id}.in`` topic) so it can't receive
+    :func:`~calfkit_organization.tools.private_chat.private_chat`
+    invocations, and listing it as a peer would mislead assistants'
+    LLMs into trying to call it (the call would publish to a topic
+    with no consumer and time out). The router fan-out's per-call
+    roster (``router.roster.build_router_temp_instructions``) is the
+    intentional place for the router-visible agent list.
     """
     return [
         PhonebookEntry(
@@ -92,6 +95,7 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
             tools=spec.tools,
         )
         for spec in registry.all()
+        if spec.role != "router"
     ]
 
 

@@ -317,6 +317,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "python-frontmatter" },
+    { name = "uuid-utils" },
 ]
 
 [package.dev-dependencies]
@@ -327,11 +328,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "calfkit", specifier = ">=0.3.1" },
+    { name = "calfkit", specifier = "~=0.3.1" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-frontmatter", specifier = ">=1.1.0,<2" },
+    { name = "uuid-utils", specifier = ">=0.15.0" },
 ]
 
 [package.metadata.requires-dev]
