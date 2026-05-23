@@ -31,6 +31,7 @@ from calfkit.models.session_context import (
 )
 
 from calfkit_organization.agents.routing import RoutingDecision
+from calfkit_organization.bridge.history import HistoryRecord
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.router.definition import ROUTER_AGENT_ID
 from calfkit_organization.router.fanout import (
@@ -65,6 +66,7 @@ def _wire(
 
 _DEFAULT_DECISION_SENTINEL = "<use-default-decision>"
 _PHONEBOOK_UNSET = "<unset>"
+_HISTORY_UNSET = "<unset>"
 
 
 def _phonebook_dict(agent_id: str) -> dict[str, Any]:
@@ -100,6 +102,7 @@ def _envelope(
     metadata: Any = "<use-wire>",
     wire_content: str = "hello",
     phonebook: Any = _PHONEBOOK_UNSET,
+    history: Any = _HISTORY_UNSET,
 ) -> Envelope:
     """Build a synthetic envelope mimicking the router agent's ReturnCall.
 
@@ -151,6 +154,11 @@ def _envelope(
             pass
         else:
             metadata["phonebook"] = phonebook
+        if history is _HISTORY_UNSET:
+            # Default: empty history (matches rolling-deploy default).
+            pass
+        else:
+            metadata["history"] = history
     state.metadata = metadata
 
     call_stack = CallFrameStack()
@@ -323,6 +331,111 @@ class TestHappyPath:
         assert all(h._future.cancelled() for h in captured)
 
 
+class TestHistoryForwarding:
+    """The fan-out forwards ``envelope.history`` from its INPUT envelope
+    (the parent that the router consumed) to every OUTPUT envelope it
+    publishes to ``bridge.synthesized.in``.
+
+    Without this forwarding, the synthesized-in consumer would receive
+    an empty ``envelope.history``, pass ``prefetched_history=()`` to
+    ``BridgeIngress.handle``, and every fan-out assistant would run
+    with no channel history — defeating the single-fetch-per-fan-out
+    design (bridge fetches once at ambient publish; all fan-out
+    targets share that snapshot).
+    """
+
+    def _record_dicts(self) -> list[dict[str, Any]]:
+        """Build well-formed HistoryRecord dicts (JSON-serializable form)."""
+        return [
+            HistoryRecord(
+                message_id=1,
+                created_at=datetime.now(UTC),
+                content="hi from ryan",
+                author_display_name="ryan",
+                author_agent_id=None,
+            ).model_dump(mode="json"),
+            HistoryRecord(
+                message_id=2,
+                created_at=datetime.now(UTC),
+                content="prior scribe turn",
+                author_display_name="Scribe",
+                author_agent_id="scribe",
+            ).model_dump(mode="json"),
+        ]
+
+    async def test_synthesized_envelope_carries_parent_history(
+        self, client: MagicMock, broker: MagicMock
+    ) -> None:
+        """Each synthesized publish must include the parent's history
+        records in its ``state.metadata["history"]``."""
+        records = self._record_dicts()
+        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
+        await consumer.handler(
+            envelope=_envelope(
+                decision=RoutingDecision(agents=["scribe"], reasoning="match"),
+                history=records,
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        kwargs = client._invoke.await_args_list[0].kwargs
+        envelope_metadata = kwargs["state"].metadata
+        assert "history" in envelope_metadata
+        forwarded = envelope_metadata["history"]
+        assert len(forwarded) == 2
+        assert forwarded[0]["content"] == "hi from ryan"
+        assert forwarded[1]["author_agent_id"] == "scribe"
+
+    async def test_history_forwarded_to_every_fan_out_target(
+        self, client: MagicMock, broker: MagicMock
+    ) -> None:
+        """Multi-agent decisions share one snapshot — every synthesized
+        publish carries the SAME history list."""
+        records = self._record_dicts()
+        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
+        await consumer.handler(
+            envelope=_envelope(
+                decision=RoutingDecision(
+                    agents=["scribe", "conan"], reasoning="both"
+                ),
+                history=records,
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        assert client._invoke.await_count == 2
+        for call in client._invoke.await_args_list:
+            forwarded = call.kwargs["state"].metadata["history"]
+            assert len(forwarded) == 2
+            assert forwarded[0]["content"] == "hi from ryan"
+
+    async def test_empty_history_input_produces_empty_forward(
+        self, client: MagicMock, broker: MagicMock
+    ) -> None:
+        """If the parent envelope has no history (rolling-deploy / no
+        records available), the synthesized envelope forwards an empty
+        list, NOT a None or missing-key.
+        """
+        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
+        await consumer.handler(
+            envelope=_envelope(
+                decision=RoutingDecision(agents=["scribe"], reasoning="m"),
+                # history defaults to _HISTORY_UNSET → no history key in metadata
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        forwarded = client._invoke.await_args_list[0].kwargs["state"].metadata["history"]
+        # MetadataEnvelope.history defaults to (); model_dump emits [].
+        assert forwarded == []
+
+
 class TestRouterSelfFilter:
     async def test_skips_routers_own_id(
         self, client: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
@@ -367,7 +480,13 @@ class TestErrorPaths:
     async def test_empty_agents_list_publishes_nothing(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
-        """The silent-ignore case: empty decision means no fan-out."""
+        """Defensive empty handling: the router's prompt requires at
+        least one agent per ambient message, but if a misbehaving LLM
+        ever emits an empty list anyway, the fan-out consumer must
+        no-op rather than crash or publish a malformed wire. The
+        schema deliberately allows empty (``min_length=0``) so this
+        path stays reachable — see
+        :mod:`calfkit_organization.agents.routing` module docstring."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
@@ -525,7 +644,7 @@ class TestTypedEnvelopeError:
     refactor-resilient."""
 
     def test_raise_envelope_error_carries_attributes(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )
@@ -547,7 +666,7 @@ class TestTypedEnvelopeError:
     def test_raise_envelope_error_chains_cause(self) -> None:
         """When a ``cause`` is provided, ``__cause__`` is set so the
         framework's exc_info trace surfaces the original error."""
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )
@@ -904,7 +1023,7 @@ class TestTopicContract:
     than relying on the import path."""
 
     def test_synthesized_ingress_topic_matches_bridge(self) -> None:
-        from calfkit_organization.bridge.synthesized import (  # noqa: PLC0415
+        from calfkit_organization.bridge.synthesized import (
             SYNTHESIZED_INGRESS_TOPIC as BRIDGE_TOPIC,
         )
 
@@ -915,10 +1034,10 @@ class TestTopicContract:
         publishes ambient wires to this topic, and the router agent's
         factory subscribes to it. Both sites re-export
         :data:`calfkit_organization.topics.AMBIENT_INGRESS_TOPIC`."""
-        from calfkit_organization.bridge.ingress import (  # noqa: PLC0415
+        from calfkit_organization.bridge.ingress import (
             _AMBIENT_INGRESS_TOPIC,
         )
-        from calfkit_organization.topics import (  # noqa: PLC0415
+        from calfkit_organization.topics import (
             AMBIENT_INGRESS_TOPIC,
         )
 
@@ -937,11 +1056,11 @@ class TestMetadataKeyContract:
     """
 
     def test_metadata_key_wire_is_canonical_string(self) -> None:
-        from calfkit_organization._compat.invoke import METADATA_KEY_WIRE  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import METADATA_KEY_WIRE
 
         assert METADATA_KEY_WIRE == "wire"
 
     def test_metadata_key_phonebook_is_canonical_string(self) -> None:
-        from calfkit_organization._compat.invoke import METADATA_KEY_PHONEBOOK  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import METADATA_KEY_PHONEBOOK
 
         assert METADATA_KEY_PHONEBOOK == "phonebook"

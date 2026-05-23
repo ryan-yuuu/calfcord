@@ -28,9 +28,10 @@ wire rides on ``state.metadata`` (the
 ``@consumer`` reads it without needing access to ``deps``.
 
 ``output_type`` is left auto-detect (``_UNSET``) because we don't use
-``result.output`` — only ``result.state.metadata``. Documented in the
-function body so a future reader doesn't add a type and break the
-auto-detect contract.
+``result.output`` — only ``result.state.metadata``. Do not pass
+``output_type=`` to the ``@consumer`` decorator below: adding a type
+would force calfkit to deserialize the (uninteresting) ``output``
+slot, breaking the auto-detect contract this consumer relies on.
 """
 
 from __future__ import annotations
@@ -108,14 +109,24 @@ def build_synthesized_consumer(
         wire = envelope.wire
 
         logger.info(
-            "synthesized-in arrival event_id=%s channel=%s slash_target=%s",
+            "synthesized-in arrival event_id=%s channel=%s slash_target=%s history_records=%d",
             wire.event_id,
             wire.channel_id,
             wire.slash_target,
+            len(envelope.history),
         )
 
+        # Forward the envelope's pre-fetched history through to ingress.
+        # The ambient publish path (``BridgeIngress._publish_ambient``)
+        # fetches once for the entire fan-out and packs the raw
+        # records into ``MetadataEnvelope.history``. Re-fetching here
+        # per synthesized target would defeat the single-fetch design
+        # and cost N extra Discord REST calls for an N-way fan-out.
+        # An empty history tuple (rolling-deploy edge case) is fine —
+        # ``handle``'s slash branch treats it as "no history" without
+        # falling back to a fresh fetch.
         try:
-            await ingress.handle(wire)
+            await ingress.handle(wire, prefetched_history=envelope.history)
         except Exception as exc:
             # A single ingress.handle failure must not poison-pill the
             # partition — log + swallow. ERROR level with full

@@ -24,6 +24,10 @@ A failure here means one of:
   step which it does not — the actual failure mode is no fan-out, so
   no synthesized invocation, so no agent reply (the message goes
   unanswered, not "dropped").
+* Someone reinstated the "silent-ignore" / empty-agents-is-acceptable
+  policy. The router's contract is that every ambient message gets
+  at least one agent — see the ``test_prompt_mandates_at_least_one_agent``
+  test below for the policy rationale.
 """
 
 from __future__ import annotations
@@ -78,6 +82,109 @@ class TestSystemPromptCoupling:
             f"RoutingDecision fields {missing!r} are not referenced in "
             f"SYSTEM_PROMPT; rename or remove the field in the schema "
             f"and update router/prompt.py to match"
+        )
+
+    def test_prompt_mandates_at_least_one_agent(self) -> None:
+        """The router's policy is that every ambient message must be
+        routed to at least one agent. There is no silent-ignore path.
+
+        The prompt enforces this at the LLM level (the schema does NOT
+        add ``min_length=1`` — see the
+        :mod:`calfkit_organization.agents.routing` module docstring for
+        why). If the prompt's at-least-one wording is ever lost, the
+        LLM will start emitting empty lists for low-signal messages and
+        users will see ambient messages go unacknowledged with no
+        operator-visible failure.
+
+        Positive anchors below are deliberately fuzzy (substring) so
+        prose can be edited without breaking the test, but at least one
+        of the canonical at-least-one phrasings must remain."""
+        required_phrases = (
+            "at least one",
+            "always one or more",
+        )
+        present = [p for p in required_phrases if p in SYSTEM_PROMPT]
+        assert present, (
+            f"prompt no longer contains any of the canonical "
+            f"at-least-one-agent phrasings {required_phrases!r}. The "
+            f"router's policy is that every ambient message gets at "
+            f"least one respondent — restore the wording or update "
+            f"this test if the policy itself has changed (which would "
+            f"also require updating the agents/routing.py module "
+            f"docstring and the agents field description)."
+        )
+
+        # Negative anchors: phrases that AFFIRMATIVELY permit an empty
+        # agents list. Naming the concept ("there is no silent-ignore
+        # case") is fine and even helpful — the discriminator is
+        # whether the wording grants the LLM permission to emit empty.
+        # Each pattern below is a phrase that, if present, told the
+        # LLM that empty is a valid output.
+        forbidden_phrases = (
+            "May be empty",
+            "may be empty",
+            "Prefer silence",
+            "prefer silence",
+            "return an empty",
+            "Default to 0",
+            "default to 0",
+            "often zero",
+            "typically zero",
+        )
+        regressed = [p for p in forbidden_phrases if p in SYSTEM_PROMPT]
+        assert not regressed, (
+            f"prompt contains phrase(s) {regressed!r} that re-permit "
+            f"empty agent lists. The router must route every ambient "
+            f"message to at least one agent. If the policy is "
+            f"deliberately changing back, update this test, the prompt "
+            f"docstring, agents/routing.py module docstring + field "
+            f"description, and the test_routing_schema/test_fanout "
+            f"docstrings that document defensive empty handling."
+        )
+
+    def test_prompt_instructs_use_of_message_history(self) -> None:
+        """The router agent is configured with
+        ``history_turns=CALFKIT_ROUTER_HISTORY_TURNS`` (default 10) so
+        recent channel turns are projected into its ``message_history``
+        on every invocation — see
+        :func:`calfkit_organization.router.definition.build_router_definition`
+        and the ``_DEFAULT_HISTORY_TURNS`` docstring ("only needs
+        enough context to recognize follow-ups vs. fresh topics").
+
+        Without an explicit rule, the LLM topic-matches each message
+        in isolation: a one-line follow-up like "what about the
+        second one?" gets routed by the literal words rather than by
+        who the user was just talking with. The result is an
+        unnatural groupchat feel where an ongoing exchange with
+        agent A is interrupted by an out-of-context response from
+        agent B because B's description happens to share a keyword
+        with the follow-up phrasing.
+
+        Pin two anchors: the literal ``message_history`` (so the LLM
+        knows what to look at) and a continuity word so the prompt
+        actually instructs the LLM to follow the thread."""
+        assert "message_history" in SYSTEM_PROMPT, (
+            "prompt no longer references ``message_history`` — the "
+            "router receives recent channel history under that field "
+            "name and must be told to use it for conversation "
+            "continuity. Without this, follow-up messages get "
+            "topic-matched in isolation and an ongoing exchange gets "
+            "interrupted by an unrelated agent."
+        )
+        continuity_anchors = (
+            "ongoing",
+            "continuation",
+            "follow-up",
+            "follow up",
+        )
+        present = [a for a in continuity_anchors if a in SYSTEM_PROMPT]
+        assert present, (
+            f"prompt no longer contains any continuity-cue word "
+            f"{continuity_anchors!r}. The rule that says 'prefer the "
+            f"agent already participating in this thread' is what "
+            f"prevents follow-up topic-match drift; restore the "
+            f"wording or update this test if the policy itself is "
+            f"deliberately changing."
         )
 
     def test_prompt_does_not_contain_misleading_drop_phrase(self) -> None:

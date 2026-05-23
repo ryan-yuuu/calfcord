@@ -23,6 +23,9 @@ class TestAnthropicMapping:
     @pytest.mark.parametrize(
         ("effort", "budget"),
         [
+            # 1024 is Anthropic's documented floor for ``budget_tokens``
+            # when ``type=enabled``; the lightest non-zero reasoning tier.
+            ("minimal", 1024),
             ("low", 4000),
             ("medium", 10000),
             ("high", 31999),
@@ -41,11 +44,20 @@ class TestOpenAIMapping:
     @pytest.mark.parametrize(
         ("effort", "value"),
         [
-            ("low", "minimal"),
-            ("medium", "low"),
-            ("high", "medium"),
+            # Operator ramp maps 1:1 onto OpenAI's four
+            # ``reasoning_effort`` tiers for ``minimal`` through
+            # ``high``. ``xhigh`` and ``max`` saturate at OpenAI's
+            # top tier (``high``) since the API exposes no higher
+            # value. This ramp was shifted up one notch when
+            # operator ``minimal`` was added — see the lookup-table
+            # comment in :mod:`calfkit_organization.agents.thinking`
+            # for the migration rationale.
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
             ("xhigh", "high"),
-            ("max", "high"),  # OpenAI saturates at "high"
+            ("max", "high"),
         ],
     )
     def test_openai_reasoning_effort_ramp(self, effort: str, value: str) -> None:

@@ -17,11 +17,18 @@ from calfkit_organization.agents.routing import (
 
 
 class TestRoutingDecision:
-    def test_empty_agents_tuple_is_valid(self) -> None:
-        # The silent-ignore case: no agent matches.
-        decision = RoutingDecision(reasoning="small talk between humans")
+    def test_empty_agents_tuple_is_structurally_valid(self) -> None:
+        # The schema accepts an empty tuple as defense-in-depth: the
+        # router's system prompt instructs the LLM to ALWAYS pick at
+        # least one agent (no silent-ignore policy), but if a
+        # misbehaving model emits an empty list anyway, we want the
+        # fan-out consumer's no-op path to handle it rather than
+        # trigger a pydantic-ai structured-output retry storm.
+        # ``min_length=0`` is intentional — see
+        # :mod:`calfkit_organization.agents.routing` module docstring.
+        decision = RoutingDecision(reasoning="defensive empty handling")
         assert decision.agents == ()
-        assert decision.reasoning == "small talk between humans"
+        assert decision.reasoning == "defensive empty handling"
 
     def test_single_agent(self) -> None:
         decision = RoutingDecision(

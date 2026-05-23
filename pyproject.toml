@@ -29,6 +29,9 @@ packages = ["src/calfkit_organization"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: tests that hit real external services (gated on env vars; not run in normal CI)",
+]
 
 [tool.ruff]
 line-length = 120

@@ -14,9 +14,12 @@ Two consumers share this mapper:
 The Anthropic ``budget_tokens`` ramp anchors its ``low`` / ``medium`` /
 ``high`` values (4000 / 10000 / 31999) to the same budgets Claude Code's
 ``think`` / ``megathink`` / ``ultrathink`` keywords trigger; see the PR
-plan for sources. OpenAI's ``reasoning_effort`` currently tops out at
-``high``, so ``xhigh`` and ``max`` saturate there until the API exposes
-finer-grained tiers. See the per-provider tables below for exact values.
+plan for sources. ``minimal`` uses Anthropic's documented floor of
+``1024`` budget tokens — the lowest value the API accepts when
+``type=enabled``. OpenAI's ``reasoning_effort`` exposes ``minimal`` /
+``low`` / ``medium`` / ``high``; the operator ramp uses all four
+distinct values with ``xhigh`` and ``max`` saturating at ``high``. See
+the per-provider tables below for exact values.
 
 Ambient-message limitation (v1)
 -------------------------------
@@ -39,6 +42,7 @@ from calfkit_organization.agents.definition import Provider, ThinkingEffort
 logger = logging.getLogger(__name__)
 
 _ANTHROPIC_BUDGET_TOKENS: dict[ThinkingEffort, int] = {
+    "minimal": 1024,
     "low": 4000,
     "medium": 10000,
     "high": 31999,
@@ -46,10 +50,21 @@ _ANTHROPIC_BUDGET_TOKENS: dict[ThinkingEffort, int] = {
     "max": 63999,
 }
 
+# Operator ramp → OpenAI ``reasoning_effort``. Shifted up one step from
+# the original 5-tier mapping when ``minimal`` was added: previously
+# operator ``low`` mapped to OpenAI ``"minimal"``; now operator
+# ``minimal`` does, and operator ``low`` / ``medium`` / ``high`` step
+# through OpenAI ``"low"`` / ``"medium"`` / ``"high"`` distinctly.
+# ``xhigh`` and ``max`` still saturate at OpenAI ``"high"`` (the API's
+# top tier). This means existing OpenAI agents that previously declared
+# ``thinking_effort: low|medium|high`` now run with one notch more
+# reasoning effort on next restart — a deliberate one-time bump
+# documented in the commit that added ``minimal``.
 _OPENAI_REASONING_EFFORT: dict[ThinkingEffort, str] = {
-    "low": "minimal",
-    "medium": "low",
-    "high": "medium",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
     "xhigh": "high",
     "max": "high",
 }

@@ -228,7 +228,20 @@ def build_fanout_consumer(
             # through this hop would be redundant. Passing the typed
             # ``WireMessage`` directly — pydantic dumps it as part of
             # ``envelope.model_dump(mode="json")`` at the call site.
-            synth_envelope = MetadataEnvelope(wire=synthesized)
+            #
+            # The history records ARE forwarded: the bridge's ambient
+            # publish path fetches channel history once at publish
+            # time (see ``BridgeIngress._fetch_ambient_history``) and
+            # packs it into the parent envelope. Without forwarding
+            # here, the synthesized-in consumer would receive an
+            # empty ``MetadataEnvelope.history`` (the default), pass
+            # ``prefetched_history=()`` to ``BridgeIngress.handle``,
+            # and every fan-out assistant would run with no history
+            # — defeating the single-fetch-per-fan-out design.
+            synth_envelope = MetadataEnvelope(
+                wire=synthesized,
+                history=envelope.history,
+            )
 
             # ``handle`` lives outside the try so the finally clause
             # below can cancel its future even if a later step (e.g.

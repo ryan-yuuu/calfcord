@@ -8,9 +8,17 @@ against this model and surfaced as ``NodeResult.output``. The
 router's fan-out consumer (in the ``calfkit-router`` process) reads
 the decision from there.
 
-An empty ``agents`` list is the silent-ignore case (small talk, off-topic
-asides, none of the listed agents are a natural respondent). Multi-entry
-lists fan out to each agent in parallel — order is presentational only.
+The router's system prompt instructs the LLM to ALWAYS pick at least
+one agent — every ambient message in the groupchat must be acknowledged.
+The schema does NOT structurally enforce ``min_length=1`` on ``agents``:
+a misbehaving LLM that emits an empty list should fall through to the
+fan-out consumer's defensive no-op (logs and skips) rather than trigger
+pydantic-ai structured-output validation retries in production. The
+field description and the system prompt are the always-route policy's
+enforcement surface; ``min_length=0`` here is defense-in-depth.
+
+Multi-entry lists fan out to each agent in parallel — order is
+presentational only.
 """
 
 from __future__ import annotations
@@ -87,9 +95,12 @@ class RoutingDecision(BaseModel):
         max_length=_AGENTS_MAX_LENGTH,
         description=(
             "Agent ids that should respond to this ambient message. "
-            "Empty tuple means no one should respond (silent ignore — "
-            "appropriate when the message is small talk, an aside, "
-            "or none of the available agents are a good match)."
+            "MUST contain at least one id — every ambient message in "
+            "the groupchat must be acknowledged by some agent. There "
+            "is no silent-ignore case: when no agent is a strong "
+            "topical match, pick the agent whose persona best fits "
+            "the social register of the message rather than emitting "
+            "an empty list."
         ),
     )
     reasoning: str = Field(

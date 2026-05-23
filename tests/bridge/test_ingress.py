@@ -238,9 +238,15 @@ class TestModelSettings:
     @pytest.mark.parametrize(
         ("effort", "expected_value"),
         [
-            ("low", "minimal"),
-            ("medium", "low"),
-            ("high", "medium"),
+            # Matches the operator → OpenAI mapping in
+            # :mod:`calfkit_organization.agents.thinking`. The ramp
+            # was shifted up one notch when ``minimal`` was added —
+            # the lookup-table comment in that module documents the
+            # one-time behavior bump for existing OpenAI agents.
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
             ("xhigh", "high"),
             ("max", "high"),  # OpenAI saturates at high.
         ],

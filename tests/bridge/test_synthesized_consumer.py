@@ -30,6 +30,7 @@ from calfkit.models.session_context import (
 )
 
 from calfkit_organization._compat.invoke import MetadataEnvelope
+from calfkit_organization.bridge.history import HistoryRecord
 from calfkit_organization.bridge.synthesized import (
     SYNTHESIZED_INGRESS_TOPIC,
     build_synthesized_consumer,
@@ -217,6 +218,73 @@ class TestErrorPaths:
             for r in caplog.records
         )
 
+
+class TestHistoryForwarding:
+    """The synthesized-in consumer hands the envelope's history records
+    straight through to ``ingress.handle(prefetched_history=...)`` so
+    the slash branch doesn't re-fetch per fan-out target.
+    """
+
+    async def test_forwards_history_records_to_ingress(
+        self, ingress: MagicMock, broker: MagicMock
+    ) -> None:
+        records = (
+            HistoryRecord(
+                message_id=1,
+                created_at=datetime.now(UTC),
+                content="from ambient publish",
+                author_display_name="ryan",
+                author_agent_id=None,
+            ),
+            HistoryRecord(
+                message_id=2,
+                created_at=datetime.now(UTC),
+                content="prior scribe reply",
+                author_display_name="Scribe",
+                author_agent_id="scribe",
+            ),
+        )
+        envelope = MetadataEnvelope(wire=_wire(), history=records).model_dump(
+            mode="json"
+        )
+
+        consumer = build_synthesized_consumer(ingress)
+        await consumer.handler(
+            envelope=_envelope(metadata=envelope),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        ingress.handle.assert_awaited_once()
+        # prefetched_history is keyword-only — pulled from kwargs.
+        kw = ingress.handle.await_args.kwargs
+        passed_history = kw["prefetched_history"]
+        assert len(passed_history) == 2
+        assert passed_history[0].content == "from ambient publish"
+        assert passed_history[1].author_agent_id == "scribe"
+
+    async def test_empty_history_tuple_forwarded_as_empty(
+        self, ingress: MagicMock, broker: MagicMock
+    ) -> None:
+        """A rolling-deploy producer that doesn't pack history defaults
+        to an empty tuple. The consumer must forward that empty tuple
+        verbatim (NOT translate to None — None would make handle fall
+        back to a fresh fetch, defeating the single-fetch invariant)."""
+        envelope = MetadataEnvelope(wire=_wire()).model_dump(mode="json")
+
+        consumer = build_synthesized_consumer(ingress)
+        await consumer.handler(
+            envelope=_envelope(metadata=envelope),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        kw = ingress.handle.await_args.kwargs
+        passed = kw["prefetched_history"]
+        assert passed == ()
+
     async def test_malformed_wire_logs_infra_error(
         self, ingress: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -252,7 +320,7 @@ class TestErrorPaths:
         can assert on attributes rather than substring-matching log
         messages. Pins the contract that the synthesized-in site emits
         ``site="synthesized-in"`` on every envelope-extract failure."""
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )

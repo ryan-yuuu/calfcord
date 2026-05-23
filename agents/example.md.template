@@ -75,12 +75,13 @@ tools: []
 
 # Operator-tunable reasoning/thinking-budget tier. One of:
 #
-#   none   - extended thinking disabled
-#   low    - Anthropic budget=4000  | OpenAI reasoning_effort=minimal
-#   medium - Anthropic budget=10000 | OpenAI reasoning_effort=low
-#   high   - Anthropic budget=31999 | OpenAI reasoning_effort=medium
-#   xhigh  - Anthropic budget=48000 | OpenAI reasoning_effort=high
-#   max    - Anthropic budget=63999 | OpenAI reasoning_effort=high
+#   none    - extended thinking disabled
+#   minimal - Anthropic budget=1024  | OpenAI reasoning_effort=minimal
+#   low     - Anthropic budget=4000  | OpenAI reasoning_effort=low
+#   medium  - Anthropic budget=10000 | OpenAI reasoning_effort=medium
+#   high    - Anthropic budget=31999 | OpenAI reasoning_effort=high
+#   xhigh   - Anthropic budget=48000 | OpenAI reasoning_effort=high
+#   max     - Anthropic budget=63999 | OpenAI reasoning_effort=high
 #
 # Omit the field entirely to skip the override (the agent uses whatever
 # the model client / provider defaults to). Setting it to "none" is

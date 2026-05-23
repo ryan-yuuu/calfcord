@@ -56,9 +56,11 @@ Ambient-reply health signal (v1):
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import uuid_utils
+from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.client import Client, InvocationHandle
 
 from calfkit_organization._compat.invoke import (
@@ -74,6 +76,11 @@ from calfkit_organization.agents.phonebook import (
     phonebook_to_deps,
 )
 from calfkit_organization.agents.thinking import build_model_settings
+from calfkit_organization.bridge.history import (
+    ChannelHistoryFetcher,
+    HistoryRecord,
+    project_history,
+)
 from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireMessage
@@ -139,6 +146,14 @@ class BridgeIngress:
         self._pending_wires = pending_wires
         self._default_provider = default_provider
         self._ingress_topic_template = ingress_topic_template
+        # The history fetcher is injected via :meth:`set_fetcher` after
+        # the gateway client connects (its WebSocket-paired
+        # :class:`discord.Client` isn't usable until ``_on_ready`` fires).
+        # ``None`` is the documented pre-ready state — :meth:`handle`
+        # degrades gracefully to empty history when the fetcher isn't
+        # set yet so a Discord event arriving in the brief window
+        # before ``_on_ready`` doesn't crash the invocation path.
+        self._fetcher: ChannelHistoryFetcher | None = None
         # Validate every agent's provider at boot so a typo'd
         # CALFKIT_AGENT_DEFAULT_PROVIDER surfaces here (fail-fast) rather
         # than as an uncaught ValueError inside every targeted invocation.
@@ -151,7 +166,7 @@ class BridgeIngress:
         # actionable error before any agent process boots.
         # Lazy import: `calfkit_organization.tools` transitively imports
         # bridge code, so a top-level import would cycle at boot.
-        from calfkit_organization.tools import TOOL_REGISTRY  # noqa: PLC0415
+        from calfkit_organization.tools import TOOL_REGISTRY
 
         unknown: list[tuple[str, str]] = []
         for spec in registry.all():
@@ -166,7 +181,25 @@ class BridgeIngress:
                 f"known tools: {known or '<none registered>'}"
             )
 
-    async def handle(self, wire: WireMessage) -> None:
+    def set_fetcher(self, fetcher: ChannelHistoryFetcher) -> None:
+        """Inject the channel-history fetcher.
+
+        Called by the gateway from ``_on_ready`` once the underlying
+        :class:`discord.Client` has authenticated. Until this is called,
+        :meth:`handle` runs without history (returns empty
+        ``message_history``); after, history is fetched per invocation.
+
+        Idempotent — calling again replaces the fetcher. Useful for
+        tests that swap in a fake.
+        """
+        self._fetcher = fetcher
+
+    async def handle(
+        self,
+        wire: WireMessage,
+        *,
+        prefetched_history: Sequence[HistoryRecord] | None = None,
+    ) -> None:
         """Publish ``wire`` to the right ingress topic for its kind.
 
         Slash wires (``kind="slash"``) — including real Discord
@@ -175,6 +208,16 @@ class BridgeIngress:
         wires (``kind="message"``) go to the router's ambient ingress
         with the wire packed into ``state.metadata`` so the router's
         fan-out consumer can recover it.
+
+        ``prefetched_history`` is populated only by the synthesized-in
+        consumer (:mod:`calfkit_organization.bridge.synthesized`) which
+        reads the history off the ``MetadataEnvelope`` and forwards it
+        here. This avoids a redundant per-target Discord fetch when one
+        ambient publish fans out to multiple agents — the bridge made
+        a single fetch at ambient publish time, packed it into the
+        envelope, and the synthesized-in consumer hands the same raw
+        records to each target's invocation here. The per-agent POV
+        projection happens locally in this method.
 
         Only the slash branch writes to :class:`PendingWires` (before
         publishing, so a fast agent reply can never race the
@@ -276,6 +319,9 @@ class BridgeIngress:
         else:  # wire.kind == "slash"
             model_settings = self._resolve_model_settings(wire)
             temp_instructions = self._resolve_temp_instructions(wire, phonebook)
+            message_history = await self._build_slash_message_history(
+                wire, prefetched_history
+            )
             # Load-bearing ordering: ``put`` MUST precede the
             # ``invoke_node`` publish. The outbox consumer reads
             # ``PendingWires`` keyed on ``correlation_id`` (= wire
@@ -302,6 +348,7 @@ class BridgeIngress:
                     output_type=str,
                     model_settings=model_settings,
                     temp_instructions=temp_instructions,
+                    message_history=message_history,
                 )
             except Exception:
                 # Publish failed; the agent will not run, so no reply
@@ -358,6 +405,27 @@ class BridgeIngress:
         wire_dict = wire.model_dump(mode="json")
         phonebook_dict = phonebook_to_deps(phonebook)
         temp_instructions = build_router_temp_instructions(phonebook)
+        # Fetch channel history ONCE here for the entire fan-out.
+        #
+        # Eager-fetch-at-ambient-publish-time is intentional even though
+        # most ambient messages route to zero or one agent (in which
+        # case we burn ~200ms on a fetch that produces a single
+        # consumer). The tradeoff buys us:
+        #   1. Router context — the router LLM sees the recent
+        #      conversation when making its routing decision, which
+        #      improves quality on context-dependent messages
+        #      ("and now do that for next week").
+        #   2. Snapshot consistency — every fan-out target sees the
+        #      same history, not slightly-different snapshots that
+        #      each refetch would produce.
+        #   3. Single REST call regardless of fan-out width — the
+        #      synthesized-in consumer hands the same envelope.history
+        #      to each chosen agent, so a fan-out to N agents costs
+        #      one fetch, not N.
+        # The alternative (lazy fetch at synth-in re-entry) loses all
+        # three, and the wasted-fetch cost on silent-route decisions is
+        # small enough that the consistency wins.
+        records = await self._fetch_ambient_history(wire)
         if temp_instructions is None:
             # An empty roster is a deployment misconfiguration (no
             # assistants registered). Publishing anyway would burn
@@ -396,7 +464,17 @@ class BridgeIngress:
         # ``envelope.model_dump(mode="json")`` below. The wire shape on
         # the Kafka envelope is identical to the pre-typed
         # implementation.
-        envelope = MetadataEnvelope(wire=wire, phonebook=tuple(phonebook))
+        # Router POV is "outside observer" (no self-classification);
+        # everything in the projected list is a ``ModelRequest``.
+        router_history = project_history(records, self_agent_id=None)
+        router_history_turns = self._router_history_turns()
+        if router_history_turns < len(router_history):
+            router_history = router_history[-router_history_turns:]
+        envelope = MetadataEnvelope(
+            wire=wire,
+            phonebook=tuple(phonebook),
+            history=tuple(records),
+        )
         # Use a FRESH correlation_id (not ``wire.event_id``) for the
         # ambient publish. The router's reply lands on the discard
         # topic and is never looked up by event_id, and the fan-out
@@ -420,8 +498,164 @@ class BridgeIngress:
                 "phonebook": phonebook_dict,
             },
             temp_instructions=temp_instructions,
+            message_history=router_history,
             correlation_id=uuid_utils.uuid7().hex,
         )
+
+    async def _fetch_ambient_history(
+        self, wire: WireMessage
+    ) -> list[HistoryRecord]:
+        """Fetch the channel-history slice for one ambient publish.
+
+        The fetch limit is the maximum ``history_turns`` across every
+        agent in the registry (assistants + the router). The fan-out
+        consumer ships the same record list to every chosen agent via
+        the envelope; each agent's POV projection trims to its OWN
+        ``history_turns`` locally. Fetching the per-agent max upfront
+        means a single Discord call serves any fan-out width.
+
+        Returns ``[]`` when:
+            - the fetcher has not yet been injected (gateway not ready);
+            - the registry is empty (no agents → no max);
+            - the computed max is 0 (every agent has ``history_turns=0``);
+            - the fetcher fails (any ``discord.HTTPException`` family —
+              the fetcher logs at WARN internally and returns ``[]``).
+
+        Each silent-return branch logs at DEBUG so operators investigating
+        "why does the router not see history?" can correlate the cause.
+        The branches that fail with operator-actionable signal (Forbidden,
+        NotFound, channel-cache miss) log at WARN/INFO inside the
+        fetcher itself.
+        """
+        if self._fetcher is None:
+            logger.debug(
+                "ambient history skipped event_id=%s: fetcher not yet "
+                "injected (pre-_on_ready window)",
+                wire.event_id,
+            )
+            return []
+        all_agents = list(self._registry.all())
+        if not all_agents:
+            logger.debug(
+                "ambient history skipped event_id=%s: registry is empty",
+                wire.event_id,
+            )
+            return []
+        fetch_limit = max(s.history_turns for s in all_agents)
+        if fetch_limit <= 0:
+            logger.debug(
+                "ambient history skipped event_id=%s: every agent has "
+                "history_turns=0 (history disabled fleet-wide)",
+                wire.event_id,
+            )
+            return []
+        return await self._fetcher.fetch(
+            source_channel_id=wire.source_channel_id or wire.channel_id,
+            before_message_id=wire.message_id,
+            limit=fetch_limit,
+        )
+
+    async def _build_slash_message_history(
+        self,
+        wire: WireMessage,
+        prefetched_history: Sequence[HistoryRecord] | None,
+    ) -> list[ModelMessage]:
+        """Build the ``message_history`` list for a slash invocation.
+
+        Two record-source paths:
+
+        * ``prefetched_history is not None`` — synthesized-in path. The
+          ambient → router → fan-out chain has already fetched the
+          channel history (eagerly, at ambient publish time) and packed
+          it into the :class:`MetadataEnvelope`. The synthesized-in
+          consumer hands those records here so we don't refetch once
+          per fan-out target. An empty tuple is a legitimate "no
+          records" value — *not* a signal to refetch.
+        * ``prefetched_history is None`` — direct slash / @-mention.
+          Fetch now via :class:`ChannelHistoryFetcher`. If the fetcher
+          hasn't been injected yet (pre-ready), fall back to empty.
+
+        The records are then trimmed to the target agent's
+        ``history_turns`` and projected from its POV. Returns a list
+        (possibly empty) of :class:`ModelMessage`.
+        """
+        target = wire.slash_target
+        if target is None:
+            # Defensive: the slash branch is only entered when
+            # wire.kind == "slash", and the wire schema enforces a
+            # non-None slash_target in that case. Belt-and-suspenders
+            # against a future code path that forgets the invariant.
+            return []
+        spec = self._registry.by_id(target)
+        if spec is None:
+            # The unknown-target case is already ERROR-logged by
+            # :meth:`_resolve_model_settings`; don't double-log.
+            return []
+        if spec.history_turns <= 0:
+            logger.debug(
+                "slash history skipped event_id=%s agent=%s: history_turns=0",
+                wire.event_id,
+                target,
+            )
+            return []
+
+        if prefetched_history is not None:
+            records: Sequence[HistoryRecord] = prefetched_history
+        elif self._fetcher is None:
+            # Pre-ready window. The gateway hasn't injected the fetcher
+            # yet; an event arrived before ``_on_ready`` fired.
+            # Degrade gracefully — empty history is better than a
+            # broken invocation.
+            logger.debug(
+                "slash history skipped event_id=%s agent=%s: fetcher not "
+                "yet injected (pre-_on_ready window)",
+                wire.event_id,
+                target,
+            )
+            return []
+        else:
+            records = await self._fetcher.fetch(
+                source_channel_id=wire.source_channel_id or wire.channel_id,
+                before_message_id=wire.message_id,
+                limit=spec.history_turns,
+            )
+
+        if spec.history_turns < len(records):
+            records = records[-spec.history_turns:]
+        return project_history(records, self_agent_id=target)
+
+    def _router_history_turns(self) -> int:
+        """Return the router's configured ``history_turns``.
+
+        Reads from the router definition in the registry. Returns 0
+        when the registry has no router (test fixtures), which makes
+        the router-history slice empty without raising — matching
+        the rest of the ambient path's "no router → AmbientRosterEmptyError
+        before this point" assumption.
+
+        The ``ValueError`` from :meth:`AgentRegistry.router` is logged
+        at WARNING with the original message attached: a test fixture
+        without a router is harmless noise (one line per test that
+        triggers this path), but a *production* registry without a
+        router is a deployment-config regression that operators must
+        be able to see. The exception message from
+        :class:`AgentRegistry.router` distinguishes the two ("zero
+        router agents" / etc.) so operators can grep for the actual
+        production-bug shape.
+        """
+        try:
+            return self._registry.router().history_turns
+        except ValueError as exc:
+            logger.warning(
+                "registry.router() raised ValueError=%r; defaulting "
+                "router_history_turns=0. In production this indicates "
+                "the registry was built without the built-in router "
+                "(a deployment-config regression). In tests this is "
+                "expected for fixtures constructed without "
+                "build_router_definition().",
+                exc,
+            )
+            return 0
 
     def _resolve_temp_instructions(
         self,

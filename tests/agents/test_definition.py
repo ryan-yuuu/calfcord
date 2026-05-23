@@ -106,7 +106,7 @@ class TestAgentDefinitionValidators:
         assert _make_definition().thinking_effort is None
 
     @pytest.mark.parametrize(
-        "effort", ["none", "low", "medium", "high", "xhigh", "max"]
+        "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     )
     def test_thinking_effort_accepts_known_tiers(self, effort: str) -> None:
         d = _make_definition(thinking_effort=effort)

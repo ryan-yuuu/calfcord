@@ -98,6 +98,7 @@ logger = logging.getLogger(__name__)
 # the bottom-of-module rebuild has run.
 if TYPE_CHECKING:
     from calfkit_organization.agents.phonebook import PhonebookEntry
+    from calfkit_organization.bridge.history import HistoryRecord
     from calfkit_organization.bridge.wire import WireMessage
 
 METADATA_KEY_WIRE = "wire"
@@ -182,6 +183,28 @@ class MetadataEnvelope(BaseModel):
       deliberately does NOT carry a phonebook — the bridge's slash
       branch rebuilds deps from its registry on each re-entry, so
       shipping the projection through this hop would be redundant."""
+
+    history: tuple[HistoryRecord, ...] = ()
+    """Channel history records fetched by the bridge at publish time,
+    oldest-first. Carries the conversation context every consumer in
+    the ambient → router → fan-out → synthesized-in chain needs to
+    construct an agent-POV ``message_history`` at invocation time.
+
+    The records are *unprojected* — they hold raw author identity
+    (``author_agent_id`` resolved at fetch time) rather than already-
+    classified :class:`ModelMessage` entries. This is deliberate: the
+    same channel snapshot fans out to multiple agents in a routing
+    decision, and each one needs its OWN POV projection (scribe's
+    prior posts → ``ModelResponse`` for scribe, → ``ModelRequest`` with
+    ``<Scribe>`` prefix for conan). Projecting at the publisher would
+    lock in one perspective; projecting at each consumer keeps
+    perspectives separable.
+
+    Defaults to an empty tuple so older producers (rolling deploy) and
+    paths that intentionally skip history (router synth-in fallback)
+    are non-breaking — every consumer that reads this field tolerates
+    an empty value as "no history available, run with current message
+    only"."""
 
     @classmethod
     def extract(cls, state_metadata: Any) -> Self:
@@ -307,7 +330,7 @@ async def invoke_node_with_metadata(
     """
     # Behavior parity with Client.invoke_node — same JSON check.
     if model_settings is not None:
-        import json  # local — only needed on the model_settings path  # noqa: PLC0415
+        import json  # local — only needed on the model_settings path
 
         try:
             json.dumps(model_settings, allow_nan=False)
@@ -361,10 +384,13 @@ async def invoke_node_with_metadata(
 # the time it resolves; otherwise the second-pass import fails with
 # ``cannot import name 'MetadataEnvelope' from partially initialized
 # module``. See the TYPE_CHECKING note at the top of the file.
-from calfkit_organization.agents.phonebook import (  # noqa: E402, PLC0415
+from calfkit_organization.agents.phonebook import (  # noqa: E402
     PhonebookEntry as _PhonebookEntry,
 )
-from calfkit_organization.bridge.wire import (  # noqa: E402, PLC0415
+from calfkit_organization.bridge.history import (  # noqa: E402
+    HistoryRecord as _HistoryRecord,
+)
+from calfkit_organization.bridge.wire import (  # noqa: E402
     WireMessage as _WireMessage,
 )
 
@@ -372,6 +398,7 @@ MetadataEnvelope.model_rebuild(
     _types_namespace={
         "WireMessage": _WireMessage,
         "PhonebookEntry": _PhonebookEntry,
+        "HistoryRecord": _HistoryRecord,
     }
 )
 

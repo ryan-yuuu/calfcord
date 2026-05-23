@@ -116,6 +116,11 @@ class MessageNormalizer:
             raise ValueError("MessageNormalizer received a DM (message.guild is None)")
 
         channel_id = _resolve_channel_id(message.channel)
+        # ``source_channel_id`` is the un-flattened channel id (= thread id
+        # for thread messages, == channel_id otherwise). The bridge's
+        # history fetcher uses this so it fetches the thread's own
+        # history, not the parent channel's.
+        source_channel_id = message.channel.id
         author = self._build_author(message)
         kind, slash_target = self._classify(message.content)
 
@@ -125,6 +130,7 @@ class MessageNormalizer:
             slash_target=slash_target,
             message_id=message.id,
             channel_id=channel_id,
+            source_channel_id=source_channel_id,
             guild_id=message.guild.id,
             content=message.content,
             author=author,
@@ -233,6 +239,10 @@ class SlashNormalizer:
 
         guild_id = getattr(interaction, "guild_id", None) or interaction.guild.id
         channel_id = _resolve_channel_id(interaction.channel)
+        # ``source_channel_id`` is the un-flattened channel id (= thread id
+        # for thread interactions, == channel_id otherwise). Same
+        # rationale as :meth:`MessageNormalizer.normalize`.
+        source_channel_id = interaction.channel.id
         user = interaction.user
 
         is_bot = bool(getattr(user, "bot", False))
@@ -262,6 +272,7 @@ class SlashNormalizer:
             slash_target=slash_target.agent_id,
             message_id=followup_message_id,
             channel_id=channel_id,
+            source_channel_id=source_channel_id,
             guild_id=guild_id,
             content=message_arg,
             author=author,

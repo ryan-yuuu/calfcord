@@ -1,22 +1,31 @@
-"""Unit tests for the gateway's user-facing error replies.
+"""Unit tests for the gateway's user-facing error replies and lifecycle.
 
 The gateway runs Discord I/O so a true end-to-end test would need a
 mock discord.py connection. These tests focus on the reply-helper
 contract: given a triggering condition, the right text is sent via
 ``message.reply`` and Discord HTTPException is logged + swallowed
 (matching the existing ``_reply_unknown_mention`` shape).
+
+Also covers the ``_on_ready`` lifecycle: it must inject a
+:class:`ChannelHistoryFetcher` into the ingress so the slash + ambient
+paths can fetch history. A regression that drops the injection would
+leave the bridge running in the pre-ready degradation mode forever
+(empty history fleet-wide) — silent quality loss with no operator
+signal beyond DEBUG logs. The injection test is a regression alarm.
 """
 
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 from pydantic import SecretStr
 
 from calfkit_organization.bridge.gateway import DiscordIngressGateway
+from calfkit_organization.bridge.history import ChannelHistoryFetcher
 from calfkit_organization.discord.settings import DiscordSettings
 
 
@@ -136,7 +145,7 @@ class TestOnMessageEmptyRosterWiring:
         """End-to-end: ingress raises ``AmbientRosterEmptyError``;
         ``_on_message`` must drive ``_reply_empty_roster`` with the
         triggering message."""
-        from calfkit_organization.bridge.ingress import (  # noqa: PLC0415
+        from calfkit_organization.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -270,3 +279,50 @@ class TestOnMessageIngressFailureWiring:
         # Sanity: no Python type names or implementation references.
         assert "RuntimeError" not in text
         assert "ingress" not in text.lower() or "operator" in text.lower()
+
+
+class TestOnReadyInjectsFetcher:
+    """The ``_on_ready`` hook must construct a
+    :class:`ChannelHistoryFetcher` and inject it into the ingress via
+    :meth:`BridgeIngress.set_fetcher`. Without this, the bridge would
+    run in pre-ready degradation mode forever — every slash and
+    ambient invocation would skip history fetching and produce
+    silently-lower-quality replies.
+
+    The test stubs out the slash command sync (which requires a live
+    Discord connection) and just asserts the injection happens.
+    """
+
+    async def test_on_ready_injects_channel_history_fetcher(self) -> None:
+        gateway = _gateway()
+        # Patch the client.user attribute (populated by Discord after
+        # handshake) so _on_ready's assertion holds.
+        fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
+        with patch.object(
+            type(gateway._client), "user", new=fake_user, create=True
+        ), patch.object(
+            gateway._slash, "sync", new=AsyncMock(return_value=None)
+        ):
+            await gateway._on_ready()
+
+        # The ingress must have received the fetcher.
+        gateway._ingress.set_fetcher.assert_called_once()
+        injected = gateway._ingress.set_fetcher.call_args.args[0]
+        assert isinstance(injected, ChannelHistoryFetcher)
+
+    async def test_on_ready_logs_history_injection(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        gateway = _gateway()
+        fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
+        with patch.object(
+            type(gateway._client), "user", new=fake_user, create=True
+        ), patch.object(
+            gateway._slash, "sync", new=AsyncMock(return_value=None)
+        ), caplog.at_level(
+            logging.INFO, logger="calfkit_organization.bridge.gateway"
+        ):
+            await gateway._on_ready()
+        assert any(
+            "history fetcher injected" in r.message for r in caplog.records
+        )

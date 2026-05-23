@@ -49,12 +49,13 @@ The factory maps each provider to a concrete model-client class:
     - ``"openai"`` → :class:`calfkit.OpenAIModelClient`
 """
 
-ThinkingEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+ThinkingEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 """Operator-facing thinking-effort tiers.
 
-Six abstract levels mapped to provider-specific reasoning/thinking
+Seven abstract levels mapped to provider-specific reasoning/thinking
 parameters in :mod:`calfkit_organization.agents.thinking`. Tier names
-parallel Claude Code's effort vocabulary; ``xhigh`` is a calfkit-specific
+parallel Claude Code's effort vocabulary; ``minimal`` is the lightest
+non-zero step (a hair above ``none``); ``xhigh`` is a calfkit-specific
 step between ``high`` and ``max``.
 """
 
@@ -108,6 +109,31 @@ class AgentDefinition(BaseModel):
     assistant agents — they emit ``ReturnCall`` to the inbound frame's
     ``callback_topic`` (i.e., the bridge's ``discord.outbox``), which
     is the standard calfkit dispatch pattern."""
+    history_turns: int = Field(default=30, ge=0, le=100)
+    """Number of recent channel messages the bridge fetches and projects
+    into ``message_history`` on every invocation of this agent.
+
+    - ``0`` disables history fetching for this agent entirely (no
+      Discord REST call; agent runs with the system prompt + user
+      prompt only).
+    - The upper bound (100) is Discord's per-call REST cap for
+      ``channel.history(limit=...)``; raising it would force
+      pagination, which is out of scope for v1.
+    - The default (30) is a reasonable balance between context quality
+      and token cost: ~30 messages of ~100 tokens average is ~3K
+      input tokens per invocation, which is trivial on small models
+      and acceptable on larger ones.
+
+    Set in ``.md`` frontmatter::
+
+        ---
+        name: scribe
+        ...
+        history_turns: 30
+        ---
+
+    The router's analogous knob is the ``CALFKIT_ROUTER_HISTORY_TURNS``
+    env var (router is constructed in code, not from ``.md``)."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by
@@ -157,7 +183,7 @@ class AgentDefinition(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_router_constraints(self) -> "AgentDefinition":
+    def _validate_router_constraints(self) -> AgentDefinition:
         """Enforce role-specific invariants on ``tools`` and ``publish_topic``.
 
         Routers:

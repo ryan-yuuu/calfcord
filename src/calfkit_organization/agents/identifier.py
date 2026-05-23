@@ -40,7 +40,19 @@ AgentId = Annotated[
 """Nominal type for agent ids on pydantic models. Use as a field
 annotation instead of ``str`` to get format validation for free —
 e.g. ``agent_id: AgentId`` on a model. Behaves as ``str`` at
-runtime; pydantic enforces the constraints at validation time.
+runtime; pydantic enforces the length constraints at validation time.
 
-Note: pydantic's :class:`StringConstraints` runs a full-string regex
-match, equivalent to ``AGENT_ID_PATTERN.fullmatch(value) is not None``."""
+**Known limitation — partial-match pattern enforcement.** Pydantic v2's
+:class:`StringConstraints` ``pattern=`` uses
+:meth:`re.Pattern.search`-style matching, NOT full-string match. A
+value containing any matching substring slips through (verified with
+pydantic 2.13: ``"aaaUPPERCASE"`` is accepted because ``"aaa"``
+matches the pattern). The ``min_length`` / ``max_length`` constraints
+ARE enforced strictly. Consumers that need true full-string format
+enforcement (notably :class:`AgentDefinition.agent_id`,
+:class:`PhonebookEntry.agent_id`, :class:`HistoryRecord.author_agent_id`)
+use an explicit ``@field_validator`` with :meth:`AGENT_ID_PATTERN.fullmatch`
+instead of this alias. A future cleanup could anchor the regex with
+``^...$`` to force full-string match — but anchoring inside the
+``pattern=`` is awkward across pydantic versions; the explicit
+validator is the project's canonical approach."""

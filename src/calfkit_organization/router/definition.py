@@ -21,10 +21,13 @@ agents and the router co-exist in a single roster.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider, ThinkingEffort
 from calfkit_organization.router.prompt import SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
 
 ROUTER_AGENT_ID = "_router"
 """Canonical agent id for the singleton built-in router. Imported by
@@ -56,10 +59,34 @@ subscription, which is also constant."""
 _PROVIDER_ENV = "CALFKIT_ROUTER_PROVIDER"
 _MODEL_ENV = "CALFKIT_ROUTER_MODEL"
 _THINKING_EFFORT_ENV = "CALFKIT_ROUTER_THINKING_EFFORT"
+_HISTORY_TURNS_ENV = "CALFKIT_ROUTER_HISTORY_TURNS"
 
 _DEFAULT_PROVIDER: Provider = "openai"
 _DEFAULT_MODEL = "gpt-5-nano"
-_DEFAULT_THINKING_EFFORT: ThinkingEffort = "none"
+_DEFAULT_THINKING_EFFORT: ThinkingEffort = "minimal"
+"""The router runs a tightly-bounded structured-output task (pick agents
+from a small roster, account for ongoing conversation continuity in rule
+3 of the prompt). ``"minimal"`` is the lightest non-zero reasoning tier
+— it gives the router enough budget to weigh continuity vs. topic match
+without paying the latency/cost of a heavier tier on every ambient
+message. Overridable via ``CALFKIT_ROUTER_THINKING_EFFORT`` for
+operators who want to disable reasoning entirely (``"none"``) or trade
+latency for better edge-case handling (``"low"`` or higher)."""
+_DEFAULT_HISTORY_TURNS = 10
+"""Default number of recent channel messages projected into the router's
+``message_history``. Smaller than the assistant default (30) because:
+
+* The router runs on every ambient message in every channel — the
+  per-invocation cost adds up, and the routing decision is bounded
+  by ``RoutingDecision``'s small structured output, so the marginal
+  value of more context is modest.
+* The router doesn't need to *carry* the conversation; it only
+  needs enough context to recognize follow-ups vs. fresh topics.
+* The router never appears as ``self`` in the projection (it has
+  no Discord persona / no prior turns), so every record contributes
+  one ``ModelRequest`` — no merging benefit from a larger window.
+
+Overridable via ``CALFKIT_ROUTER_HISTORY_TURNS``."""
 
 
 def build_router_definition() -> AgentDefinition:
@@ -91,6 +118,7 @@ def build_router_definition() -> AgentDefinition:
     # ``.md`` parsing.
     model = os.getenv(_MODEL_ENV, _DEFAULT_MODEL)
     thinking_effort_raw = os.getenv(_THINKING_EFFORT_ENV, _DEFAULT_THINKING_EFFORT)
+    history_turns = _read_history_turns_env()
 
     return AgentDefinition(
         agent_id=ROUTER_AGENT_ID,
@@ -104,6 +132,56 @@ def build_router_definition() -> AgentDefinition:
         thinking_effort=thinking_effort_raw,  # type: ignore[arg-type]
         role="router",
         publish_topic=_ROUTER_PUBLISH_TOPIC,
+        history_turns=history_turns,
         system_prompt=SYSTEM_PROMPT,
         source_path=None,
     )
+
+
+def _read_history_turns_env() -> int:
+    """Read and validate ``CALFKIT_ROUTER_HISTORY_TURNS``.
+
+    Falls back to :data:`_DEFAULT_HISTORY_TURNS` on any of:
+
+    * env var unset
+    * env var set to a non-integer
+    * env var set to a value outside the 0..100 schema bounds
+
+    Logs a warning on invalid values rather than raising, so the
+    router still starts with a safe default if an operator mis-types
+    the env var. The bridge can't usefully start without a router,
+    so a strict fail-fast here would brick the whole deployment over
+    one misconfigured env var.
+
+    **Asymmetry with the other ``CALFKIT_ROUTER_*`` env vars** (provider,
+    model, thinking_effort): those are validated lazily by pydantic
+    inside :class:`AgentDefinition`'s field validators and fail fast at
+    router build time. ``history_turns`` is fall-back-with-warn because
+    it's a quality-degrading knob — wrong values produce smaller / no
+    history but the agent still functions. A wrong provider or model
+    name, by contrast, would produce no valid LLM responses at all, so
+    fail-fast surfaces the misconfiguration before it produces user-
+    visible silence.
+    """
+    raw = os.getenv(_HISTORY_TURNS_ENV)
+    if raw is None:
+        return _DEFAULT_HISTORY_TURNS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an integer; falling back to default %d",
+            _HISTORY_TURNS_ENV,
+            raw,
+            _DEFAULT_HISTORY_TURNS,
+        )
+        return _DEFAULT_HISTORY_TURNS
+    if not 0 <= value <= 100:
+        logger.warning(
+            "%s=%d is outside the 0..100 schema bounds; falling back to default %d",
+            _HISTORY_TURNS_ENV,
+            value,
+            _DEFAULT_HISTORY_TURNS,
+        )
+        return _DEFAULT_HISTORY_TURNS
+    return value

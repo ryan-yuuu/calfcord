@@ -14,10 +14,18 @@ in the channel ran its LLM on every ambient message and posted a reply.
 
 After this feature: a built-in routing agent sits in front of all
 assistant agents. It receives every ambient message, decides which
-subset of agents would naturally respond (zero, one, several, or all,
-depending on the message), and fans out per-target invocations. The
-chosen agents reply normally. Slash and @-mention invocations are
-unaffected — they continue to route directly to the targeted agent.
+subset of agents would naturally respond (always at least one;
+typically exactly one; occasionally several), and fans out per-target
+invocations. The chosen agents reply normally. Slash and @-mention
+invocations are unaffected — they continue to route directly to the
+targeted agent.
+
+The "always at least one" policy is enforced at the router's system
+prompt level (see `router/prompt.py`). The :class:`RoutingDecision`
+schema still allows an empty `agents` tuple structurally — defense
+in depth so a misbehaving LLM doesn't trigger pydantic-ai
+structured-output retries — and the fan-out consumer no-ops on
+empty rather than crashing.
 
 The router is **built-in infrastructure**, not a user-customizable
 agent. Its definition lives in code (`router/definition.py`) and is
@@ -167,10 +175,16 @@ Router-specific:
 CALFKIT_ROUTER_PROVIDER=openai            # anthropic | openai
 CALFKIT_ROUTER_MODEL=gpt-5-nano           # fast/cheap recommended
 CALFKIT_ROUTER_THINKING_EFFORT=none       # none | low | medium | high | xhigh | max
+CALFKIT_ROUTER_HISTORY_TURNS=10           # 0..100; channel history window for routing decisions
 ```
 
-Defaults: `openai` / `gpt-5-nano` / `none`. The router runs once per
-ambient message — keep it fast and cheap.
+Defaults: `openai` / `gpt-5-nano` / `none` / `10`. The router runs once
+per ambient message — keep it fast and cheap. The router's history
+window is intentionally smaller than per-agent assistants (default 30)
+because the router only needs enough context to recognize follow-ups vs.
+fresh topics, not to carry the conversation. Invalid values (non-integer
+or outside 0..100) fall back to the default with a WARN log rather than
+crashing the router build.
 
 Shared with the assistant runner (also required by `calfkit-router`):
 
@@ -278,6 +292,41 @@ operator responsibilities the bridge cannot verify on its own.
    break the bridge at import time. Do NOT relax this constraint
    without verifying the upstream cleanup at calfkit-sdk#144 has
    landed.
+
+6. **Discord "Read Message History" permission.** The bridge fetches
+   recent channel history on every agent invocation and projects it
+   into the agent's `message_history` (see "Conversation history"
+   below). The fetch uses Discord REST `GET /channels/{id}/messages`,
+   which requires the bot to have the **Read Message History**
+   permission in every served channel. Missing the permission is not
+   fatal: the bridge logs a WARN (once per channel) and the
+   invocation proceeds with empty history. But quality degrades —
+   agents lose multi-turn context. Grant Read Message History
+   alongside View Channel in the bot's role configuration for every
+   guild it operates in.
+
+### Conversation history
+
+The bridge fetches recent channel history on every agent invocation
+and projects it from that agent's point of view (the agent's own
+prior webhook posts become `ModelResponse` turns; everyone else
+becomes `ModelRequest` turns with the speaker's display_name
+prefixed into the user content as `<name>`).
+
+| Knob | Where | Default | Range |
+|---|---|---|---|
+| Per-assistant window | `history_turns:` in `agents/<name>.md` frontmatter | 30 | 0..100 (0 disables) |
+| Router window | `CALFKIT_ROUTER_HISTORY_TURNS` env on the router process | 10 | 0..100 (0 disables) |
+
+The upper bound of 100 matches Discord's per-call REST cap. History
+fetches are cached in-process for 2 seconds keyed on
+`(channel_id, before_message_id, limit)` so a router fan-out to N
+agents costs one Discord call, not N. The cache is process-local and
+ephemeral; bridge restarts cold-start it.
+
+A2A `private_chat` is **stateless** — peer-to-peer invocations do
+not carry channel history. The caller is responsible for putting any
+needed context into the message content.
 
 ### Hard cutover
 
@@ -513,9 +562,18 @@ the tool calls, one to produce a final output after tool results).
 
 - **Per-channel routing policy.** Today there's one global router for
   all channels.
-- **Channel history context.** The router sees only the current
-  message + the agent roster. Conversation context (who was the
-  previous topic about, who's been talking) is not threaded in.
+- **Token-budget cap on history.** v1 uses count-based truncation
+  (`history_turns`). A 2K-token paste followed by 29 short messages
+  blows the LLM context. v2 will add a token-budget cap on top of
+  the count cap so the smaller of the two wins.
+- **History edit/delete propagation.** Once fetched, an in-flight
+  invocation sees the historical snapshot. A user editing a recent
+  message after the fetch won't be reflected until the next
+  invocation re-fetches.
+- **A2A `private_chat` history.** A2A is intentionally stateless RPC
+  in v1; peers receive only the caller's `content`. A future
+  opt-in `continue_thread:` flag could enable multi-turn collaboration
+  if real usage demands it.
 - **Audit projection.** Routing decisions are logged at INFO inside
   the router process. No Discord-side audit channel mirrors the
   decisions.

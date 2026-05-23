@@ -41,6 +41,7 @@ import discord
 from calfkit.client import Client
 from calfkit.worker import Worker
 
+from calfkit_organization.bridge.history import ChannelHistoryFetcher
 from calfkit_organization.bridge.ingress import (
     AmbientRosterEmptyError,
     BridgeIngress,
@@ -130,7 +131,16 @@ class DiscordIngressGateway:
             bot_user_id=bot_user.id,
             human_owner_id=self._settings.owner_user_id,
         )
-        logger.info("gateway ready as %s (id=%s)", bot_user, bot_user.id)
+        # The history fetcher needs a live (post-handshake)
+        # :class:`discord.Client` — get_channel/fetch_channel both
+        # rely on the WebSocket having populated the guild/channel
+        # cache. Construct here in ``_on_ready`` and inject into the
+        # ingress. Before this point, the ingress's slash branch
+        # degrades to empty ``message_history`` (see
+        # :meth:`BridgeIngress._build_slash_message_history`).
+        fetcher = ChannelHistoryFetcher(self._client, self._registry)
+        self._ingress.set_fetcher(fetcher)
+        logger.info("gateway ready as %s (id=%s); history fetcher injected", bot_user, bot_user.id)
         await self._slash.sync(self._settings.guild_id)
 
     async def _on_message(self, message: discord.Message) -> None:

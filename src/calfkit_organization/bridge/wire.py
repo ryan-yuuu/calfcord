@@ -77,13 +77,24 @@ class WireMessage(BaseModel):
     slash_target: str | None = None
     message_id: int
     channel_id: int
+    source_channel_id: int | None = None
+    """The actual Discord channel id the message landed in (thread or
+    top-level). ``channel_id`` is the parent-channel id used for Kafka
+    topic routing (the normalizer flattens threads to parent so all
+    messages in a thread group share one topic); ``source_channel_id``
+    preserves the un-flattened id so the bridge's
+    :class:`~calfkit_organization.bridge.history.ChannelHistoryFetcher`
+    fetches the right channel's history (the thread itself, not the
+    parent). ``None`` means the wire predates this field; callers fall
+    back to ``channel_id`` (correct for non-thread messages; a thread
+    wire from before the deploy loses one cycle of accurate history)."""
     guild_id: int
     content: str
     author: WireAuthor
     created_at: datetime
 
     @model_validator(mode="after")
-    def _check_slash_target(self) -> "WireMessage":
+    def _check_slash_target(self) -> WireMessage:
         if self.kind == "slash" and self.slash_target is None:
             raise ValueError("slash_target is required when kind='slash'")
         if self.kind == "message" and self.slash_target is not None:

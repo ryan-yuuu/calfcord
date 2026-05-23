@@ -30,12 +30,19 @@ class TestDefaults:
         d = build_router_definition()
         assert d.model == "gpt-5-nano"
 
-    def test_thinking_effort_defaults_to_none(
+    def test_thinking_effort_defaults_to_minimal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The router default is ``"minimal"`` — the lightest non-zero
+        reasoning tier. Justified by the router's structured-output
+        task (small decision space) plus the conversation-continuity
+        rule (prompt rule 3), which benefits from a touch of reasoning
+        without paying the latency cost of ``low`` or higher on every
+        ambient message. Operators who want zero reasoning can still
+        set ``CALFKIT_ROUTER_THINKING_EFFORT=none``."""
         monkeypatch.delenv("CALFKIT_ROUTER_THINKING_EFFORT", raising=False)
         d = build_router_definition()
-        assert d.thinking_effort == "none"
+        assert d.thinking_effort == "minimal"
 
 
 class TestEnvOverrides:
@@ -56,6 +63,57 @@ class TestEnvOverrides:
         monkeypatch.setenv("CALFKIT_ROUTER_THINKING_EFFORT", "high")
         d = build_router_definition()
         assert d.thinking_effort == "high"
+
+    def test_history_turns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_ROUTER_HISTORY_TURNS", raising=False)
+        d = build_router_definition()
+        assert d.history_turns == 10
+
+    def test_history_turns_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "25")
+        d = build_router_definition()
+        assert d.history_turns == 25
+
+    def test_history_turns_invalid_string_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A non-integer value logs WARN and uses the default rather
+        than crashing the router build (which would brick deploys)."""
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "not-a-number")
+        d = build_router_definition()
+        assert d.history_turns == 10
+        assert any("not an integer" in r.message for r in caplog.records)
+
+    def test_history_turns_out_of_range_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A value outside 0..100 logs WARN and uses the default."""
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "999")
+        d = build_router_definition()
+        assert d.history_turns == 10
+        assert any("outside the 0..100" in r.message for r in caplog.records)
+
+    def test_history_turns_zero_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """0 is a valid value (disables router history)."""
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "0")
+        d = build_router_definition()
+        assert d.history_turns == 0
+
+    def test_history_turns_negative_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "-1")
+        d = build_router_definition()
+        assert d.history_turns == 10
+        assert any("outside the 0..100" in r.message for r in caplog.records)
 
 
 class TestFieldInvariants:

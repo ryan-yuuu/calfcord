@@ -443,7 +443,12 @@ class TestThinkingEffortBaking:
             MagicMock(),
         )
         agent_loop = worker._nodes[0]._agent_loop
-        assert agent_loop.model_settings == {"openai_reasoning_effort": "low"}
+        # Matches the operator → OpenAI mapping in
+        # :mod:`calfkit_organization.agents.thinking`: operator
+        # ``medium`` → OpenAI ``"medium"`` after the ramp shift that
+        # accompanied the ``minimal`` tier addition. Was ``"low"``
+        # under the previous mapping.
+        assert agent_loop.model_settings == {"openai_reasoning_effort": "medium"}
 
     def test_no_effort_in_definition_no_model_settings(self) -> None:
         """thinking_effort=None → no tier-2 model_settings."""
