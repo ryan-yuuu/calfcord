@@ -1,9 +1,8 @@
-"""Tests for the outbox's retry-with-feedback path.
+"""Tests for the outbox's retry-with-feedback orchestration.
 
-Covers:
+Covers the bridge-specific transport that consumes the shared policy
+helpers from :mod:`calfkit_organization.discord.retry_feedback`:
 
-* :func:`build_retry_reminder` — pure function shape, override map.
-* :func:`_chunk_split` — boundary search, hard-cut fallback.
 * :func:`_handle_post_failure` — branch triage (non-retryable / budget
   exhausted / agent retry / Kafka publish failure).
 * :func:`_publish_retry` — envelope shape (history + reminder +
@@ -12,6 +11,10 @@ Covers:
   delivery on per-chunk failure.
 * End-to-end via the consumer's handler: 400-50035 → retry envelope
   published; 403 → drop; retry-success path.
+
+Pure-helper coverage (``build_retry_reminder``, ``build_retry_history``,
+``chunk_split``, ``classify_error``) lives in
+``tests/discord/test_retry_feedback.py``.
 """
 
 from __future__ import annotations
@@ -44,15 +47,14 @@ from calfkit.models.session_context import (
 
 from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.outbox import (
-    _RETRY_REMINDER_OVERRIDES,
-    CHUNK_SAFE_SIZE,
-    MAX_REPLY_RETRY_ATTEMPTS,
-    _chunk_split,
     _handle_post_failure,
     _post_chunked_fallback,
     _publish_retry,
     build_outbox_consumer,
-    build_retry_reminder,
+)
+from calfkit_organization.discord.retry_feedback import (
+    CHUNK_SAFE_SIZE,
+    MAX_REPLY_RETRY_ATTEMPTS,
 )
 from calfkit_organization.bridge.pending_wires import (
     PendingEntry,
@@ -182,127 +184,6 @@ def calfkit_client() -> MagicMock:
 @pytest.fixture
 def broker() -> MagicMock:
     return MagicMock()
-
-
-# ---------------------------------------------------------------------------
-# build_retry_reminder
-# ---------------------------------------------------------------------------
-
-
-class TestBuildRetryReminder:
-    def test_wraps_in_system_reminder_tags(self) -> None:
-        err = _http_exc(discord.HTTPException, 400, code=50035)
-        out = build_retry_reminder(err, "x" * 3000)
-        assert out.startswith("<system-reminder>")
-        assert out.rstrip().endswith("</system-reminder>")
-
-    def test_includes_status_and_failed_length(self) -> None:
-        err = _http_exc(discord.HTTPException, 400, code=50035)
-        out = build_retry_reminder(err, "x" * 3187)
-        assert "HTTP 400" in out
-        assert "3187" in out
-
-    def test_includes_do_not_mention_directive(self) -> None:
-        err = _http_exc(discord.HTTPException, 400, code=50035)
-        out = build_retry_reminder(err, "fail")
-        assert "Do NOT mention" in out
-        assert "user does NOT see" in out
-
-    def test_uses_override_when_present(self) -> None:
-        err = _http_exc(discord.HTTPException, 418, code=999)
-        try:
-            _RETRY_REMINDER_OVERRIDES[(418, 999)] = "Custom guidance for teapot."
-            out = build_retry_reminder(err, "fail")
-            assert "Custom guidance for teapot." in out
-            # Generic body is suppressed.
-            assert "HTTP 418" not in out
-        finally:
-            del _RETRY_REMINDER_OVERRIDES[(418, 999)]
-
-    def test_override_with_different_code_falls_through_to_generic(self) -> None:
-        """An override for ``(418, 42)`` does NOT match ``(418, 999)``.
-
-        v1 ships with no wildcard support — override matching is exact
-        on both ``status`` and ``code``. If a future use case needs
-        wildcard semantics, the override-lookup function should be
-        extended; YAGNI says not to ship that complexity preemptively.
-        """
-        err = _http_exc(discord.HTTPException, 418, code=999)
-        try:
-            _RETRY_REMINDER_OVERRIDES[(418, 42)] = "Specific code 42 only."
-            out = build_retry_reminder(err, "fail")
-            # The override does not match (different code); generic
-            # template is used instead.
-            assert "Specific code 42 only." not in out
-            assert "HTTP 418" in out
-        finally:
-            del _RETRY_REMINDER_OVERRIDES[(418, 42)]
-
-
-# ---------------------------------------------------------------------------
-# _chunk_split
-# ---------------------------------------------------------------------------
-
-
-class TestChunkSplit:
-    def test_empty_returns_empty_list(self) -> None:
-        assert _chunk_split("") == []
-
-    def test_short_returns_single_chunk(self) -> None:
-        assert _chunk_split("hello") == ["hello"]
-
-    def test_long_splits_into_multiple(self) -> None:
-        text = "x" * 5000
-        chunks = _chunk_split(text)
-        assert len(chunks) >= 3
-        for c in chunks:
-            assert len(c) <= CHUNK_SAFE_SIZE
-
-    def test_prefers_paragraph_boundary(self) -> None:
-        first = "a" * 1500
-        second = "b" * 1500
-        text = f"{first}\n\n{second}"
-        chunks = _chunk_split(text)
-        assert len(chunks) == 2
-        assert chunks[0] == first
-        assert chunks[1] == second
-
-    def test_falls_back_to_line_boundary(self) -> None:
-        first = "a" * 1500
-        second = "b" * 1500
-        text = f"{first}\n{second}"
-        chunks = _chunk_split(text)
-        assert len(chunks) == 2
-        assert chunks[0] == first
-        assert chunks[1] == second
-
-    def test_falls_back_to_sentence_boundary(self) -> None:
-        first = "a" * 1500
-        second = "b" * 1500
-        text = f"{first}. {second}"
-        chunks = _chunk_split(text)
-        assert len(chunks) == 2
-        # Sentence cut keeps the period in the first chunk.
-        assert chunks[0].endswith(".")
-
-    def test_hard_cut_when_no_boundary(self) -> None:
-        text = "x" * 4000  # no boundaries at all
-        chunks = _chunk_split(text)
-        assert len(chunks) >= 3
-        for c in chunks:
-            assert len(c) <= CHUNK_SAFE_SIZE
-
-    def test_preserves_total_content_modulo_boundary_whitespace(self) -> None:
-        """All non-boundary chars survive across chunks."""
-        first = "a" * 1500
-        second = "b" * 1500
-        text = f"{first}. {second}"
-        chunks = _chunk_split(text)
-        joined = "".join(chunks)
-        # The boundary characters (". ") get split off but the
-        # alphabetic content is preserved exactly.
-        assert "a" * 1500 in joined
-        assert "b" * 1500 in joined
 
 
 # ---------------------------------------------------------------------------

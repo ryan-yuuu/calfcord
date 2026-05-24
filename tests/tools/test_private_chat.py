@@ -1121,28 +1121,82 @@ class TestRequestProjectionBestEffort:
 
 
 class TestResponseProjectionRaises:
-    """The response projection (post-RPC) is *not* best-effort: if it fails
-    after both attempts, the calling LLM would see a reply that was never
-    audited. The tool must raise instead so that contract holds.
+    """Transient / non-agent-fixable failures on the response side raise
+    via ``_raise_infra`` rather than swallowing — the caller's LLM
+    cannot fix Discord-side outage (5xx) or permission errors
+    (403/404/etc.) by re-thinking its reply. Agent-fixable cases
+    (400 family) go through ``_post_response_with_feedback_retries``'s
+    retry path instead and are covered by ``TestA2ARetryWithFeedback``.
     """
 
-    async def test_response_projection_persistent_failure_raises_infra(
+    async def test_transient_5xx_raises_infra(
         self, deps: dict[str, Any]
     ) -> None:
         deps["client"].execute_node.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                _sent_message(_REQUEST_SENT_MESSAGE_ID),
-                _http_exc(discord.HTTPException, 503),
-                _http_exc(discord.HTTPException, 503),
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
+                _http_exc(discord.HTTPException, 503),    # response side 5xx
             ]
         )
-        with patch(
-            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
-        ), pytest.raises(RuntimeError, match="a2a audit projection failed") as ei:
+        with pytest.raises(
+            RuntimeError, match="a2a audit projection failed"
+        ) as ei:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert isinstance(ei.value.__cause__, discord.HTTPException)
-        assert f"after {pc._MAX_PROJECTION_ATTEMPTS} attempts" in str(ei.value)
+        assert "transient status=503" in str(ei.value)
+
+    async def test_non_agent_fixable_403_raises_infra(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """403 Forbidden is non-agent-fixable (missing Manage Webhooks
+        permission) — the LLM can't fix permission issues by changing
+        content. Retry-with-feedback does not fire."""
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
+                _http_exc(discord.Forbidden, 403),        # response side 403
+            ]
+        )
+        with pytest.raises(
+            RuntimeError, match="a2a audit projection failed"
+        ) as ei:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert isinstance(ei.value.__cause__, discord.HTTPException)
+        assert "non-agent-fixable status=403" in str(ei.value)
+        # Only ONE response-side send attempt — drop is immediate, no
+        # retry-with-feedback for permission errors.
+        assert deps["persona_sender"].send.await_count == 2
+
+    async def test_rate_limited_response_raises_infra(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """:class:`discord.RateLimited` is a sibling of
+        :class:`HTTPException` (not a subclass) — discord.py's internal
+        backoff has already exhausted its budget by the time this
+        bubbles up. The orchestrator's ``except`` clause must be broad
+        enough to catch it (``discord.DiscordException``, not just
+        ``HTTPException``); ``classify_error`` returns ``"drop"`` and
+        the orchestrator raises infra. Without the broadened catch this
+        exception would escape uncaught and the caller's LLM would see
+        a raw ``RateLimited`` traceback bypassing the documented
+        ``RuntimeError`` contract."""
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
+                discord.RateLimited(retry_after=5.0),      # response side RateLimited
+            ]
+        )
+        with pytest.raises(
+            RuntimeError, match="a2a audit projection failed"
+        ) as ei:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert isinstance(ei.value.__cause__, discord.RateLimited)
+        # Status string falls back to type name for RateLimited (no
+        # ``.status`` attribute on the exception).
+        assert "non-agent-fixable status=RateLimited" in str(ei.value)
 
     async def test_response_projection_failure_logs_correlation_caller_target(
         self,
@@ -1156,12 +1210,9 @@ class TestResponseProjectionRaises:
             side_effect=[
                 _sent_message(_REQUEST_SENT_MESSAGE_ID),
                 _http_exc(discord.HTTPException, 503),
-                _http_exc(discord.HTTPException, 503),
             ]
         )
-        with patch(
-            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
-        ), caplog.at_level(_logging.ERROR), pytest.raises(RuntimeError):
+        with caplog.at_level(_logging.ERROR), pytest.raises(RuntimeError):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "caller=alice" in joined
@@ -1469,3 +1520,406 @@ class TestForwardedWire:
         assert propagated_bob["tools"] == ["private_chat"]
         assert propagated_bob["display_name"] == "Bob Bot"
         assert propagated_bob["avatar_url"] == "https://example.com/bob.png"
+
+
+class TestA2ARetryWithFeedback:
+    """Agent-fixable Discord rejections (400 family) trigger
+    retry-with-feedback: the target is re-invoked with a
+    ``<system-reminder>``-tagged prompt + its failed reply in
+    history, and gets a chance to adapt (typically by shortening).
+    Mirrors the bridge outbox's behavior so channel replies and
+    A2A replies share the same UX contract.
+
+    The orchestrator is
+    :func:`~calfkit_organization.tools.private_chat._post_response_with_feedback_retries`;
+    it directly invokes ``_persona_sender.send`` (NOT
+    ``_post_projection``) so HTTPException can reach
+    ``classify_error`` instead of being swallowed by
+    ``_post_projection``'s internal retry-and-raise.
+    """
+
+    async def test_retry_succeeds_on_second_attempt(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """First response projection 400s; orchestrator triggers a
+        retry; target produces shorter text; second projection
+        succeeds. Caller receives the SHORTER text — that's what the
+        audit thread shows, and the caller's LLM gets the same view."""
+        long_reply = "x" * 3000
+        short_reply = "x" * 1000
+        # execute_node is called twice: first for the original
+        # response, second for the retry.
+        deps["client"].execute_node = AsyncMock(
+            side_effect=[_result(long_reply), _result(short_reply)]
+        )
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
+                _http_exc(discord.HTTPException, 400),    # response attempt 1 → 400
+                _sent_message(99998),                      # response attempt 2 OK
+            ]
+        )
+        returned = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Caller sees the shorter retry reply, not the rejected one.
+        assert short_reply in returned
+        assert long_reply not in returned
+        # Two execute_node calls (original + retry).
+        assert deps["client"].execute_node.await_count == 2
+        # Three persona_sender.send calls (request + failed response + retried response).
+        assert deps["persona_sender"].send.await_count == 3
+
+    async def test_retry_envelope_contains_system_reminder_and_failed_text(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """The retry envelope pins every load-bearing kwarg so a
+        regression in any of:
+
+        * ``user_prompt`` (the system-reminder text)
+        * ``message_history`` (original + caller request + failed reply)
+        * ``temp_instructions`` (peer roster for A2A target)
+        * ``timeout`` (matches the original call's budget)
+        * ``deps`` (discord wire + caller_agent_id + phonebook)
+        * ``topic`` (the target's agent inbox)
+
+        ...fails loudly rather than silently regressing what the
+        target LLM sees on retry."""
+        from calfkit._vendor.pydantic_ai.messages import (
+            ModelRequest, ModelResponse, TextPart, UserPromptPart,
+        )
+        long_reply = "x" * 3000
+        deps["client"].execute_node = AsyncMock(
+            side_effect=[_result(long_reply), _result("short")]
+        )
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
+                _http_exc(discord.HTTPException, 400),
+                _sent_message(99998),
+            ]
+        )
+        # Phonebook with bob having ``private_chat`` so the A2A
+        # ``temp_instructions`` is non-None (it gates on the target
+        # having the tool — without it the helper correctly returns
+        # ``None`` and there's nothing to assert against).
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+        ]
+        await pc.private_chat(
+            _ctx(caller="alice", phonebook=phonebook),
+            "bob",
+            "the original caller content",
+        )
+        # Inspect the retry call's kwargs (second execute_node).
+        retry_call = deps["client"].execute_node.await_args_list[1]
+        kwargs = retry_call.kwargs
+        # User prompt is the system-reminder.
+        assert "<system-reminder>" in kwargs["user_prompt"]
+        # History ends with the caller's request + the failed reply.
+        history = kwargs["message_history"]
+        assert isinstance(history[-2], ModelRequest)
+        assert isinstance(history[-2].parts[0], UserPromptPart)
+        assert history[-2].parts[0].content == "the original caller content"
+        assert isinstance(history[-1], ModelResponse)
+        assert isinstance(history[-1].parts[0], TextPart)
+        assert history[-1].parts[0].content == long_reply
+        # Target inbox topic.
+        assert kwargs["topic"] == pc._AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id="bob")
+        # Timeout matches the configured A2A budget so a high-effort
+        # original call doesn't silently get a different deadline on
+        # retry.
+        assert kwargs["timeout"] == pc._timeout_seconds
+        # temp_instructions present and contains the A2A roster intro
+        # (the peer-roster builder uses ``channel=False`` for A2A).
+        assert kwargs["temp_instructions"] is not None
+        assert "private_chat" in kwargs["temp_instructions"]
+        # deps carries the discord wire, the caller id, and the
+        # phonebook propagated for further A2A chaining.
+        assert "discord" in kwargs["deps"]
+        assert kwargs["deps"]["caller_agent_id"] == "alice"
+        assert "phonebook" in kwargs["deps"]
+        # output_type is still ``str`` so the response shape stays
+        # uniform between original and retry.
+        assert kwargs["output_type"] is str
+
+    async def test_retry_budget_exhausted_chunks_and_returns_full(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """All 3 attempts (1 + 2 retries) hit 400; orchestrator
+        falls back to chunk-splitting the latest text into the audit
+        thread; caller receives the FULL untruncated latest text."""
+        long_reply = "x" * 5000  # forces chunk_split to produce >=3 chunks
+        deps["client"].execute_node = AsyncMock(
+            return_value=_result(long_reply)
+        )
+        # Side-effect plan: request OK; 3 response attempts all 400; then
+        # N chunk-split sends (each OK).
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request OK
+                _http_exc(discord.HTTPException, 400),    # attempt 1
+                _http_exc(discord.HTTPException, 400),    # attempt 2 (retry 1)
+                _http_exc(discord.HTTPException, 400),    # attempt 3 (retry 2 → budget exhausted)
+                _sent_message(1),
+                _sent_message(2),
+                _sent_message(3),
+                _sent_message(4),  # cushion in case chunks > 3
+            ]
+        )
+        returned = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Caller gets the FULL latest text (which here is the same as
+        # the original since execute_node always returns long_reply).
+        assert long_reply in returned
+        # execute_node called 3 times: original + 2 retries.
+        assert deps["client"].execute_node.await_count == 3
+
+    async def test_retry_execute_node_failure_falls_back_to_chunks(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """If the retry RPC itself fails (timeout, broker error), don't
+        propagate — chunk-split the current text and return it. The
+        caller still gets a useful reply."""
+        long_reply = "x" * 5000
+        deps["client"].execute_node = AsyncMock(
+            side_effect=[
+                _result(long_reply),       # original response
+                TimeoutError("retry hung"),  # retry RPC times out
+            ]
+        )
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request OK
+                _http_exc(discord.HTTPException, 400),    # response attempt 1 → 400
+                _sent_message(1),                          # chunk 1
+                _sent_message(2),                          # chunk 2
+                _sent_message(3),                          # chunk 3 (cushion)
+                _sent_message(4),
+            ]
+        )
+        returned = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Caller still receives the original long reply.
+        assert long_reply in returned
+
+    async def test_retry_empty_response_treated_as_attempt(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """If the retry returns empty content, the orchestrator
+        substitutes the empty-content placeholder and posts that on the
+        next loop iteration. Empty content itself satisfies Discord's
+        no-empty-content rule via the placeholder, so the empty retry
+        simply burns one attempt slot."""
+        long_reply = "x" * 3000
+        deps["client"].execute_node = AsyncMock(
+            side_effect=[
+                _result(long_reply),
+                _result(""),  # retry returns empty
+            ]
+        )
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request OK
+                _http_exc(discord.HTTPException, 400),    # original 400
+                _sent_message(99998),                      # retry placeholder OK
+            ]
+        )
+        returned = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Returned text is empty (the retry's content); the tag is still
+        # present.
+        assert returned.startswith("<thread_id>")
+        # Empty content was substituted with placeholder for the send,
+        # but the returned value to the caller is the empty string.
+        assert returned.endswith("</thread_id>\n")
+
+
+class TestA2APostChunkedProjection:
+    """Direct coverage for ``_post_chunked_projection`` — the audit-
+    thread fallback the orchestrator invokes when retry budget is
+    exhausted or the retry RPC itself fails. Mirrors the bridge's
+    ``TestChunkedFallback`` / ``TestAllChunksFailSummary`` for the
+    A2A side."""
+
+    _PERSONA = SimpleNamespace(name="Bob Bot", avatar_url="https://example.com/bob.png")
+    _CHANNEL_ID = 4242
+    _THREAD_ID = 9090
+
+    async def test_empty_text_logs_warning_and_returns_without_sending(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Empty text → ``chunk_split`` returns ``[]`` → log + early
+        return; ``persona_sender.send`` never called. The orchestrator
+        shouldn't reach this state in practice, but the guard prevents
+        an empty audit-thread post."""
+        import logging as _logging
+        deps["persona_sender"].send = AsyncMock()
+        with caplog.at_level(_logging.WARNING):
+            await pc._post_chunked_projection(
+                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                "", "alice", "bob",
+            )
+        assert deps["persona_sender"].send.await_count == 0
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "received empty text" in joined
+        assert "caller=alice" in joined
+        assert "target=bob" in joined
+
+    async def test_short_text_posts_one_chunk_into_thread(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """Text under the chunk-size limit posts as a single send into
+        the audit thread. Note: A2A posts use ``thread_id`` (NOT a
+        reply_to anchor) — the bridge variant uses reply_to for the
+        first chunk; A2A's audit thread is always a thread post."""
+        deps["persona_sender"].send = AsyncMock(
+            return_value=_sent_message(1, channel_id=self._CHANNEL_ID)
+        )
+        await pc._post_chunked_projection(
+            self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+            "short reply", "alice", "bob",
+        )
+        assert deps["persona_sender"].send.await_count == 1
+        kwargs = deps["persona_sender"].send.await_args.kwargs
+        assert kwargs["thread_id"] == self._THREAD_ID
+        assert kwargs["channel_id"] == self._CHANNEL_ID
+        assert kwargs["content"] == "short reply"
+
+    async def test_long_text_splits_and_posts_multiple_into_thread(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """Text over the chunk limit splits and posts each chunk as a
+        separate thread post. All posts use ``thread_id`` — there's no
+        reply-anchor distinction across chunks (unlike the bridge)."""
+        deps["persona_sender"].send = AsyncMock(
+            return_value=_sent_message(1, channel_id=self._CHANNEL_ID)
+        )
+        await pc._post_chunked_projection(
+            self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+            "x" * 5000, "alice", "bob",
+        )
+        # 5000 chars / 1990 chunk size → at least 3 chunks
+        assert deps["persona_sender"].send.await_count >= 3
+        for call in deps["persona_sender"].send.await_args_list:
+            assert call.kwargs["thread_id"] == self._THREAD_ID
+
+    async def test_per_chunk_failure_continues_with_next(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """One chunk failing must not abort the remaining sends — the
+        partial-delivery guarantee preserves whatever the audit can
+        get. Each per-chunk failure logs ERROR independently."""
+        import logging as _logging
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(1, channel_id=self._CHANNEL_ID),
+                _http_exc(discord.HTTPException, 400),  # chunk 2 fails
+                _sent_message(3, channel_id=self._CHANNEL_ID),
+                _sent_message(4, channel_id=self._CHANNEL_ID),  # cushion
+            ]
+        )
+        with caplog.at_level(_logging.ERROR):
+            await pc._post_chunked_projection(
+                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                "x" * 5000, "alice", "bob",
+            )
+        # Function does NOT raise — partial loss is logged + tolerated.
+        assert any(
+            "chunk-split failed" in r.getMessage() and "status=400" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_rate_limited_at_chunk_layer_is_swallowed(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The catch is ``discord.DiscordException`` (broader than
+        ``HTTPException``) so :class:`RateLimited` at the chunk layer
+        — the last resort — does not propagate. Nothing useful can
+        route around chunk-fallback failures."""
+        import logging as _logging
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(1, channel_id=self._CHANNEL_ID),
+                discord.RateLimited(retry_after=2.0),
+                _sent_message(3, channel_id=self._CHANNEL_ID),
+                _sent_message(4, channel_id=self._CHANNEL_ID),
+            ]
+        )
+        with caplog.at_level(_logging.ERROR):
+            # Must not raise.
+            await pc._post_chunked_projection(
+                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                "x" * 5000, "alice", "bob",
+            )
+        # The RateLimited has no ``.status``; status is logged as None.
+        assert any(
+            "chunk-split failed" in r.getMessage() and "status=None" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_all_chunks_fail_logs_dominant_status_summary(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When every chunk fails, an aggregate WARNING is logged with
+        the dominant status so operators see one actionable line
+        instead of N per-chunk ERRORs. Mirrors the bridge's
+        ``TestAllChunksFailSummary`` for parity."""
+        import logging as _logging
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 500),
+                _http_exc(discord.HTTPException, 500),
+                _http_exc(discord.HTTPException, 502),
+                _http_exc(discord.HTTPException, 500),  # cushion
+            ]
+        )
+        with caplog.at_level(_logging.WARNING):
+            await pc._post_chunked_projection(
+                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                "x" * 5000, "alice", "bob",
+            )
+        warns = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        # The summary line names the dominant status (500 occurs twice).
+        assert any(
+            "delivered 0/" in r.getMessage() and "dominant_status=500" in r.getMessage()
+            for r in warns
+        )
+
+
+class TestRetryFeedbackSharedSymbols:
+    """Parity guard: both the bridge outbox and the A2A tool import the
+    SAME symbols from ``discord.retry_feedback``. The whole refactor's
+    load-bearing claim is "policy lives in one place"; a regression
+    that re-introduced a local copy in either caller would silently
+    drift over time. These identity assertions fail loud."""
+
+    def test_bridge_imports_shared_symbols(self) -> None:
+        from calfkit_organization.bridge import outbox
+        from calfkit_organization.discord import retry_feedback
+        assert outbox.classify_error is retry_feedback.classify_error
+        assert outbox.build_retry_reminder is retry_feedback.build_retry_reminder
+        assert outbox.build_retry_history is retry_feedback.build_retry_history
+        assert outbox.chunk_split is retry_feedback.chunk_split
+        assert outbox.MAX_REPLY_RETRY_ATTEMPTS is retry_feedback.MAX_REPLY_RETRY_ATTEMPTS
+        assert outbox.NON_AGENT_FIXABLE_STATUSES is retry_feedback.NON_AGENT_FIXABLE_STATUSES
+
+    def test_a2a_imports_shared_symbols(self) -> None:
+        from calfkit_organization.discord import retry_feedback
+        from calfkit_organization.tools import private_chat
+        assert private_chat.classify_error is retry_feedback.classify_error
+        assert private_chat.build_retry_reminder is retry_feedback.build_retry_reminder
+        assert private_chat.build_retry_history is retry_feedback.build_retry_history
+        assert private_chat.chunk_split is retry_feedback.chunk_split
+        assert private_chat.MAX_REPLY_RETRY_ATTEMPTS is retry_feedback.MAX_REPLY_RETRY_ATTEMPTS

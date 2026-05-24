@@ -47,13 +47,6 @@ from typing import Final
 
 import discord
 from calfkit import ConsumerNodeDef, NodeResult
-from calfkit._vendor.pydantic_ai.messages import (
-    ModelMessage,
-    ModelRequest,
-    ModelResponse,
-    TextPart,
-    UserPromptPart,
-)
 from calfkit.client import Client
 from calfkit.models import SessionRunContext
 
@@ -70,6 +63,14 @@ from calfkit_organization.discord.persona import (
     Persona,
     ReplyContext,
 )
+from calfkit_organization.discord.retry_feedback import (
+    MAX_REPLY_RETRY_ATTEMPTS,
+    NON_AGENT_FIXABLE_STATUSES,
+    build_retry_history,
+    build_retry_reminder,
+    chunk_split,
+    classify_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,63 +86,6 @@ DEFAULT_CONSUMER_NODE_ID: Final[str] = "discord-outbox-sink"
 # means a long retry stalls the entire outbox queue, which directly
 # undermines the multi-agent burst case this consumer was added to handle.
 _SERVER_ERROR_RETRY_DELAY_SECONDS: Final[float] = 2.0
-
-# --- Retry-with-feedback constants --------------------------------------------
-
-NON_AGENT_FIXABLE_STATUSES: Final[frozenset[int]] = frozenset({
-    401,   # unauthorized — bot token invalid
-    403,   # forbidden — missing Manage Webhooks / View Channel / etc.
-    404,   # not found — channel or webhook deleted
-    429,   # rate limited — discord.py already retried internally
-})
-"""Discord HTTP statuses where retrying the agent with a revised reply
-cannot possibly succeed. These are infrastructure / permission errors
-that require operator action, not agent content adjustment. The outbox
-logs WARN and drops the reply on these statuses (existing behavior
-preserved).
-
-5xx is NOT in this set — :func:`_handle_post_failure` handles it via
-an explicit ``status >= 500`` branch (rather than membership) because
-the inner :func:`_send_with_one_retry_on_outage` already smooths
-transient 5xx with one extra attempt; only a *persistent* 5xx reaches
-the no-agent-retry drop path.
-
-:class:`discord.RateLimited` (which is NOT an HTTPException subclass
-in discord.py — it inherits from :class:`discord.DiscordException`
-directly) is also handled by :meth:`_handle_post_failure` even
-though it has no HTTP status; see the catch block in
-:meth:`_post_reply`."""
-
-MAX_REPLY_RETRY_ATTEMPTS: Final[int] = 2
-"""Number of LLM retries triggered after the original post failure.
-Total LLM attempts before falling back to chunk-splitting =
-1 (original) + MAX_REPLY_RETRY_ATTEMPTS = 3. Picked at 2 because:
-
-* Discord 4xx errors (length, formatting) are usually self-correcting
-  on attempt 2 once the LLM is told the problem.
-* Each retry is a full LLM round-trip (~5-15s); 2 retries adds at most
-  ~30s before chunked fallback. 3+ retries makes the user wait too
-  long with no visible signal.
-* Bounded LLM cost: pathological retry loops cost ~3x a normal
-  invocation, never unbounded."""
-
-CHUNK_SAFE_SIZE: Final[int] = 1990
-"""Max chars per chunk in the chunk-split fallback. Discord's hard
-content limit is 2000; the 10-char safety buffer absorbs the occasional
-emoji / encoding surprise that tips a 1999-char string over the limit."""
-
-_RETRY_REMINDER_OVERRIDES: dict[tuple[int, int], str] = {}
-"""Per-(HTTP status, JSON error code) overrides for the retry-reminder
-text. Empty by default — the generic template surfaces Discord's own
-error message to the LLM, which modern frontier models reliably parse
-and adapt to. Populate only when empirical evidence shows the LLM
-needs more pointed guidance for a specific Discord error code.
-
-Format: ``(status, code): "Custom reminder body."`` Both status and
-code are concrete integers — no wildcard support in v1. If a future
-empirical case needs "any code of this status," extend the lookup
-in :func:`build_retry_reminder` then; YAGNI says don't add the
-wildcard tier preemptively."""
 
 _AGENT_INBOX_TOPIC_TEMPLATE: Final[str] = "agent.{agent_id}.in"
 """Per-agent inbox topic. The outbox's retry path publishes to this
@@ -357,136 +301,6 @@ async def _send_with_one_retry_on_outage(
 
 
 
-# --- Retry-with-feedback pure helpers -----------------------------------------
-
-
-def build_retry_reminder(
-    error: discord.HTTPException,
-    failed_text: str,
-) -> str:
-    """Build the system-reminder-tagged user message for an agent retry.
-
-    Generic by design: the LLM sees the literal Discord error text in
-    a ``<system-reminder>`` block and is trusted to adapt. Modern
-    frontier LLMs reliably parse Discord's own error strings (e.g.
-    ``"Must be 2000 or fewer in length"``, ``"Cannot send an empty
-    message"``, ``"Invalid embed URL"``) and adjust their next reply
-    accordingly. No per-error-code customization is needed in v1; the
-    override map slot at :data:`_RETRY_REMINDER_OVERRIDES` exists for
-    future empirical cases where the generic message is insufficient.
-
-    The ``<system-reminder>`` tag pattern is a convention frontier
-    models trained with system-reminder-style data typically treat as
-    out-of-band metadata even though it occupies a ``user``-role slot
-    on the wire. The explicit "Do NOT mention this error" instruction
-    inside the reminder body is the actual enforcement mechanism;
-    the tag wrapper is the visual cue that helps the model recognize
-    the convention.
-
-    Args:
-        error: The :class:`discord.HTTPException` raised by the
-            persona-sender. The status, code, and body text are all
-            surfaced to the LLM.
-        failed_text: The exact reply text the agent emitted that
-            Discord rejected. Used in the reminder to give the LLM
-            length-context (``"length: 3187 chars"``) without
-            duplicating the full failed content (which appears
-            separately in the retry envelope's ``message_history``
-            as a ``ModelResponse``).
-
-    Returns:
-        A string suitable to pass as ``user_prompt`` to
-        :meth:`Client.invoke_node` for the retry envelope.
-    """
-    override = _RETRY_REMINDER_OVERRIDES.get((error.status, error.code))
-    if override is not None:
-        body = override
-    else:
-        # ``discord.HTTPException.text`` is the raw JSON-body text from
-        # Discord (e.g. ``"Invalid Form Body\nIn content: Must be 2000
-        # or fewer in length."``). Falls back to ``str(error)`` which
-        # is discord.py's formatted ``"status: code: text"``.
-        raw = error.text or str(error)
-        body = (
-            f"Your previous reply (length: {len(failed_text)} chars) was "
-            f"rejected by Discord. The exact error:\n\n"
-            f"  HTTP {error.status}: {raw}\n\n"
-            f"Please respond again to the user's original question, "
-            f"addressing the specific issue above. For example, if the "
-            f"content was too long, be more concise; if it contained "
-            f"banned formatting, rephrase without it."
-        )
-    return (
-        "<system-reminder>\n"
-        f"{body}\n\n"
-        "This reminder is system-level — the user does NOT see it. "
-        "Do NOT mention this error or that you are retrying.\n"
-        "</system-reminder>"
-    )
-
-
-def _chunk_split(text: str, *, max_chars: int = CHUNK_SAFE_SIZE) -> list[str]:
-    """Split ``text`` into pieces each ≤ ``max_chars`` for posting as
-    consecutive Discord messages.
-
-    Boundary search is greedy from the largest unit down: paragraph
-    (``"\n\n"``) → line (``"\n"``) → sentence (``". "``) → word
-    (``" "``) → hard cut. The search refuses to split earlier than
-    ``max_chars // 2`` so we don't produce a tiny first chunk
-    followed by a huge tail.
-
-    Each chunk is right-stripped of trailing whitespace. The split
-    preserves all non-boundary characters — joining chunks back with
-    the boundary that produced each cut reconstructs (modulo
-    boundary whitespace) the original text.
-
-    Args:
-        text: The full text to split. May be empty (returns ``[]``).
-        max_chars: Maximum characters per chunk. Defaults to
-            :data:`CHUNK_SAFE_SIZE` (1990) — Discord's 2000-char
-            limit with a 10-char safety buffer.
-
-    Returns:
-        A list of chunks in original order. If ``text`` already fits,
-        returns ``[text]``. An empty string returns ``[]``.
-    """
-    if not text:
-        return []
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    min_split = max(1, max_chars // 2)
-
-    while remaining:
-        if len(remaining) <= max_chars:
-            stripped = remaining.rstrip()
-            if stripped:
-                chunks.append(stripped)
-            break
-
-        candidate = remaining[:max_chars]
-        cut_at = -1
-        # Prefer larger structural boundaries.
-        for separator in ("\n\n", "\n", ". ", " "):
-            idx = candidate.rfind(separator)
-            if idx >= min_split:
-                cut_at = idx + len(separator)
-                break
-
-        if cut_at < 0:
-            # No good boundary found; hard cut at max_chars.
-            cut_at = max_chars
-
-        chunk = remaining[:cut_at].rstrip()
-        if chunk:
-            chunks.append(chunk)
-        remaining = remaining[cut_at:]
-
-    return chunks
-
-
 # --- Retry-with-feedback path -------------------------------------------------
 
 
@@ -533,38 +347,33 @@ async def _handle_post_failure(
     fallback logic.
     """
     wire = entry.wire
+    decision = classify_error(error)
 
-    # Branch 1a: explicit non-retryable errors.
-    #
-    # :class:`discord.RateLimited` has no ``status`` attribute (it's a
-    # rate-limit-exhausted exception raised by discord.py's internal
-    # backoff, not an HTTP response). Handle it before any
-    # ``error.status`` access.
-    if isinstance(error, discord.RateLimited):
-        logger.warning(
-            "outbox post failed channel_id=%s event_id=%s agent=%s: "
-            "discord.py rate-limit backoff exhausted (%s); operator "
-            "should investigate burst traffic patterns",
-            wire.channel_id, wire.event_id, agent_id, error,
-        )
-        return
-
-    # All remaining paths inspect ``error.status``; narrow the type so
-    # the rest of the function can read it safely.
-    if not isinstance(error, discord.HTTPException):
-        # Defensive: a ``DiscordException`` that's neither
-        # ``RateLimited`` nor ``HTTPException`` is something discord.py
-        # added since we last looked. Log + drop rather than guess.
-        logger.warning(
-            "outbox post failed channel_id=%s event_id=%s agent=%s: "
-            "unrecognized discord exception type=%s (%s)",
-            wire.channel_id, wire.event_id, agent_id,
-            type(error).__name__, error,
-        )
-        return
-
-    if error.status in NON_AGENT_FIXABLE_STATUSES:
-        if error.status == 404:
+    if decision == "drop":
+        # Per-status operator-actionable logging: the most common drop
+        # cases (404 channel-gone, 403 missing-permission) get a hint
+        # about what the operator must check; everything else gets a
+        # generic status+error line so the operator still has enough to
+        # diagnose. ``classify_error`` is the policy gate; the logging
+        # cases below are presentation.
+        if isinstance(error, discord.RateLimited):
+            logger.warning(
+                "outbox post failed channel_id=%s event_id=%s agent=%s: "
+                "discord.py rate-limit backoff exhausted (%s); operator "
+                "should investigate burst traffic patterns",
+                wire.channel_id, wire.event_id, agent_id, error,
+            )
+        elif not isinstance(error, discord.HTTPException):
+            # A ``DiscordException`` that's neither ``RateLimited`` nor
+            # ``HTTPException`` is something discord.py added since we
+            # last looked.
+            logger.warning(
+                "outbox post failed channel_id=%s event_id=%s agent=%s: "
+                "unrecognized discord exception type=%s (%s)",
+                wire.channel_id, wire.event_id, agent_id,
+                type(error).__name__, error,
+            )
+        elif error.status == 404:
             logger.warning(
                 "outbox post failed channel_id=%s event_id=%s agent=%s: "
                 "channel or webhook not found (%s); operator must check "
@@ -586,9 +395,29 @@ async def _handle_post_failure(
             )
         return
 
-    # Branch 1b: 5xx survived _send_with_one_retry_on_outage's
-    # smoothing. Discord is down; agent retry can't help.
-    if error.status >= 500:
+    # ``classify_error`` only returns ``"transient"`` / ``"agent_fixable"``
+    # for ``HTTPException`` (RateLimited and bare DiscordException both
+    # short-circuit to ``"drop"`` above), so ``error.status`` is safe to
+    # access from here. Defensive runtime check (NOT ``assert``, which
+    # would be stripped under ``python -O``): if a future change to
+    # ``classify_error`` ever violates the invariant, surface an
+    # operator-actionable ERROR and drop the message rather than
+    # crashing the consumer with an :class:`AttributeError` on the
+    # ``.status`` access below — the outbox's "best-effort never-raises"
+    # contract (this function's docstring) outweighs the cost of a
+    # missed retry.
+    if not isinstance(error, discord.HTTPException):
+        logger.error(
+            "classify_error invariant violated: returned %r for non-HTTPException "
+            "type=%s on channel_id=%s event_id=%s agent=%s; dropping",
+            decision, type(error).__name__,
+            wire.channel_id, wire.event_id, agent_id,
+        )
+        return
+
+    if decision == "transient":
+        # 5xx survived _send_with_one_retry_on_outage's smoothing.
+        # Discord is down; agent retry can't help.
         logger.warning(
             "outbox post failed channel_id=%s event_id=%s agent=%s "
             "status=%s: discord 5xx + extra retry exhausted (%s)",
@@ -596,6 +425,7 @@ async def _handle_post_failure(
         )
         return
 
+    # decision == "agent_fixable"
     retry_count = pending_wires.get_retry_count(wire.event_id)
 
     # Branch 2: retry budget exhausted → chunk-split fallback.
@@ -696,12 +526,11 @@ async def _publish_retry(
     """
     wire = entry.wire
     reminder = build_retry_reminder(error, failed_text)
-
-    retry_history: list[ModelMessage] = [
-        *entry.message_history,
-        ModelRequest(parts=[UserPromptPart(content=wire.content)]),
-        ModelResponse(parts=[TextPart(content=failed_text)]),
-    ]
+    retry_history = build_retry_history(
+        original_history=entry.message_history,
+        original_user_prompt=wire.content,
+        failed_text=failed_text,
+    )
 
     # Rebuild the phonebook so any A2A-tool-using agent's tools still
     # work on retry. The outbox already has the registry; rebuilding
@@ -771,7 +600,7 @@ async def _post_chunked_fallback(
     layer doesn't bubble up either — the chunk fallback is the
     last resort; nothing useful can route around its failures.
     """
-    chunks = _chunk_split(text)
+    chunks = chunk_split(text)
     if not chunks:
         logger.warning(
             "chunk-split fallback received empty text; nothing to post "

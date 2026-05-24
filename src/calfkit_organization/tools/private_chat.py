@@ -67,6 +67,13 @@ from calfkit_organization.bridge.history import HistoryRecord, project_history
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
+from calfkit_organization.discord.retry_feedback import (
+    MAX_REPLY_RETRY_ATTEMPTS,
+    build_retry_history,
+    build_retry_reminder,
+    chunk_split,
+    classify_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -522,13 +529,17 @@ async def private_chat(
         )
     response_text = result.output if result.output is not None else ""
 
-    await _post_projection(
-        target_persona,
-        unified_channel_id,
-        response_text,
-        thread_id=conversation_thread_id,
-        caller=caller_agent_id,
-        target=target_agent_id,
+    projected_text = await _post_response_with_feedback_retries(
+        target_agent_id=target_agent_id,
+        target_persona=target_persona,
+        original_user_prompt=content,
+        original_history=message_history,
+        forwarded_wire_dict=forwarded_wire.model_dump(mode="json"),
+        phonebook=phonebook,
+        unified_channel_id=unified_channel_id,
+        conversation_thread_id=conversation_thread_id,
+        initial_response_text=response_text,
+        caller_agent_id=caller_agent_id,
         correlation_id=result.correlation_id,
     )
 
@@ -538,9 +549,272 @@ async def private_chat(
         target_agent_id,
         conversation_thread_id,
         result.correlation_id,
-        len(response_text),
+        len(projected_text),
     )
-    return f"<thread_id>{conversation_thread_id}</thread_id>\n{response_text}"
+    return f"<thread_id>{conversation_thread_id}</thread_id>\n{projected_text}"
+
+
+async def _post_response_with_feedback_retries(
+    *,
+    target_agent_id: str,
+    target_persona: Persona,
+    original_user_prompt: str,
+    original_history: Sequence[ModelMessage],
+    forwarded_wire_dict: dict,
+    phonebook: Sequence[PhonebookEntry],
+    unified_channel_id: int,
+    conversation_thread_id: int,
+    initial_response_text: str,
+    caller_agent_id: str,
+    correlation_id: str,
+) -> str:
+    """Project the target's reply to the audit thread, retrying the
+    target with system-reminder feedback when Discord rejects content
+    the LLM can plausibly fix (400 family). Falls back to chunk-
+    splitting the latest reply into the audit thread when the retry
+    budget is exhausted.
+
+    Returns the LAST reply text — the value ``private_chat`` returns
+    to the caller. On a successful single attempt, that's the original
+    response. After one or more retries, that's the most recent
+    (typically shorter) version the target produced. On budget
+    exhaustion, the chunk-split fallback projects the latest text
+    across N audit-thread posts and the caller still receives the
+    full untruncated content.
+
+    Mirrors the bridge outbox's retry-with-feedback (see
+    :func:`calfkit_organization.bridge.outbox._handle_post_failure`),
+    sharing policy via
+    :mod:`calfkit_organization.discord.retry_feedback`. The orchestration
+    differs because A2A is synchronous inside the caller's
+    ``execute_node`` RPC, whereas the bridge republishes
+    fire-and-forget across the Kafka consumer boundary.
+
+    On ``"drop"`` or ``"transient"`` errors (per
+    :func:`classify_error`) raises through :func:`_raise_infra` — these
+    aren't LLM-fixable and the caller's existing infra-bug contract
+    applies.
+    """
+    assert _persona_sender is not None  # guarded by private_chat's caller
+    current_text = initial_response_text
+    attempts_used = 0
+    while True:
+        # Direct ``persona_sender.send`` (not ``_post_projection``) so a
+        # ``discord.HTTPException`` propagates to ``classify_error``
+        # below instead of getting swallowed by ``_post_projection``'s
+        # internal retry-and-raise. ``_post_projection`` remains the
+        # right helper for the request-side audit-gap path used by
+        # ``_start_new_thread`` / ``_continue_existing_thread``;
+        # response-side retry-with-feedback orchestration lives here.
+        payload = current_text if current_text else "(empty response)"
+        if not current_text:
+            logger.info(
+                "a2a substituting empty-content placeholder for response "
+                "persona=%s caller=%s target=%s correlation_id=%s",
+                target_persona.name, caller_agent_id, target_agent_id,
+                correlation_id,
+            )
+        try:
+            await _persona_sender.send(
+                target_persona,
+                channel_id=unified_channel_id,
+                content=payload,
+                thread_id=conversation_thread_id,
+            )
+            return current_text
+        except discord.DiscordException as error:
+            # Catch ``DiscordException`` (broader than ``HTTPException``)
+            # so :class:`discord.RateLimited` — a sibling, NOT a subclass
+            # — also routes through ``classify_error`` instead of
+            # escaping uncaught to the caller's LLM. Mirrors the bridge
+            # outbox's ``_handle_post_failure`` catch surface.
+            decision = classify_error(error)
+            # ``status_str`` is for the operator-facing log message
+            # only. ``RateLimited`` has no ``.status``; non-HTTPException
+            # ``DiscordException`` subclasses similarly. ``getattr`` keeps
+            # the log message construction total against either case.
+            status_str = getattr(error, "status", type(error).__name__)
+            if decision == "drop":
+                _raise_infra(
+                    f"a2a audit projection failed (non-agent-fixable "
+                    f"status={status_str}) persona={target_persona.name!r} "
+                    f"channel={unified_channel_id} thread_id={conversation_thread_id}",
+                    caller=caller_agent_id,
+                    target=target_agent_id,
+                    correlation_id=correlation_id,
+                    cause=error,
+                )
+            if decision == "transient":
+                # 5xx — Discord-side outage. A content-retry can't fix
+                # it; discord.py's own internal backoff has already
+                # tried 5+ times before raising. Surface to the caller's
+                # infra-bug contract.
+                _raise_infra(
+                    f"a2a audit projection failed (transient status={status_str}, "
+                    f"discord backoff exhausted) persona={target_persona.name!r} "
+                    f"channel={unified_channel_id} thread_id={conversation_thread_id}",
+                    caller=caller_agent_id,
+                    target=target_agent_id,
+                    correlation_id=correlation_id,
+                    cause=error,
+                )
+            # ``classify_error`` only returns ``"agent_fixable"`` for
+            # ``HTTPException`` (RateLimited and other DiscordException
+            # subclasses short-circuit to ``"drop"`` above), so
+            # ``error.status`` below is safe.
+            assert isinstance(error, discord.HTTPException)
+            # decision == "agent_fixable"
+            if attempts_used >= MAX_REPLY_RETRY_ATTEMPTS:
+                logger.warning(
+                    "a2a retry budget exhausted attempt=%d max=%d caller=%s "
+                    "target=%s thread_id=%s status=%s; chunk-splitting "
+                    "projection and returning full latest reply to caller",
+                    attempts_used, MAX_REPLY_RETRY_ATTEMPTS,
+                    caller_agent_id, target_agent_id, conversation_thread_id,
+                    error.status,
+                )
+                await _post_chunked_projection(
+                    target_persona, unified_channel_id, conversation_thread_id,
+                    current_text, caller_agent_id, target_agent_id,
+                )
+                return current_text
+            attempts_used += 1
+            logger.info(
+                "a2a triggering agent retry-with-feedback attempt=%d caller=%s "
+                "target=%s status=%s: %s",
+                attempts_used, caller_agent_id, target_agent_id,
+                error.status, error,
+            )
+            try:
+                current_text = await _execute_retry_with_feedback(
+                    target_agent_id=target_agent_id,
+                    error=error,
+                    failed_text=current_text,
+                    original_user_prompt=original_user_prompt,
+                    original_history=original_history,
+                    forwarded_wire_dict=forwarded_wire_dict,
+                    phonebook=phonebook,
+                    caller_agent_id=caller_agent_id,
+                )
+            except Exception:
+                # Catches ``TimeoutError`` and everything else the RPC
+                # can produce (calfkit ``DeserializationError``, broker
+                # ``ConnectionError``, etc.). ``asyncio.CancelledError``
+                # is a ``BaseException`` subclass and propagates by
+                # design — a shutdown mid-retry must not be swallowed
+                # into the chunk-split fallback. ERROR-level (via
+                # :meth:`logger.exception`) so the alerting hooks fire;
+                # parity with the bridge outbox's retry-publish-failure
+                # handler at :func:`bridge.outbox._handle_post_failure`.
+                logger.exception(
+                    "a2a retry execute_node failed caller=%s target=%s "
+                    "attempt=%d; chunk-splitting latest reply and "
+                    "returning to caller",
+                    caller_agent_id, target_agent_id, attempts_used,
+                )
+                await _post_chunked_projection(
+                    target_persona, unified_channel_id, conversation_thread_id,
+                    current_text, caller_agent_id, target_agent_id,
+                )
+                return current_text
+
+
+async def _execute_retry_with_feedback(
+    *,
+    target_agent_id: str,
+    error: discord.HTTPException,
+    failed_text: str,
+    original_user_prompt: str,
+    original_history: Sequence[ModelMessage],
+    forwarded_wire_dict: dict,
+    phonebook: Sequence[PhonebookEntry],
+    caller_agent_id: str,
+) -> str:
+    """Re-invoke the target with a ``<system-reminder>``-tagged prompt
+    plus the failed reply appended to history.
+
+    Mirrors :func:`calfkit_organization.bridge.outbox._publish_retry`
+    but uses :meth:`Client.execute_node` (sync await) instead of
+    :meth:`Client.invoke_node` (fire-and-forget), because A2A is
+    inside the caller's RPC.
+    """
+    assert _client is not None  # guarded by private_chat's caller
+    reminder = build_retry_reminder(error, failed_text)
+    retry_history = build_retry_history(
+        original_history=original_history,
+        original_user_prompt=original_user_prompt,
+        failed_text=failed_text,
+    )
+    target_topic = _AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=target_agent_id)
+    result = await _client.execute_node(
+        user_prompt=reminder,
+        topic=target_topic,
+        deps={
+            "discord": forwarded_wire_dict,
+            "caller_agent_id": caller_agent_id,
+            "phonebook": phonebook_to_deps(phonebook),
+        },
+        output_type=str,
+        timeout=_timeout_seconds,
+        temp_instructions=build_temp_instructions(
+            phonebook, target_agent_id, channel=False,
+        ),
+        message_history=retry_history,
+    )
+    return result.output if result.output is not None else ""
+
+
+async def _post_chunked_projection(
+    persona: Persona,
+    channel_id: int,
+    thread_id: int,
+    text: str,
+    caller: str,
+    target: str,
+) -> None:
+    """Final fallback: split ``text`` into ≤2000-char chunks and post
+    each into the A2A audit thread under ``persona``.
+
+    Mirrors :func:`calfkit_organization.bridge.outbox._post_chunked_fallback`
+    but posts into a thread rather than as an anchored channel reply.
+    Per-chunk failures are logged independently so partial delivery
+    is preserved. Catches :class:`discord.DiscordException` (broader
+    than :class:`HTTPException`) — :class:`RateLimited` at the chunk
+    layer is the last resort and nothing useful can route around it.
+    """
+    assert _persona_sender is not None  # guarded by private_chat's caller
+    chunks = chunk_split(text)
+    if not chunks:
+        logger.warning(
+            "a2a chunk-split received empty text caller=%s target=%s thread_id=%s",
+            caller, target, thread_id,
+        )
+        return
+    total = len(chunks)
+    failure_statuses: list[int | None] = []
+    for i, chunk in enumerate(chunks):
+        try:
+            await _persona_sender.send(
+                persona=persona,
+                channel_id=channel_id,
+                content=chunk,
+                thread_id=thread_id,
+            )
+        except discord.DiscordException as e:
+            status = getattr(e, "status", None)
+            failure_statuses.append(status)
+            logger.error(
+                "a2a chunk-split failed chunk %d/%d caller=%s target=%s "
+                "thread_id=%s status=%s: %s",
+                i + 1, total, caller, target, thread_id, status, e,
+            )
+    if failure_statuses and len(failure_statuses) == total:
+        dominant_status = max(set(failure_statuses), key=failure_statuses.count)
+        logger.warning(
+            "a2a chunk-split delivered 0/%d chunks caller=%s target=%s "
+            "thread_id=%s dominant_status=%s; audit lost for this turn",
+            total, caller, target, thread_id, dominant_status,
+        )
 
 
 async def _start_new_thread(
