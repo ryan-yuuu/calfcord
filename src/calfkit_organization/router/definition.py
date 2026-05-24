@@ -63,7 +63,7 @@ _HISTORY_TURNS_ENV = "CALFKIT_ROUTER_HISTORY_TURNS"
 
 _DEFAULT_PROVIDER: Provider = "openai"
 _DEFAULT_MODEL = "gpt-5-nano"
-_DEFAULT_THINKING_EFFORT: ThinkingEffort = "minimal"
+_DEFAULT_THINKING_EFFORT: ThinkingEffort = "none"
 """The router runs a tightly-bounded structured-output task (pick agents
 from a small roster, account for ongoing conversation continuity in rule
 3 of the prompt). ``"minimal"`` is the lightest non-zero reasoning tier
