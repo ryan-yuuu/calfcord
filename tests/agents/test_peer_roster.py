@@ -151,6 +151,34 @@ class TestBuildTempInstructionsChannel:
         assert "EVERY `@<name>` token" in result  # all-validated rule
         assert "@-mentioning yourself" in result  # silent-drop warning
 
+    def test_mention_block_warns_against_referential_use(self) -> None:
+        """The mention block must teach the LLM that `@<id>` is an
+        INVOCATION verb, not a soft reference. Without this, agents
+        trained on social-media corpora default to writing `@scribe`
+        whenever they NAME the peer in a sentence, which silently
+        spawns unintended agent-to-agent loops in shared channels.
+
+        The verb/noun framing, the explicit CRITICAL marker, and at
+        least one concrete WRONG/RIGHT example pair are pinned here
+        so a future tightening of the prompt cannot silently drop
+        the rule that motivated the prompt's existence."""
+        phonebook = [_entry("alice"), _entry("bob")]
+        result = build_temp_instructions(phonebook, "alice", channel=True)
+        assert result is not None
+        # The load-bearing framing.
+        assert "INVOCATION verb" in result
+        assert "NOT a soft reference" in result
+        # Both halves of the noun-vs-verb distinction.
+        assert "plain name is a noun" in result
+        assert "`@name` is a verb" in result
+        # Concrete WRONG / RIGHT example scaffolding so the LLM sees
+        # contrasting patterns rather than abstract rules alone.
+        assert "WRONG" in result
+        assert "RIGHT" in result
+        # The consequence is named so the LLM can reason about why
+        # the rule matters at edge cases not covered by the examples.
+        assert "back-and-forth" in result or "unintended invocations" in result
+
     def test_returns_none_when_target_is_filtered_out_of_phonebook(self) -> None:
         """Defense-in-depth for the router-exclusion invariant. The
         production phonebook (built via

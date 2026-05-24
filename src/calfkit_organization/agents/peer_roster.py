@@ -33,26 +33,60 @@ from calfkit_organization.agents.phonebook import PhonebookEntry, format_roster_
 _PRIVATE_CHAT_TOOL_NAME = "private_chat"
 
 _MENTION_BLOCK = """\
-You can bring any of the agents above into THIS conversation by writing
-`@<agent_id>` in your reply (e.g. `@scribe`). It works like @-mentioning
-someone in a groupchat: the mentioned agent is invoked and posts its
-reply into the same channel, visible to the user.
+You can invoke another agent into THIS conversation by writing
+`@<agent_id>` in your reply (e.g. `@scribe`). The mentioned agent
+runs immediately and posts a reply into this channel, exactly as if
+the user had typed the @-mention themselves.
 
-Rules:
-- The `@` may appear anywhere in your message, as long as it is at the
-  very start of the message OR directly preceded by whitespace.
-  `@scribe please weigh in` and `...thanks. @scribe what do you think?`
-  both work; `foo@scribe` and `me@scribe.com` do NOT count as mentions.
+CRITICAL: `@<agent_id>` is an INVOCATION verb, NOT a soft reference.
+
+Use `@<agent_id>` ONLY when you genuinely want that agent to respond
+on this turn. When you are merely talking ABOUT another agent —
+naming them in a sentence, listing options, describing capabilities,
+recapping who said what, asking the user whether to involve them —
+use their plain display name (e.g. `Scribe`, `Conan`) WITHOUT the
+`@`. The plain name is a noun; `@name` is a verb.
+
+Failing to make this distinction will spam unintended invocations
+and create back-and-forth agent loops the user did not ask for.
+
+WRONG (each line below fires an unintended invocation):
+- "I'll bring @scribe into this conversation"
+- "Option (a): bring @scribe in for a tag-team"
+- "I asked @scribe earlier and they said..."
+- "@conan handles humor and @scribe handles prose"
+- "Should I loop in @scribe?"
+- "Want me to bring @conan in, or write it myself?"
+
+RIGHT (referring to peers WITHOUT invoking them):
+- "I'll bring Scribe into this conversation"
+- "Option (a): bring Scribe in for a tag-team"
+- "I asked Scribe earlier and they said..."
+- "Conan handles humor and Scribe handles prose"
+- "Should I loop in Scribe?"
+- "Want me to bring Conan in, or write it myself?"
+
+RIGHT (intentional invocation — you actually want them to respond now):
+- "@scribe — can you help me tighten the prose here?"
+- "If you want a second take: @scribe ?"
+- "@conan, take it from here."
+
+Mechanics (so you can predict exactly what will fire):
+- The `@` token must be at the very start of the message OR
+  directly preceded by whitespace to count. `foo@scribe` and
+  `me@scribe.com` do NOT invoke anything.
 - Mentions are case-insensitive (`@Scribe` == `@scribe`).
-- EVERY `@<name>` token in your message is validated — including ones
-  after the first. If any one of them does not match an agent_id from
-  the list above, an error is shown to the user and nothing is
-  invoked. Keep all `@`-tokens to valid ids, or omit them entirely.
-- When a message contains multiple valid `@<agent_id>` tokens, only
-  the first invokes a peer; later valid mentions are decorative text.
-- @-mentioning yourself has no effect: your own gate silently drops
-  the message and no reply is posted. Avoid doing it — to the user it
-  looks like you ignored them."""
+- EVERY `@<name>` token in your message is validated — including
+  ones after the first. If any one of them does not match an
+  agent_id from the roster above, an error is shown to the user
+  and nothing fires. Keep all `@`-tokens to valid ids, or omit
+  them entirely.
+- When a message contains multiple valid `@<agent_id>` tokens,
+  only the first invokes a peer; later valid mentions are inert
+  decorative text.
+- @-mentioning yourself has no effect: your own gate silently
+  drops the message and no reply is posted — to the user it looks
+  like you ignored them."""
 
 
 def build_temp_instructions(
