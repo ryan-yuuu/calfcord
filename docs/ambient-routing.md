@@ -328,6 +328,88 @@ A2A `private_chat` is **stateless** — peer-to-peer invocations do
 not carry channel history. The caller is responsible for putting any
 needed context into the message content.
 
+### Outbox retry behavior
+
+When the outbox consumer fails to post an agent's reply to Discord
+(common cause: an agent reply over Discord's 2000-character limit
+triggers a 400-50035), the bridge **silently retries the agent with a
+system-reminder prompt injection** rather than dropping the reply.
+The retry is invisible to the user: it reuses the same
+``correlation_id`` so the eventual successful reply anchors to the
+original user message as a normal inline reply.
+
+The retry message_history contains:
+
+* the channel-history projection from the original invocation
+  (unchanged from what the LLM saw the first time);
+* the original user prompt as a ``ModelRequest``;
+* the LLM's failed reply as a ``ModelResponse`` so the LLM can see
+  what it tried;
+* a ``<system-reminder>``-tagged ``UserPromptPart`` carrying the
+  literal Discord error text (e.g. ``"HTTP 400: ... Must be 2000 or
+  fewer in length."``) and the instruction to retry without
+  mentioning the error to the user.
+
+LLMs trained on the ``<system-reminder>`` convention treat the tag
+as out-of-band metadata and don't leak it back to the user.
+
+#### Retry budget + fallback
+
+Each wire gets up to **2 retry attempts** beyond the original — after
+which the outbox falls back to **chunk-splitting** the latest failed
+reply into ≤1990-char chunks and posting each as a continuation from
+the same persona. The first chunk uses Discord's inline-reply anchor;
+subsequent chunks are bare follow-ups directly below. This guarantees
+the user never loses the agent's content entirely, even if the agent
+cannot comply with the constraint after retries.
+
+Retries do not apply to **non-agent-fixable** errors:
+
+| Status | Reason | Behavior |
+|---|---|---|
+| 401 | bot token invalid | log WARN, drop |
+| 403 | Manage Webhooks / View Channel missing | log WARN ("operator must verify Manage Webhooks permission"), drop |
+| 404 | channel or webhook deleted | log WARN ("operator must check the channel exists"), drop |
+| 429 | rate limited | discord.py already retried internally; log WARN, drop |
+| 5xx | Discord-side outage | one internal retry-with-delay then log WARN, drop |
+
+Agent retrying with revised content cannot fix any of these — they
+need operator action (or wait for Discord to recover). The drops
+preserve the existing operator-actionable WARN log lines.
+
+#### Log lines to watch
+
+| Log line | Meaning |
+|---|---|
+| ``posted reply event_id=... agent=...`` (INFO) | Original reply posted successfully — no retry needed. |
+| ``outbox post failed; triggering agent retry attempt=N`` (INFO) | A retry has been triggered after a 4xx; agent will revise. |
+| ``agent retry succeeded after N attempt(s)`` (INFO) | A retry succeeded; user sees a single reply anchored to the original question. |
+| ``retry budget exhausted attempt=N max=N; chunk-splitting`` (WARN) | Both retries failed; chunk-splitting fallback engaged. The literal ``max=`` value reflects ``MAX_REPLY_RETRY_ATTEMPTS`` at runtime. |
+| ``chunk-split posted chunk M/N`` (INFO) | Each chunk successfully posted. |
+| ``outbox post failed (not retryable)`` (WARN) | A non-agent-fixable error — log + drop, no retry. |
+| ``pending entry evicted before retry could be claimed`` (WARN) | Bridge-local LRU evicted the entry under pathological load; fell back to chunk-split. |
+| ``retry publish failed event_id=... falling back to chunk-split`` (ERROR) | The Kafka publish of the retry envelope itself failed; chunk-split took over. |
+
+If you observe an agent's reply never reaching Discord, grep for
+``event_id=<the affected event>`` in the bridge logs and look for one
+of these signals to diagnose where the path broke.
+
+#### Configuration
+
+Currently hardcoded (no env vars):
+
+| Constant | Default | Where |
+|---|---|---|
+| ``MAX_REPLY_RETRY_ATTEMPTS`` | 2 | ``bridge/outbox.py`` |
+| ``CHUNK_SAFE_SIZE`` | 1990 chars | ``bridge/outbox.py`` |
+| ``NON_AGENT_FIXABLE_STATUSES`` | ``{401, 403, 404, 429}`` | ``bridge/outbox.py`` |
+
+If a specific Discord error code reliably defeats the generic
+``<system-reminder>`` text in production (the LLM doesn't adapt
+correctly), add an override entry to
+``_RETRY_REMINDER_OVERRIDES``. Empty by default — populate only on
+empirical evidence.
+
 ### Hard cutover
 
 `calfkit-router` is **required** for ambient mode. Without it, ambient

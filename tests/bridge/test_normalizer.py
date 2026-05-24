@@ -129,7 +129,7 @@ class TestMentionParsing:
         ``@_router foo`` surfaces as ``UnknownAgentMentionError`` so
         the gateway sends the standard fail-fast reply rather than
         silently routing to a topic with no consumer."""
-        from calfkit_organization.agents.definition import AgentDefinition  # noqa: PLC0415
+        from calfkit_organization.agents.definition import AgentDefinition
 
         registry = AgentRegistry(
             [

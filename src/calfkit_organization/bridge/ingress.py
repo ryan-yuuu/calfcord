@@ -81,7 +81,7 @@ from calfkit_organization.bridge.history import (
     HistoryRecord,
     project_history,
 )
-from calfkit_organization.bridge.pending_wires import PendingWires
+from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.router.roster import build_router_temp_instructions
@@ -335,7 +335,25 @@ class BridgeIngress:
             # ``put``-before-publish order is what keeps the
             # synthesized wire findable by the outbox the moment the
             # synthesized assistant replies.
-            self._pending_wires.put(wire.event_id, wire)
+            # Snapshot the per-invocation context into the
+            # PendingEntry so the outbox can rebuild a faithful retry
+            # envelope on Discord-post failure. All snapshot fields
+            # mirror what we're about to pass to ``invoke_node``:
+            # the projected ``message_history`` (frozen as a tuple),
+            # the peer-roster ``temp_instructions``, and the per-call
+            # ``model_settings`` (provider-specific thinking-effort).
+            # Without snapshotting ``model_settings``, a retry would
+            # silently drop the operator-configured effort tier and
+            # run at the model client's bake-in default.
+            self._pending_wires.put(
+                wire.event_id,
+                PendingEntry(
+                    wire=wire,
+                    message_history=tuple(message_history),
+                    temp_instructions=temp_instructions,
+                    model_settings=model_settings,
+                ),
+            )
             try:
                 handle = await self._client.invoke_node(
                     user_prompt=wire.content,

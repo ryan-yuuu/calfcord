@@ -161,7 +161,8 @@ class TestPublish:
         observed: dict[str, WireMessage | None] = {}
 
         async def _capture(*_args: Any, **kwargs: Any) -> Any:
-            observed["wire"] = pending_wires.get(kwargs["correlation_id"])
+            entry = pending_wires.get(kwargs["correlation_id"])
+            observed["wire"] = entry.wire if entry is not None else None
             return MagicMock()
 
         client.invoke_node.side_effect = _capture
@@ -483,7 +484,7 @@ class TestBootValidation:
         would crash bridge boot in production while every previous
         test passed. Pin the contract: a router-included registry
         must construct cleanly."""
-        from calfkit_organization.router.definition import (  # noqa: PLC0415
+        from calfkit_organization.router.definition import (
             build_router_definition,
         )
 

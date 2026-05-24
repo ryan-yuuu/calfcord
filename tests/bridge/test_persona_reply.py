@@ -10,11 +10,10 @@ doesn't silently regress.
 
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime
 
 import discord
-
-from datetime import UTC, datetime
+import pytest
 
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.persona import (

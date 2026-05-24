@@ -314,9 +314,9 @@ class TestAmbientRoutingEndToEnd:
         for synth_wire_dict in synth_wires:
             entry = pending_wires.get(synth_wire_dict["event_id"])
             assert entry is not None
-            assert entry.channel_id == 12345
-            assert entry.message_id == 98765
-            assert entry.slash_target == synth_wire_dict["slash_target"]
+            assert entry.wire.channel_id == 12345
+            assert entry.wire.message_id == 98765
+            assert entry.wire.slash_target == synth_wire_dict["slash_target"]
 
         # Step 7: drive the outbox consumer for each synthesized
         # event_id and verify the agent reply is anchored to the
@@ -335,8 +335,12 @@ class TestAmbientRoutingEndToEnd:
         persona_sender.send = AsyncMock(
             return_value=SentMessage(id=11111, channel_id=12345)
         )
+        # build_outbox_consumer now requires a calfkit Client (for the
+        # retry-on-Discord-error path). The outbox only invokes it on
+        # failure; this e2e test exercises the happy path so a bare
+        # MagicMock satisfies the signature without behavior.
         outbox = build_outbox_consumer(
-            persona_sender, _registry(), pending_wires
+            persona_sender, _registry(), pending_wires, MagicMock()
         )
 
         # The outbox reads ``emitter_node_id`` from the envelope

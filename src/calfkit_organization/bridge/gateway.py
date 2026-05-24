@@ -355,6 +355,7 @@ def main() -> None:
                     persona_sender=persona_sender,
                     registry=registry,
                     pending_wires=pending_wires,
+                    calfkit_client=calfkit_client,
                 )
                 # The synthesized-in consumer subscribes to
                 # ``bridge.synthesized.in`` and re-feeds router fan-out

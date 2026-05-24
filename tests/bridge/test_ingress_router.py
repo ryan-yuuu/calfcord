@@ -136,7 +136,8 @@ class TestSlashUnchanged:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(kind="slash", slash_target="scribe")
         await ingress.handle(wire)
-        assert pending_wires.get(wire.event_id) is wire
+        entry = pending_wires.get(wire.event_id)
+        assert entry is not None and entry.wire is wire
 
 
 class TestAmbientPublish:
@@ -474,7 +475,7 @@ class TestAmbientEmptyRosterAbort:
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        from calfkit_organization.bridge.ingress import (  # noqa: PLC0415
+        from calfkit_organization.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -496,7 +497,7 @@ class TestAmbientEmptyRosterAbort:
         """The whole point of the abort: zero LLM tokens burned on a
         router run with no roster, zero envelope on the ambient
         topic."""
-        from calfkit_organization.bridge.ingress import (  # noqa: PLC0415
+        from calfkit_organization.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -515,7 +516,7 @@ class TestAmbientEmptyRosterAbort:
     ) -> None:
         """ERROR log identifies the affected ambient message — operator
         can correlate the registry-shape WARN to a user complaint."""
-        from calfkit_organization.bridge.ingress import (  # noqa: PLC0415
+        from calfkit_organization.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 

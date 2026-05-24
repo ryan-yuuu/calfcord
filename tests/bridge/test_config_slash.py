@@ -26,7 +26,6 @@ from calfkit_organization.bridge.slash import (
     SlashCommandManager,
 )
 
-
 _OWNER_USER_ID = 9999
 
 

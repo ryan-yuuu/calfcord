@@ -28,7 +28,7 @@ from calfkit.models.session_context import (
 
 from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.outbox import build_outbox_consumer
-from calfkit_organization.bridge.pending_wires import PendingWires
+from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.messages import SentMessage
@@ -136,8 +136,30 @@ def persona_sender() -> AsyncMock:
 @pytest.fixture
 def pending_wires() -> PendingWires:
     pw = PendingWires()
-    pw.put(_CORRELATION_ID, _wire())
+    pw.put(_CORRELATION_ID, make_pending_entry(_wire()))
     return pw
+
+
+@pytest.fixture
+def calfkit_client() -> MagicMock:
+    """Fake calfkit Client for the outbox's retry-publish path.
+
+    ``invoke_node`` returns an ``InvocationHandle``-shaped mock whose
+    ``_future`` is a real ``asyncio.Future``; the outbox cancels this
+    future after publishing (fire-and-forget pattern matches
+    :class:`BridgeIngress`), so it must be cancellable to avoid
+    ``RuntimeWarning: coroutine never awaited``.
+    """
+    import asyncio as _asyncio
+
+    def _make_handle(*_a: Any, **_kw: Any) -> MagicMock:
+        h = MagicMock()
+        h._future = _asyncio.get_event_loop().create_future()
+        return h
+
+    c = MagicMock()
+    c.invoke_node = AsyncMock(side_effect=_make_handle)
+    return c
 
 
 @pytest.fixture
@@ -151,8 +173,9 @@ class TestHappyPath:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -175,8 +198,9 @@ class TestHappyPath:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(final_text="  Booked.\n\n"),
             correlation_id=_CORRELATION_ID,
@@ -190,6 +214,7 @@ class TestHappyPath:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
         """Two agents reply for the same correlation_id; both post."""
         registry = AgentRegistry(
@@ -212,7 +237,7 @@ class TestHappyPath:
                 ),
             ]
         )
-        consumer = build_outbox_consumer(persona_sender, registry, pending_wires)
+        consumer = build_outbox_consumer(persona_sender, registry, pending_wires, calfkit_client)
 
         await consumer.handler(
             envelope=_envelope(final_text="A1"),
@@ -238,9 +263,10 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
         """Envelope with empty ``final_output_parts`` is an intermediate hop — skip."""
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(final_text=None),
             correlation_id=_CORRELATION_ID,
@@ -254,10 +280,11 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
         """Foreign producer / pre-restart event with no wire in the map."""
         empty_pw = PendingWires()
-        consumer = build_outbox_consumer(persona_sender, _registry(), empty_pw)
+        consumer = build_outbox_consumer(persona_sender, _registry(), empty_pw, calfkit_client)
         with caplog.at_level(logging.DEBUG):
             await consumer.handler(
                 envelope=_envelope(),
@@ -266,7 +293,7 @@ class TestDropPaths:
                 broker=broker,
             )
         persona_sender.send.assert_not_awaited()
-        assert any("no pending wire" in r.message for r in caplog.records)
+        assert any("no pending entry" in r.message for r in caplog.records)
 
     async def test_non_agent_emitter_kind_drops(
         self,
@@ -274,8 +301,9 @@ class TestDropPaths:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -291,8 +319,9 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -307,8 +336,9 @@ class TestDropPaths:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -324,9 +354,10 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
         """Discord rejects empty webhook executes; skip the post."""
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(final_text="   \n  "),
             correlation_id=_CORRELATION_ID,
@@ -355,12 +386,13 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
         """Forbidden = bot lost Manage Webhooks; retry won't help."""
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -377,11 +409,12 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(side_effect=_http_exc(discord.NotFound, 404))
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -397,6 +430,7 @@ class TestDiscordErrorHandling:
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
         """First call hits 5xx; retry returns a SentMessage."""
         persona_sender = AsyncMock()
@@ -407,7 +441,7 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -422,6 +456,7 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
         """Both attempts hit 5xx; one warning per attempt, no exception out."""
         persona_sender = AsyncMock()
@@ -432,7 +467,7 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -442,15 +477,28 @@ class TestDiscordErrorHandling:
             )
 
         assert persona_sender.send.await_count == 2
-        assert any("after retry" in r.message for r in caplog.records)
+        # Two log lines expected: the 5xx-retry-warn from
+        # _send_with_one_retry_on_outage, and the final-5xx-exhausted
+        # log from _handle_post_failure.
+        assert any(
+            "retrying once" in r.message and "5xx" in r.message
+            for r in caplog.records
+        )
+        assert any(
+            "5xx + extra retry exhausted" in r.message
+            for r in caplog.records
+        )
 
     async def test_retry_surfacing_forbidden_keeps_actionable_log(
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
+            calfkit_client: MagicMock,
     ) -> None:
-        """First attempt 5xx, second attempt 403 — actionable language is preserved."""
+        """First attempt 5xx, second attempt 403 — operator-actionable
+        Manage-Webhooks language is preserved (now emitted by
+        :func:`_handle_post_failure` rather than the sender wrapper)."""
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(
             side_effect=[
@@ -459,7 +507,7 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -470,7 +518,7 @@ class TestDiscordErrorHandling:
 
         assert persona_sender.send.await_count == 2
         assert any(
-            "after retry" in r.message and "Manage Webhooks" in r.message
+            "forbidden" in r.message and "Manage Webhooks" in r.message
             for r in caplog.records
         )
 
@@ -478,6 +526,7 @@ class TestDiscordErrorHandling:
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
+            calfkit_client: MagicMock,
     ) -> None:
         """An odd 4xx (e.g. 400 bad request) is not retried."""
         persona_sender = AsyncMock()
@@ -485,7 +534,7 @@ class TestDiscordErrorHandling:
             side_effect=_http_exc(discord.HTTPException, 400)
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires)
+        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
