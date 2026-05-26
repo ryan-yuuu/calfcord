@@ -8,17 +8,19 @@ against this model and surfaced as ``NodeResult.output``. The
 router's fan-out consumer (in the ``calfkit-router`` process) reads
 the decision from there.
 
-The router's system prompt instructs the LLM to ALWAYS pick at least
-one agent — every ambient message in the groupchat must be acknowledged.
-The schema does NOT structurally enforce ``min_length=1`` on ``agents``:
-a misbehaving LLM that emits an empty list should fall through to the
-fan-out consumer's defensive no-op (logs and skips) rather than trigger
-pydantic-ai structured-output validation retries in production. The
-field description and the system prompt are the always-route policy's
-enforcement surface; ``min_length=0`` here is defense-in-depth.
+The router's system prompt instructs the LLM to pick exactly one agent —
+the addressee of the ambient message. Every ambient message in the
+groupchat goes to a single respondent; cross-agent collaboration is
+handled out-of-band by that respondent via its ``private_chat`` tool,
+not by fan-out from the router.
 
-Multi-entry lists fan out to each agent in parallel — order is
-presentational only.
+The schema does NOT structurally require ``agent_id``: a misbehaving
+LLM that emits a tool call with no ``agent_id`` (or with ``None``)
+falls through to the fan-out consumer's defensive no-op path (logs
+and skips) rather than triggering pydantic-ai structured-output
+validation retries in production. The field's optionality is
+defense-in-depth; the system prompt is the always-route policy's
+enforcement surface.
 """
 
 from __future__ import annotations
@@ -35,52 +37,40 @@ value, and the system prompt references it by name when instructing
 the LLM. Both sites import this constant; renaming the tool is a
 one-edit change."""
 
-_AGENTS_MAX_LENGTH = 16
-"""Cap on the fan-out width per ambient message. A misbehaving LLM
-could otherwise emit a 100+ agent list that we'd fan out to 100+
-synthesized publishes. 16 is well above the realistic group size for
-a Discord groupchat and large enough that legitimate fan-outs never
-hit it."""
-
 
 class RoutingDecision(BaseModel):
-    """Structured output the router emits to indicate fan-out targets.
+    """Structured output the router emits to indicate the addressee.
 
-    ``agents`` is parsed by the router's downstream fan-out consumer.
+    ``agent_id`` is parsed by the router's downstream fan-out consumer,
+    which synthesizes exactly one slash wire targeting that agent.
     ``reasoning`` is operator-side logging only — never posted to
     Discord.
 
-    Validation moves four cross-system invariants to the type
+    Validation moves three cross-system invariants to the type
     boundary (rather than the consumer):
 
-    * Each ``agent_id`` must match ``[a-z0-9_-]{1,32}`` — same regex
-      the bridge enforces on user-defined agents. An invalid id is a
-      malformed LLM output, not a registry lookup miss, and should
-      fail at parse time so the fan-out never sees it.
-    * ``agents`` is deduplicated preserving first-seen order. A
-      misbehaving LLM emitting ``["scribe", "scribe", "conan"]``
-      collapses to ``("scribe", "conan")`` — without this, the
-      fan-out would publish twice and the user would see a duplicate
-      reply from scribe.
-    * ``agents`` is bounded to :data:`_AGENTS_MAX_LENGTH` entries.
-    * ``reasoning`` is bounded to 1–2000 chars (was the only
-      invariant pre-existing — a misbehaving model could emit a
-      multi-kilobyte rationale that floods log files).
-
-    The tuple type for ``agents`` (rather than ``list``) is
-    independently load-bearing: ``frozen=True`` only freezes
-    attribute assignment, not the internal sequence, so a ``list``
-    would remain mutable in place.
+    * ``agent_id`` (when non-None) must match ``[a-z0-9_-]{1,32}`` —
+      same regex the bridge enforces on user-defined agents. An
+      invalid id is a malformed LLM output, not a registry lookup
+      miss, and should fail at parse time so the fan-out never sees
+      it.
+    * ``agent_id`` is a single string (not a list/tuple) so a
+      misbehaving LLM cannot fan out to multiple agents even by
+      accident — the schema enforces "exactly one addressee" at the
+      type boundary.
+    * ``reasoning`` is bounded to 1–2000 chars (a misbehaving model
+      could otherwise emit a multi-kilobyte rationale that floods
+      log files).
 
     Two invariants intentionally stay at the consumer rather than
     here, because both depend on runtime state the schema cannot
     see:
 
-    * Router self-reference (``agents`` containing the router's own
+    * Router self-reference (``agent_id`` equal to the router's own
       id) — the fan-out consumer skips this id, since the runtime
       ``router_agent_id`` is closure-bound at consumer construction.
     * Phonebook membership (``agent_id`` exists in the current
-      registry) — the fan-out validates each chosen id against the
+      registry) — the fan-out validates the chosen id against the
       ``phonebook`` field of the publisher's
       :class:`~calfkit_organization._compat.invoke.MetadataEnvelope`
       and skips with an ERROR log on miss (catches LLM
@@ -90,17 +80,16 @@ class RoutingDecision(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    agents: tuple[str, ...] = Field(
-        default_factory=tuple,
-        max_length=_AGENTS_MAX_LENGTH,
+    agent_id: str | None = Field(
+        default=None,
         description=(
-            "Agent ids that should respond to this ambient message. "
-            "MUST contain at least one id — every ambient message in "
-            "the groupchat must be acknowledged by some agent. There "
-            "is no silent-ignore case: when no agent is a strong "
-            "topical match, pick the agent whose persona best fits "
-            "the social register of the message rather than emitting "
-            "an empty list."
+            "The agent_id of the single agent the user is addressing. "
+            "Pick exactly one — the addressee. If that agent needs "
+            "input from peers, it can pull them in out-of-band via "
+            "its ``private_chat`` tool; the router does NOT fan out "
+            "to multiple agents. When no agent is a strong match, "
+            "pick the agent whose persona best fits the social "
+            "register of the message rather than returning None."
         ),
     )
     reasoning: str = Field(
@@ -113,26 +102,16 @@ class RoutingDecision(BaseModel):
         ),
     )
 
-    @field_validator("agents")
+    @field_validator("agent_id")
     @classmethod
-    def _validate_agent_ids_and_dedupe(
-        cls, v: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        for agent_id in v:
-            if not AGENT_ID_PATTERN.fullmatch(agent_id):
-                raise ValueError(
-                    f"agent id {agent_id!r} must match "
-                    f"[a-z0-9_-]{{1,32}}"
-                )
-        # First-seen dedupe preserves the LLM's intended order while
-        # eliminating accidental repeats.
-        seen: set[str] = set()
-        out: list[str] = []
-        for agent_id in v:
-            if agent_id not in seen:
-                seen.add(agent_id)
-                out.append(agent_id)
-        return tuple(out)
+    def _validate_agent_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not AGENT_ID_PATTERN.fullmatch(v):
+            raise ValueError(
+                f"agent_id {v!r} must match [a-z0-9_-]{{1,32}}"
+            )
+        return v
 
     @field_validator("reasoning")
     @classmethod

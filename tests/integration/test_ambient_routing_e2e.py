@@ -205,14 +205,18 @@ def _headers() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 class TestAmbientRoutingEndToEnd:
-    async def test_full_flow_routes_to_chosen_agents(self) -> None:
+    async def test_full_flow_routes_to_chosen_agent(self) -> None:
         """Ambient → router → fan-out → bridge.synthesized.in →
         ingress.handle → channel topic, all wired up correctly.
 
         Pins the seam contract: the original ambient's channel_id /
         message_id / author survive the metadata-pack/unpack hop and
-        end up on the synthesized invocations that the bridge
-        republishes to ``discord.channel.{cid}.in``."""
+        end up on the synthesized invocation that the bridge
+        republishes to ``discord.channel.{cid}.in``. Under the
+        single-agent routing policy, exactly one synthesized publish
+        flows through the chain — earlier versions of this test
+        exercised multi-agent fan-out, which the schema no longer
+        permits."""
         bridge_client = _fresh_client()
         router_client = _fresh_client()
         pending_wires = PendingWires()
@@ -236,7 +240,7 @@ class TestAmbientRoutingEndToEnd:
         # feed it an envelope mimicking the router agent's ReturnCall.
         fanout = build_fanout_consumer(router_client, router_agent_id=ROUTER_AGENT_ID)
         decision = RoutingDecision(
-            agents=["scribe", "conan"], reasoning="both fit the topic"
+            agent_id="scribe", reasoning="scribe is the addressee"
         )
         fanout_envelope = _build_fanout_envelope_from_router_output(
             ambient_state=ambient_state,
@@ -252,29 +256,24 @@ class TestAmbientRoutingEndToEnd:
             broker=broker,
         )
 
-        # Step 4: verify the fan-out emitted two publishes to the
-        # synthesized topic, one per chosen agent, each with a fresh
+        # Step 4: verify the fan-out emitted exactly one publish to
+        # the synthesized topic for the chosen agent, with a fresh
         # event_id and the original ambient's channel/message/author
         # preserved.
-        assert router_client._invoke.await_count == 2
-        synth_publishes = [
-            router_client._invoke.await_args_list[i].kwargs
-            for i in range(2)
-        ]
-        assert all(p["topic"] == SYNTHESIZED_INGRESS_TOPIC for p in synth_publishes)
-        synth_wires = [p["state"].metadata[METADATA_KEY_WIRE] for p in synth_publishes]
-        slash_targets = sorted(w["slash_target"] for w in synth_wires)
-        assert slash_targets == ["conan", "scribe"]
-        # Fresh event_ids (not the original).
-        event_ids = {w["event_id"] for w in synth_wires}
-        assert "evt-original-1" not in event_ids
-        assert len(event_ids) == 2  # two distinct fresh ids
+        assert router_client._invoke.await_count == 1
+        synth_publishes = [router_client._invoke.await_args_list[0].kwargs]
+        assert synth_publishes[0]["topic"] == SYNTHESIZED_INGRESS_TOPIC
+        synth_wires = [synth_publishes[0]["state"].metadata[METADATA_KEY_WIRE]]
+        assert synth_wires[0]["slash_target"] == "scribe"
+        # Fresh event_id (not the original).
+        synth_event_id = synth_wires[0]["event_id"]
+        assert synth_event_id != "evt-original-1"
         # Channel / message / author preserved.
-        for w in synth_wires:
-            assert w["channel_id"] == 12345
-            assert w["message_id"] == 98765
-            assert w["author"]["display_name"] == "alice"
-            assert w["kind"] == "slash"
+        w = synth_wires[0]
+        assert w["channel_id"] == 12345
+        assert w["message_id"] == 98765
+        assert w["author"]["display_name"] == "alice"
+        assert w["kind"] == "slash"
 
         # Step 5: build the synthesized-in @consumer wired to the
         # same BridgeIngress, feed each synthesized envelope, and
@@ -293,24 +292,17 @@ class TestAmbientRoutingEndToEnd:
                 broker=broker,
             )
 
-        # Step 6: the bridge's ingress should have published two slash
-        # invocations (one per chosen agent) on top of the original
-        # ambient publish. invoke_node is the slash branch.
-        assert bridge_client.invoke_node.await_count == 2
-        slash_publishes = [
-            bridge_client.invoke_node.await_args_list[i].kwargs
-            for i in range(2)
-        ]
-        assert all(
-            p["topic"] == "discord.channel.12345.in" for p in slash_publishes
-        )
-        # PendingWires should have entries for both synthesized
-        # event_ids (so the outbox can correlate replies back).
-        # Per-iteration assertion pins identity, not just set
-        # membership: a regression that wrote scribe's wire under
-        # conan's event_id would pass an ``in {...}`` check but
-        # silently misattribute replies. Pinning the *exact*
-        # slash_target per entry catches that.
+        # Step 6: the bridge's ingress should have published exactly
+        # one slash invocation for the chosen agent on top of the
+        # original ambient publish. invoke_node is the slash branch.
+        assert bridge_client.invoke_node.await_count == 1
+        slash_publishes = [bridge_client.invoke_node.await_args_list[0].kwargs]
+        assert slash_publishes[0]["topic"] == "discord.channel.12345.in"
+        # PendingWires should have an entry for the synthesized
+        # event_id (so the outbox can correlate the reply back).
+        # Asserting on the exact slash_target pins identity — a
+        # regression that wrote the wrong wire under this event_id
+        # would silently misattribute the reply.
         for synth_wire_dict in synth_wires:
             entry = pending_wires.get(synth_wire_dict["event_id"])
             assert entry is not None
@@ -381,11 +373,11 @@ class TestAmbientRoutingEndToEnd:
                 broker=broker,
             )
 
-        # One send per synthesized wire reply — no dedupe, no
+        # One send for the single synthesized reply — no dedupe, no
         # silent-drop.
-        assert persona_sender.send.await_count == 2
+        assert persona_sender.send.await_count == 1
 
-        # Every reply is anchored to the ORIGINAL ambient's Discord
+        # The reply is anchored to the ORIGINAL ambient's Discord
         # message_id (98765 from the human ambient fixture), NOT a
         # fresh synthesized event_id. This is the load-bearing
         # invariant of the multi-hop seam.
@@ -401,13 +393,11 @@ class TestAmbientRoutingEndToEnd:
             assert reply_to.channel_id == 12345
 
         # Persona name resolves from the registry's display_name for
-        # each agent — scribe's reply goes under "Scribe", conan's
-        # under "Conan". This pins that ``emitter_node_id`` (from the
-        # outbox headers) correctly drives persona projection at the
-        # end of the chain.
+        # the chosen agent — scribe's reply goes under "Scribe". This
+        # pins that ``emitter_node_id`` (from the outbox headers)
+        # correctly drives persona projection at the end of the chain.
         persona_names_by_content = {
             call.kwargs["content"]: call.kwargs["persona"].name
             for call in send_calls
         }
         assert persona_names_by_content["scribe's reply"] == "Scribe"
-        assert persona_names_by_content["conan's reply"] == "Conan"

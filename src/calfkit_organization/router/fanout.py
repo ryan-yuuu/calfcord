@@ -1,4 +1,4 @@
-"""Fan-out consumer: turn a :class:`RoutingDecision` into N synthesized wires.
+"""Fan-out consumer: turn a :class:`RoutingDecision` into one synthesized wire.
 
 Subscribed to ``routing.decisions`` (the router agent's
 ``publish_topic``). On every router reply whose state carries a final
@@ -7,19 +7,26 @@ output, this consumer:
 1. Reads the :class:`RoutingDecision` from ``result.output``.
 2. Recovers the original :class:`WireMessage` from ``result.state.metadata``
    (the bridge ingress put it there via :func:`invoke_node_with_metadata`).
-3. For each chosen ``agent_id`` (after filtering out the router's own id
-   defensively), synthesizes a fresh wire with ``kind="slash"`` and
-   ``slash_target=<agent_id>`` plus a fresh ``event_id``, and publishes
-   it to ``bridge.synthesized.in`` via :func:`invoke_node_with_metadata`
-   (so the wire rides on ``state.metadata`` for the bridge's
-   synthesized-in consumer to pick up).
+3. For the chosen ``agent_id`` (after defensive self-filter and
+   phonebook validation), synthesizes a fresh wire with ``kind="slash"``
+   and ``slash_target=<agent_id>`` plus a fresh ``event_id``, and
+   publishes it to ``bridge.synthesized.in`` via
+   :func:`invoke_node_with_metadata` (so the wire rides on
+   ``state.metadata`` for the bridge's synthesized-in consumer to pick
+   up).
 
-The fresh ``event_id`` per chosen agent is load-bearing: the bridge's
-ingress writes each wire into the :class:`PendingWires` map keyed on
-``event_id``, and the outbox consumer reads back by ``correlation_id``
-(which equals the wire's ``event_id``). Two synthesized wires sharing
-the same id would collide on the map and the second-arriving agent's
-reply would be misattributed to the first's channel/message context.
+The single-id model is enforced at the :class:`RoutingDecision` schema
+level: ``agent_id`` is a single ``str | None``, so the consumer cannot
+fan out to multiple targets even by accident. The ``None`` case is
+defense-in-depth: a misbehaving LLM that emits a tool call without an
+``agent_id`` falls through to the no-op path here rather than
+triggering pydantic-ai structured-output validation retries.
+
+The fresh ``event_id`` is load-bearing: the bridge's ingress writes the
+wire into the :class:`PendingWires` map keyed on ``event_id``, and the
+outbox consumer reads back by ``correlation_id`` (which equals the
+wire's ``event_id``). Reusing the original ambient's event_id would
+collide on the map and the assistant's reply would be misattributed.
 
 Built as a closure that captures ``client`` and ``router_agent_id`` —
 same shape as :func:`build_outbox_consumer` in
@@ -63,16 +70,15 @@ def build_fanout_consumer(
 
     Args:
         client: Connected calfkit :class:`Client`. The closure uses it
-            to publish synthesized wires via
+            to publish the synthesized wire via
             :func:`invoke_node_with_metadata`.
         router_agent_id: The router's own ``agent_id`` (typically
             :data:`ROUTER_AGENT_ID`). The consumer defensively filters
-            this id out of every decision's ``agents`` list — the LLM
-            should never pick the router itself, but a misbehaving
-            model output should not be allowed to publish a synthesized
-            wire targeting the router (which would loop forever
-            because the router's ingress topic is ambient, not
-            channel-scoped).
+            this id out — the LLM should never pick the router itself,
+            but a misbehaving model output should not be allowed to
+            publish a synthesized wire targeting the router (which
+            would loop forever because the router's ingress topic is
+            ambient, not channel-scoped).
         subscribe_topic: Override for tests. Production uses the
             router's ``publish_topic`` (``"routing.decisions"``).
         node_id: Stable consumer-group identifier. Two ``calfkit-router``
@@ -128,7 +134,7 @@ def build_fanout_consumer(
                 site="fanout",
                 reason=(
                     f"failed to extract MetadataEnvelope from "
-                    f"state.metadata (agents={decision.agents}): {exc}"
+                    f"state.metadata (agent_id={decision.agent_id}): {exc}"
                 ),
                 cause=exc,
             )
@@ -136,16 +142,37 @@ def build_fanout_consumer(
         wire = envelope.wire
 
         logger.info(
-            "fan-out received decision correlation_id=%s channel=%s agents=%s reasoning=%s",
+            "fan-out received decision correlation_id=%s channel=%s agent_id=%s reasoning=%s",
             result.correlation_id,
             wire.channel_id,
-            decision.agents,
+            decision.agent_id,
             decision.reasoning,
         )
 
+        if decision.agent_id is None:
+            # Defense-in-depth: the prompt mandates picking exactly
+            # one agent, so ``None`` is a prompt-disobedience signal —
+            # the LLM emitted a tool call without populating
+            # ``agent_id``. WARN so operators grep'ing for "why didn't
+            # anyone respond to this user?" can find it; INFO would
+            # bury the line in routine traffic. The ambient message
+            # goes unanswered as a result.
+            logger.warning(
+                "fan-out skipping decision with no agent_id "
+                "(LLM disobeyed always-pick-one prompt) "
+                "event_id=%s channel=%s author=%s correlation_id=%s "
+                "reasoning=%r",
+                wire.event_id,
+                wire.channel_id,
+                wire.author.display_name,
+                result.correlation_id,
+                decision.reasoning,
+            )
+            return
+
         # Fail-closed on missing phonebook. Production producers
         # ALWAYS pack the phonebook on the ambient publish so the
-        # fan-out can validate every chosen ``agent_id`` against the
+        # fan-out can validate the chosen ``agent_id`` against the
         # publisher's registry snapshot. ``None`` here means an infra
         # bug — not a backward-compat case — and silently skipping
         # validation would let LLM hallucinations through. Raising
@@ -158,7 +185,7 @@ def build_fanout_consumer(
                 site="fanout",
                 reason=(
                     f"missing phonebook on ambient envelope "
-                    f"(agents={decision.agents})"
+                    f"(agent_id={decision.agent_id})"
                 ),
             )
 
@@ -166,125 +193,129 @@ def build_fanout_consumer(
         # snapshot. The fan-out lives in a separate process from the
         # bridge and has no registry access of its own; the bridge
         # ships its typed :class:`PhonebookEntry` projection on every
-        # ambient publish via ``envelope.phonebook``. Typed access
-        # eliminates the legacy isinstance-on-dict-entry guard — every
-        # entry is a validated model with a ``str`` ``agent_id``.
+        # ambient publish via ``envelope.phonebook``.
         known_agent_ids: set[str] = {e.agent_id for e in envelope.phonebook}
 
-        # NB: ``decision.agents`` is already deduplicated by
-        # :class:`RoutingDecision`'s field validator. Self-filter +
-        # phonebook validation are the remaining consumer-side
-        # filters — both depend on runtime context (``router_agent_id``
-        # and the publisher's phonebook) which the schema cannot see.
-        for agent_id in decision.agents:
-            if agent_id == router_agent_id:
-                # Defensive self-filter: the LLM should never pick the
-                # router itself, but a misbehaving model could. A
-                # synthesized wire targeting the router would loop
-                # forever (router's ingress topic accepts every
-                # envelope it sees).
-                logger.info(
-                    "fan-out skipping router's own id event_id=%s",
-                    wire.event_id,
-                )
-                continue
-
-            if agent_id not in known_agent_ids:
-                # Unknown agent_id from the LLM (either hallucinated
-                # or registry drift since the publisher built the
-                # phonebook). Publishing a synthesized wire targeted
-                # at a non-existent agent would orphan in
-                # ``PendingWires`` until LRU eviction, with no
-                # operator signal and no user-visible reply. ERROR
-                # log with full context (channel, author,
-                # correlation_id, and the agent_ids the LLM had to
-                # choose from) so the operator can quickly identify
-                # the affected conversation and decide whether the
-                # registry needs an update.
-                logger.error(
-                    "fan-out skipping unknown agent_id=%r event_id=%s "
-                    "channel=%s author=%s correlation_id=%s "
-                    "known_agents=%s — agent is not in the publisher's "
-                    "phonebook (LLM hallucination or registry drift)",
-                    agent_id,
-                    wire.event_id,
-                    wire.channel_id,
-                    wire.author.display_name,
-                    result.correlation_id,
-                    sorted(known_agent_ids),
-                )
-                continue
-
-            synthesized = wire.model_copy(
-                update={
-                    "event_id": uuid_utils.uuid7().hex,
-                    "kind": "slash",
-                    "slash_target": agent_id,
-                }
+        if decision.agent_id == router_agent_id:
+            # Defensive self-filter: the LLM should never pick the
+            # router itself (the roster builder excludes it), but a
+            # misbehaving model could. A synthesized wire targeting
+            # the router would loop forever (router's ingress topic
+            # accepts every envelope it sees). WARN with full context
+            # so the operator can distinguish "LLM hallucinated the
+            # router's id" (model error) from "registry exposed it
+            # to the roster" (wiring bug); the reasoning field
+            # usually indicates which.
+            logger.warning(
+                "fan-out skipping router's own id (LLM picked itself) "
+                "event_id=%s channel=%s author=%s correlation_id=%s "
+                "reasoning=%r",
+                wire.event_id,
+                wire.channel_id,
+                wire.author.display_name,
+                result.correlation_id,
+                decision.reasoning,
             )
-            # Synthesized envelope deliberately omits ``phonebook``:
-            # the bridge's slash branch rebuilds deps from its
-            # registry on each re-entry, so shipping the projection
-            # through this hop would be redundant. Passing the typed
-            # ``WireMessage`` directly — pydantic dumps it as part of
-            # ``envelope.model_dump(mode="json")`` at the call site.
-            #
-            # The history records ARE forwarded: the bridge's ambient
-            # publish path fetches channel history once at publish
-            # time (see ``BridgeIngress._fetch_ambient_history``) and
-            # packs it into the parent envelope. Without forwarding
-            # here, the synthesized-in consumer would receive an
-            # empty ``MetadataEnvelope.history`` (the default), pass
-            # ``prefetched_history=()`` to ``BridgeIngress.handle``,
-            # and every fan-out assistant would run with no history
-            # — defeating the single-fetch-per-fan-out design.
-            synth_envelope = MetadataEnvelope(
-                wire=synthesized,
-                history=envelope.history,
-            )
+            return
 
-            # ``handle`` lives outside the try so the finally clause
-            # below can cancel its future even if a later step (e.g.
-            # the success-log) raises. The fire-and-forget cancel is
-            # load-bearing: the dispatcher's pending future would
-            # otherwise leak; cancelling triggers the
-            # ``add_done_callback`` that pops the registry entry.
-            # Same idiom as :meth:`BridgeIngress.handle`.
-            handle = None
-            try:
-                handle = await invoke_node_with_metadata(
-                    client,
-                    user_prompt="",
-                    topic=SYNTHESIZED_INGRESS_TOPIC,
-                    metadata=synth_envelope.model_dump(mode="json"),
-                    correlation_id=synthesized.event_id,
-                )
-                logger.info(
-                    "fan-out published agent=%s event_id=%s channel=%s",
-                    agent_id,
-                    synthesized.event_id,
-                    synthesized.channel_id,
-                )
-            except Exception as exc:
-                # A publish failure for one fan-out target must not
-                # block the other targets (a transient broker hiccup
-                # would otherwise drop the whole multi-agent reply).
-                # Log at ERROR with channel + author so a partial
-                # fan-out degradation is correlatable to a user
-                # complaint.
-                logger.error(
-                    "fan-out publish failed agent=%s event_id=%s "
-                    "channel=%s author=%s exc_class=%s; continuing with "
-                    "other targets",
-                    agent_id,
-                    synthesized.event_id,
-                    synthesized.channel_id,
-                    synthesized.author.display_name,
-                    exc.__class__.__name__,
-                    exc_info=True,
-                )
-            finally:
-                if handle is not None:
-                    handle._future.cancel()
+        if decision.agent_id not in known_agent_ids:
+            # Unknown agent_id from the LLM (either hallucinated or
+            # registry drift since the publisher built the
+            # phonebook). Publishing a synthesized wire targeted at a
+            # non-existent agent would orphan in
+            # ``PendingWires`` until LRU eviction, with no operator
+            # signal and no user-visible reply. ERROR log with full
+            # context (channel, author, correlation_id, and the
+            # agent_ids the LLM had to choose from) so the operator
+            # can quickly identify the affected conversation and
+            # decide whether the registry needs an update.
+            logger.error(
+                "fan-out skipping unknown agent_id=%r event_id=%s "
+                "channel=%s author=%s correlation_id=%s "
+                "known_agents=%s — agent is not in the publisher's "
+                "phonebook (LLM hallucination or registry drift)",
+                decision.agent_id,
+                wire.event_id,
+                wire.channel_id,
+                wire.author.display_name,
+                result.correlation_id,
+                sorted(known_agent_ids),
+            )
+            return
+
+        synthesized = wire.model_copy(
+            update={
+                "event_id": uuid_utils.uuid7().hex,
+                "kind": "slash",
+                "slash_target": decision.agent_id,
+            }
+        )
+        # Synthesized envelope deliberately omits ``phonebook``:
+        # the bridge's slash branch rebuilds deps from its
+        # registry on each re-entry, so shipping the projection
+        # through this hop would be redundant. Passing the typed
+        # ``WireMessage`` directly — pydantic dumps it as part of
+        # ``envelope.model_dump(mode="json")`` at the call site.
+        #
+        # The history records ARE forwarded: the bridge's ambient
+        # publish path fetches channel history once at publish
+        # time (see ``BridgeIngress._fetch_ambient_history``) and
+        # packs it into the parent envelope. Without forwarding
+        # here, the synthesized-in consumer would receive an
+        # empty ``MetadataEnvelope.history`` (the default), pass
+        # ``prefetched_history=()`` to ``BridgeIngress.handle``,
+        # and the assistant would run with no history.
+        synth_envelope = MetadataEnvelope(
+            wire=synthesized,
+            history=envelope.history,
+        )
+
+        # ``handle`` lives outside the try so the finally clause
+        # below can cancel its future even if a later step (e.g.
+        # the success-log) raises. The fire-and-forget cancel is
+        # load-bearing: the dispatcher's pending future would
+        # otherwise leak; cancelling triggers the
+        # ``add_done_callback`` that pops the registry entry.
+        # Same idiom as :meth:`BridgeIngress.handle`.
+        handle = None
+        try:
+            handle = await invoke_node_with_metadata(
+                client,
+                user_prompt="",
+                topic=SYNTHESIZED_INGRESS_TOPIC,
+                metadata=synth_envelope.model_dump(mode="json"),
+                correlation_id=synthesized.event_id,
+            )
+            logger.info(
+                "fan-out published agent=%s event_id=%s channel=%s",
+                decision.agent_id,
+                synthesized.event_id,
+                synthesized.channel_id,
+            )
+        except Exception:
+            # A publish failure (broker hiccup, serialization error,
+            # connection drop) silently drops the user's ambient
+            # message unless we log + re-raise here. The envelope
+            # was already ACKed (``AckPolicy.ACK_FIRST``) so the
+            # consumer harness will not redeliver; we just need an
+            # operator-greppable ERROR with channel/author/event_id
+            # so a future "scribe never replied to my message"
+            # report can be correlated to a specific failure mode.
+            # Re-raising preserves the harness's own
+            # uncaught-exception path on top of our rich log.
+            logger.error(
+                "fan-out publish failed agent=%s event_id=%s "
+                "channel=%s author=%s correlation_id=%s",
+                decision.agent_id,
+                synthesized.event_id,
+                synthesized.channel_id,
+                wire.author.display_name,
+                result.correlation_id,
+                exc_info=True,
+            )
+            raise
+        finally:
+            if handle is not None:
+                handle._future.cancel()
 
     return _fan_out

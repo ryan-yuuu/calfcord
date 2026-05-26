@@ -4,30 +4,28 @@ The router's :data:`SYSTEM_PROMPT` references the LLM-facing tool name
 (:data:`ROUTER_OUTPUT_TOOL_NAME`) and the
 :class:`RoutingDecision` schema field names. The prompt module already
 asserts the field names match at import time
-(:mod:`calfkit_organization.router.prompt` lines 36-43), which catches
+(:mod:`calfkit_organization.router.prompt`), which catches
 the most egregious mismatch — a typo in the prompt's hardcoded literal
 versus the schema's field name. These tests cover the symmetric
-direction (schema rename without prompt update) and pin one specific
-wording change that fixed a misleading rule-5 phrase.
+direction (schema rename without prompt update) and pin the policy
+wording the LLM depends on.
 
 A failure here means one of:
 
 * Someone renamed :data:`ROUTER_OUTPUT_TOOL_NAME` without updating the
   prompt to interpolate the new value.
-* Someone renamed a :class:`RoutingDecision` field (e.g. ``agents`` →
-  ``respondents``) without updating the prompt to instruct the LLM
+* Someone renamed a :class:`RoutingDecision` field (e.g. ``agent_id`` →
+  ``respondent``) without updating the prompt to instruct the LLM
   using the new name. The LLM would still emit a tool call but with
   wrong argument names; pydantic-ai's parser would reject it and the
   router would silently fail to fan out.
-* Someone reinstated the rewritten "silently dropped downstream" rule-5
-  language. That phrasing implied the bridge had a per-message drop
-  step which it does not — the actual failure mode is no fan-out, so
-  no synthesized invocation, so no agent reply (the message goes
-  unanswered, not "dropped").
-* Someone reinstated the "silent-ignore" / empty-agents-is-acceptable
-  policy. The router's contract is that every ambient message gets
-  at least one agent — see the ``test_prompt_mandates_at_least_one_agent``
-  test below for the policy rationale.
+* Someone reinstated the multi-agent fan-out policy. The router's
+  contract is now "exactly one addressee per ambient message" — see
+  the ``test_prompt_mandates_exactly_one_agent`` test below.
+* Someone removed the ``private_chat`` collaboration guidance — without
+  it the LLM is liable to pick multiple agents whenever a message
+  spans remits, regressing back toward fan-out behavior the schema
+  now forbids.
 """
 
 from __future__ import annotations
@@ -65,12 +63,12 @@ class TestSystemPromptCoupling:
         """Every :class:`RoutingDecision` field name must appear in the
         prompt so the LLM is instructed to populate it.
 
-        Without this check, renaming ``agents`` → ``respondents`` on
+        Without this check, renaming ``agent_id`` → ``respondent`` on
         the schema would only fail the import-time assertion if the
-        prompt module's ``_AGENTS_FIELD`` constant was also updated;
+        prompt module's ``_AGENT_ID_FIELD`` constant was also updated;
         if a contributor renamed the schema field AND the prompt
         constant but forgot to update the prompt text's prose (which
-        currently uses backticked field names like ``agents``), the
+        currently uses backticked field names like ``agent_id``), the
         LLM would receive instructions referencing a nonexistent
         field name. This test catches that schema-prompt drift."""
         missing = [
@@ -84,62 +82,61 @@ class TestSystemPromptCoupling:
             f"and update router/prompt.py to match"
         )
 
-    def test_prompt_mandates_at_least_one_agent(self) -> None:
-        """The router's policy is that every ambient message must be
-        routed to at least one agent. There is no silent-ignore path.
+    def test_prompt_mandates_exactly_one_agent(self) -> None:
+        """The router's policy is that every ambient message gets
+        exactly one respondent — the addressee. The schema enforces
+        single-cardinality at the type boundary (``agent_id`` is a
+        scalar), but the prompt is what tells the LLM not to *try* to
+        pick more than one in the first place.
 
-        The prompt enforces this at the LLM level (the schema does NOT
-        add ``min_length=1`` — see the
-        :mod:`calfkit_organization.agents.routing` module docstring for
-        why). If the prompt's at-least-one wording is ever lost, the
-        LLM will start emitting empty lists for low-signal messages and
-        users will see ambient messages go unacknowledged with no
-        operator-visible failure.
-
-        Positive anchors below are deliberately fuzzy (substring) so
-        prose can be edited without breaking the test, but at least one
-        of the canonical at-least-one phrasings must remain."""
+        If this wording is lost, the LLM may attempt multi-agent output
+        and the pydantic-ai validation layer would reject it, producing
+        retry storms in production. Positive anchors below are
+        deliberately fuzzy (substring) so prose can be edited without
+        breaking the test, but at least one of the canonical
+        exactly-one phrasings must remain."""
         required_phrases = (
-            "at least one",
-            "always one or more",
+            "exactly one",
+            "one agent",
+            "single agent",
+            "single addressee",
         )
         present = [p for p in required_phrases if p in SYSTEM_PROMPT]
         assert present, (
             f"prompt no longer contains any of the canonical "
-            f"at-least-one-agent phrasings {required_phrases!r}. The "
-            f"router's policy is that every ambient message gets at "
-            f"least one respondent — restore the wording or update "
-            f"this test if the policy itself has changed (which would "
-            f"also require updating the agents/routing.py module "
-            f"docstring and the agents field description)."
+            f"exactly-one phrasings {required_phrases!r}. The "
+            f"router's policy is that every ambient message gets one "
+            f"addressee — restore the wording or update this test if "
+            f"the policy itself has changed (which would also require "
+            f"updating the agents/routing.py module docstring and the "
+            f"agent_id field description)."
         )
 
-        # Negative anchors: phrases that AFFIRMATIVELY permit an empty
-        # agents list. Naming the concept ("there is no silent-ignore
-        # case") is fine and even helpful — the discriminator is
-        # whether the wording grants the LLM permission to emit empty.
-        # Each pattern below is a phrase that, if present, told the
-        # LLM that empty is a valid output.
+        # Negative anchors: phrases that AFFIRMATIVELY permit multi-agent
+        # fan-out. If any of these appear, the prompt has regressed to
+        # the old "one or more" policy and the schema's single-agent
+        # constraint will start producing pydantic-ai retry storms when
+        # the LLM tries to obey the prompt and the schema rejects it.
         forbidden_phrases = (
-            "May be empty",
-            "may be empty",
-            "Prefer silence",
-            "prefer silence",
-            "return an empty",
-            "Default to 0",
-            "default to 0",
-            "often zero",
-            "typically zero",
+            "one or more agents",
+            "one or more agent_ids",
+            "multiple agents",
+            "more than one agent",
+            "fan out to",
+            "fan-out to",
+            "several agents",
+            "list of agent_ids",
         )
         regressed = [p for p in forbidden_phrases if p in SYSTEM_PROMPT]
         assert not regressed, (
             f"prompt contains phrase(s) {regressed!r} that re-permit "
-            f"empty agent lists. The router must route every ambient "
-            f"message to at least one agent. If the policy is "
-            f"deliberately changing back, update this test, the prompt "
-            f"docstring, agents/routing.py module docstring + field "
-            f"description, and the test_routing_schema/test_fanout "
-            f"docstrings that document defensive empty handling."
+            f"multi-agent fan-out. The router must route every ambient "
+            f"message to exactly one addressee — the schema's "
+            f"``agent_id: str | None`` enforces this at the type "
+            f"boundary, so multi-agent prompt wording would cause "
+            f"pydantic-ai validation retries. If the policy is "
+            f"deliberately changing back to fan-out, restore the "
+            f"tuple field on RoutingDecision and update this test."
         )
 
     def test_prompt_instructs_use_of_message_history(self) -> None:
@@ -151,14 +148,12 @@ class TestSystemPromptCoupling:
         and the ``_DEFAULT_HISTORY_TURNS`` docstring ("only needs
         enough context to recognize follow-ups vs. fresh topics").
 
-        Without an explicit rule, the LLM topic-matches each message
-        in isolation: a one-line follow-up like "what about the
-        second one?" gets routed by the literal words rather than by
-        who the user was just talking with. The result is an
-        unnatural groupchat feel where an ongoing exchange with
-        agent A is interrupted by an out-of-context response from
-        agent B because B's description happens to share a keyword
-        with the follow-up phrasing.
+        Under the single-agent policy, continuity is even more
+        load-bearing: when a follow-up like "what about the second
+        one?" comes in, the only correct addressee is the agent the
+        user was just talking to. Without explicit instruction, the
+        LLM topic-matches each message in isolation and would pick the
+        wrong agent.
 
         Pin two anchors: the literal ``message_history`` (so the LLM
         knows what to look at) and a continuity word so the prompt
@@ -168,28 +163,52 @@ class TestSystemPromptCoupling:
             "router receives recent channel history under that field "
             "name and must be told to use it for conversation "
             "continuity. Without this, follow-up messages get "
-            "topic-matched in isolation and an ongoing exchange gets "
-            "interrupted by an unrelated agent."
+            "topic-matched in isolation and the wrong agent gets "
+            "picked as the addressee."
         )
         continuity_anchors = (
             "ongoing",
             "continuation",
             "follow-up",
             "follow up",
+            "continuity",
         )
         present = [a for a in continuity_anchors if a in SYSTEM_PROMPT]
         assert present, (
             f"prompt no longer contains any continuity-cue word "
-            f"{continuity_anchors!r}. The rule that says 'prefer the "
+            f"{continuity_anchors!r}. The rule that says 'pick the "
             f"agent already participating in this thread' is what "
             f"prevents follow-up topic-match drift; restore the "
             f"wording or update this test if the policy itself is "
             f"deliberately changing."
         )
 
+    def test_prompt_mentions_private_chat_collaboration(self) -> None:
+        """The single-agent policy depends on the LLM understanding
+        that cross-agent collaboration is the addressee's job, not the
+        router's. The addressee has a ``private_chat`` tool it can use
+        to pull in peers; without this prompt-level guidance, the LLM
+        will keep trying to pick multiple agents whenever a message
+        spans remits — and the schema (``agent_id: str | None``) will
+        then reject the multi-agent output, producing pydantic-ai
+        retry storms.
+
+        Pin the ``private_chat`` literal so the collaboration carve-out
+        isn't accidentally lost in a future prompt rewrite."""
+        assert "private_chat" in SYSTEM_PROMPT, (
+            "prompt no longer mentions ``private_chat`` — without "
+            "telling the LLM that the chosen agent can pull in peers "
+            "out-of-band, the LLM is liable to regress toward "
+            "picking multiple agents for multi-remit messages. The "
+            "schema's single-agent constraint would then reject the "
+            "output and cause structured-output retry storms. "
+            "Restore the collaboration guidance or update this test "
+            "if the architecture has deliberately changed."
+        )
+
     def test_prompt_does_not_contain_misleading_drop_phrase(self) -> None:
-        """Rule 5 was rewritten to remove the misleading "silently
-        dropped downstream" phrase.
+        """Rule about invalid agent ids was rewritten to remove the
+        misleading "silently dropped downstream" phrase.
 
         Earlier prompt text implied the bridge actively dropped
         messages targeting unknown agents. That's not what happens —
@@ -206,19 +225,19 @@ class TestSystemPromptCoupling:
         the LLM understand the consequence: pick from the roster, not
         invent ids."""
         assert "silently dropped downstream" not in SYSTEM_PROMPT, (
-            "rule 5 used to say invalid agent ids would be 'silently "
-            "dropped downstream' — that was rewritten to 'the targeted "
-            "agent will not exist and the message will go unanswered' "
-            "because the bridge does NOT drop synthesized wires; the "
-            "agents simply don't pick them up. Restore the rewording."
+            "rule about invalid agent ids used to say they would be "
+            "'silently dropped downstream' — that was rewritten to "
+            "'the targeted agent will not exist and the message will "
+            "go unanswered' because the bridge does NOT drop "
+            "synthesized wires; the agents simply don't pick them up. "
+            "Restore the rewording."
         )
         # Positive anchor for the corrected wording — a future
         # rewrite that loses this guidance should fail this test
-        # rather than silently regress the LLM's understanding of
-        # rule 5.
+        # rather than silently regress the LLM's understanding.
         assert "go unanswered" in SYSTEM_PROMPT, (
-            "rule 5 should describe the failure consequence as the "
-            "message going unanswered; the current wording 'the "
-            "targeted agent will not exist and the message will go "
-            "unanswered' was lost in a later edit"
+            "the no-such-agent rule should describe the failure "
+            "consequence as the message going unanswered; the current "
+            "wording 'the targeted agent will not exist and the "
+            "message will go unanswered' was lost in a later edit"
         )

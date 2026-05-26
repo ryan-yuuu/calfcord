@@ -13,19 +13,21 @@ in the channel ran its LLM on every ambient message and posted a reply.
 "All agents talk at once" — wrong dynamic for a groupchat.
 
 After this feature: a built-in routing agent sits in front of all
-assistant agents. It receives every ambient message, decides which
-subset of agents would naturally respond (always at least one;
-typically exactly one; occasionally several), and fans out per-target
-invocations. The chosen agents reply normally. Slash and @-mention
-invocations are unaffected — they continue to route directly to the
-targeted agent.
+assistant agents. It receives every ambient message and answers a
+single question — "who is the user talking to?" — picking exactly
+one addressee. The chosen agent replies normally. If that agent
+needs input from peers, it can pull them in out-of-band via its
+`private_chat` tool; the router itself never fans out. Slash and
+@-mention invocations are unaffected — they continue to route
+directly to the targeted agent.
 
-The "always at least one" policy is enforced at the router's system
-prompt level (see `router/prompt.py`). The :class:`RoutingDecision`
-schema still allows an empty `agents` tuple structurally — defense
-in depth so a misbehaving LLM doesn't trigger pydantic-ai
-structured-output retries — and the fan-out consumer no-ops on
-empty rather than crashing.
+The "exactly one" policy is enforced two ways: at the schema level
+(`RoutingDecision.agent_id` is a single `str | None`, so multi-agent
+fan-out is impossible at the type boundary) and at the prompt level
+(see `router/prompt.py`). The schema's `agent_id=None` case is
+defense in depth — a misbehaving LLM that emits a tool call with
+no `agent_id` falls through to the fan-out consumer's no-op path
+rather than triggering pydantic-ai structured-output retry storms.
 
 The router is **built-in infrastructure**, not a user-customizable
 agent. Its definition lives in code (`router/definition.py`) and is
@@ -89,7 +91,7 @@ Four independent processes, communicating exclusively through Kafka:
                           │   - publish_topic:               │
                           │     routing.decisions            │
                           │   - LLM emits ONE                │
-                          │     dispatch(agents=[...])       │
+                          │     dispatch(agent_id="...")     │
                           │     call (ToolOutput pattern;    │
                           │     no tool body runs)           │
                           │                                  │
@@ -99,7 +101,7 @@ Four independent processes, communicating exclusively through Kafka:
                           │   - reads wire from              │
                           │     result.state.metadata        │
                           │   - synthesizes one kind=slash   │
-                          │     wire per chosen agent        │
+                          │     wire for the chosen agent    │
                           │   - publishes to                 │
                           │     bridge.synthesized.in        │
                           └──────────────────────────────────┘
@@ -120,7 +122,7 @@ to publish directly from `BridgeIngress.handle` to
    (see "Implementation notes" for why).
 3. Router agent consumes the envelope, runs its LLM with the phonebook
    roster injected as `temp_instructions`. The LLM emits one
-   `dispatch(agents=["scribe", "conan", ...])` tool call. Pydantic-ai's
+   `dispatch(agent_id="scribe", reasoning="...")` tool call. Pydantic-ai's
    `ToolOutput` pattern terminates the agent loop on that call without
    running a tool body — one LLM turn, no second-pass narration.
 4. The router's `ReturnCall` publishes to two topics (existing calfkit
@@ -131,12 +133,15 @@ to publish directly from `BridgeIngress.handle` to
    - `routing.decisions` (the router's `publish_topic`) — picked up
      by the fan-out consumer.
 5. Fan-out consumer recovers the original wire from
-   `result.state.metadata["wire"]`. For each agent id in
-   `decision.agents`:
-   - Filters out the router's own id (defensive).
-   - Synthesizes a wire copy with a fresh `event_id`, `kind="slash"`,
-     `slash_target=<agent_id>`. Channel, message id, and author are
-     preserved from the original ambient.
+   `result.state.metadata["wire"]` and processes the single
+   `decision.agent_id`:
+   - Skips the no-op cases: `agent_id=None` (defense-in-depth for a
+     misbehaving LLM), `agent_id == router_agent_id` (defensive
+     self-filter), `agent_id` not in the publisher's phonebook
+     (LLM hallucination / registry drift — ERROR log).
+   - Otherwise, synthesizes a wire copy with a fresh `event_id`,
+     `kind="slash"`, `slash_target=<agent_id>`. Channel, message id,
+     and author are preserved from the original ambient.
    - Publishes to `bridge.synthesized.in` via `invoke_node_with_metadata`,
      packing the synthesized wire into `state.metadata`. Fire-and-forget
      (the handle's future is cancelled — same pattern as
@@ -320,9 +325,11 @@ prefixed into the user content as `<name>`).
 
 The upper bound of 100 matches Discord's per-call REST cap. History
 fetches are cached in-process for 2 seconds keyed on
-`(channel_id, before_message_id, limit)` so a router fan-out to N
-agents costs one Discord call, not N. The cache is process-local and
-ephemeral; bridge restarts cold-start it.
+`(channel_id, before_message_id, limit)`. Under the single-agent
+routing policy the ambient path makes one Discord call per ambient
+message; the cache mainly absorbs the slash path's repeated fetches
+during burst typing. The cache is process-local and ephemeral; bridge
+restarts cold-start it.
 
 A2A `private_chat` is **stateless** — peer-to-peer invocations do
 not carry channel history. The caller is responsible for putting any
@@ -533,8 +540,8 @@ auto-appends the built-in router definition.
 ### `state.metadata` and the `_compat/invoke.py` helper
 
 The fan-out @consumer needs to recover the original Discord wire (so
-it can synthesize per-target wires with the right channel id, message
-id, author, etc.). The natural place for that data would be
+it can synthesize the wire with the right channel id, message id,
+author, etc.). The natural place for that data would be
 `ctx.deps.provided_deps["discord"]` — and the bridge ingress does put
 it there. But calfkit's `@consumer` decorator only exposes
 `NodeResult` to the consume function; the consume function never sees
@@ -574,7 +581,7 @@ Two callers in this project use the helper:
 - `bridge/ingress.py:_publish_ambient` — packs the original wire +
   phonebook into `state.metadata` so the router → fan-out chain can
   recover them.
-- `router/fanout.py` — packs each synthesized wire into
+- `router/fanout.py` — packs the synthesized wire into
   `state.metadata` so the bridge synthesized-in consumer can recover
   it.
 
@@ -613,16 +620,16 @@ deleted, with the fan-out publishing directly). For now: colocation.
 The router is configured with
 `final_output_type=ToolOutput(RoutingDecision, name="dispatch")`. This
 nominates a pseudo-tool whose schema is exposed to the LLM but whose
-body never runs. When the LLM calls `dispatch(agents=[...],
+body never runs. When the LLM calls `dispatch(agent_id="...",
 reasoning="...")`, pydantic-ai's `_agent_graph.py` recognizes the tool
 call as the agent's terminal output, captures the args as a
 `RoutingDecision` instance, and ends the loop with
 `end_strategy="early"`. One LLM turn, no second-pass narration to
 wrap up after tool results.
 
-This is strictly cleaner than a function-tool fan-out pattern (which
+This is strictly cleaner than a function-tool dispatch pattern (which
 would require two LLM round-trips per ambient message — one to emit
-the tool calls, one to produce a final output after tool results).
+the tool call, one to produce a final output after the tool result).
 
 ## Out of scope (deferred)
 

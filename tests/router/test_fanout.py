@@ -2,8 +2,8 @@
 
 Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
 so we exercise the gate, the metadata lookup, the router-self-filter,
-and the per-target ``invoke_node_with_metadata`` publishes — all
-without Kafka, FastStream, or an LLM.
+and the per-target ``invoke_node_with_metadata`` publish — all without
+Kafka, FastStream, or an LLM.
 
 The original :class:`WireMessage` rides on ``state.metadata`` (the
 mechanism :mod:`calfkit_organization._compat.invoke` provides);
@@ -88,10 +88,14 @@ def _phonebook_dict(agent_id: str) -> dict[str, Any]:
 
 
 def _default_phonebook() -> list[dict[str, Any]]:
-    """Phonebook covering the default decision's agent_ids
-    (``scribe`` + ``conan``). Tests that exercise unknown-id,
-    empty-phonebook, or fail-closed paths pass ``phonebook=...``
-    explicitly."""
+    """Phonebook with two agents (``scribe`` and ``conan``).
+
+    Covers the default decision's chosen agent (``scribe``) and
+    includes a second entry so tests that exercise
+    phonebook-membership behavior on a realistic multi-agent registry
+    have a non-singleton roster to assert against. Tests that need
+    unknown-id, empty-phonebook, or fail-closed paths pass
+    ``phonebook=...`` explicitly."""
     return [_phonebook_dict("scribe"), _phonebook_dict("conan")]
 
 
@@ -109,12 +113,12 @@ def _envelope(
     ``decision=None`` produces an envelope with no ``final_output_parts``
     (an intermediate hop / gate-fail case).
 
-    ``decision`` defaults to a multi-agent RoutingDecision (sentinel
-    pattern keeps ruff B008 happy — no function call in argument
-    defaults).
+    ``decision`` defaults to a single-agent RoutingDecision picking
+    ``scribe`` (sentinel pattern keeps ruff B008 happy — no function
+    call in argument defaults).
 
     ``metadata`` defaults to a dict containing the original wire and
-    a phonebook covering the default decision's agent_ids. This
+    a phonebook covering the default decision's agent_id. This
     mirrors production: the bridge ALWAYS packs the phonebook on
     ambient publishes. Pass ``None``, ``{}``, or a malformed dict to
     exercise envelope-extract error paths. When
@@ -122,8 +126,8 @@ def _envelope(
     phonebook field on the constructed envelope:
 
     * ``_PHONEBOOK_UNSET`` (default) — populates with
-      :func:`_default_phonebook` so the default decision's agents
-      are all "known" and the fan-out's happy path runs.
+      :func:`_default_phonebook` so the default decision's agent is
+      "known" and the fan-out's happy path runs.
     * ``None`` — deliberately omits the phonebook key. The fan-out's
       fail-closed-on-None path treats this as an infra bug.
     * any other value — packed as ``envelope.phonebook`` verbatim.
@@ -136,7 +140,7 @@ def _envelope(
     """
     if decision == _DEFAULT_DECISION_SENTINEL:
         decision = RoutingDecision(
-            agents=["scribe", "conan"], reasoning="topic spans both"
+            agent_id="scribe", reasoning="topic matches scribe"
         )
     state = State()
     if decision is not None:
@@ -209,7 +213,7 @@ def broker() -> MagicMock:
 
 
 class TestHappyPath:
-    async def test_publishes_one_envelope_per_chosen_agent(
+    async def test_publishes_one_envelope_for_chosen_agent(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
@@ -219,7 +223,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        assert client._invoke.await_count == 2
+        assert client._invoke.await_count == 1
 
     async def test_publishes_to_synthesized_ingress_topic(
         self, client: MagicMock, broker: MagicMock
@@ -227,7 +231,7 @@ class TestHappyPath:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
-                decision=RoutingDecision(agents=["scribe"], reasoning="match"),
+                decision=RoutingDecision(agent_id="scribe", reasoning="match"),
             ),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
@@ -237,29 +241,27 @@ class TestHappyPath:
         assert kwargs["topic"] == SYNTHESIZED_INGRESS_TOPIC
         assert kwargs["topic"] == "bridge.synthesized.in"
 
-    async def test_each_fanout_carries_fresh_event_id(
+    async def test_synthesized_wire_carries_fresh_event_id(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
-        """The synthesized wires MUST get fresh event_ids per chosen agent;
-        sharing would collide on the bridge's PendingWires map and the
-        second-arriving reply would be misattributed."""
+        """The synthesized wire MUST get a fresh event_id; reusing the
+        original ambient's id would collide on the bridge's PendingWires
+        map and the assistant's reply would be misattributed."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
                 decision=RoutingDecision(
-                    agents=["scribe", "conan"], reasoning="both"
+                    agent_id="scribe", reasoning="match"
                 ),
             ),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
             broker=broker,
         )
-        ids = [c.kwargs["correlation_id"] for c in client._invoke.await_args_list]
-        assert len(ids) == 2
-        assert ids[0] != ids[1]
-        # And neither matches the original wire's event_id (each call
-        # gets a fresh uuid7 from fanout, NOT the original).
-        assert _CORRELATION_ID not in ids
+        kwargs = client._invoke.await_args_list[0].kwargs
+        synth_event_id = kwargs["state"].metadata["wire"]["event_id"]
+        # Fresh — not the original ambient's event_id.
+        assert synth_event_id != _CORRELATION_ID
 
     async def test_synthesized_wire_overrides_kind_and_slash_target(
         self, client: MagicMock, broker: MagicMock
@@ -267,7 +269,7 @@ class TestHappyPath:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
-                decision=RoutingDecision(agents=["scribe"], reasoning="match"),
+                decision=RoutingDecision(agent_id="scribe", reasoning="match"),
             ),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
@@ -291,7 +293,7 @@ class TestHappyPath:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
-                decision=RoutingDecision(agents=["scribe"], reasoning="m"),
+                decision=RoutingDecision(agent_id="scribe", reasoning="m"),
             ),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
@@ -300,7 +302,7 @@ class TestHappyPath:
         kwargs = client._invoke.await_args_list[0].kwargs
         assert kwargs["correlation_id"] == kwargs["state"].metadata["wire"]["event_id"]
 
-    async def test_cancels_each_handles_future(
+    async def test_cancels_handle_future(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
         """Mirrors :meth:`BridgeIngress.handle`'s cancel-after-publish so
@@ -319,7 +321,7 @@ class TestHappyPath:
         await consumer.handler(
             envelope=_envelope(
                 decision=RoutingDecision(
-                    agents=["scribe", "conan"], reasoning="m"
+                    agent_id="scribe", reasoning="m"
                 ),
             ),
             correlation_id=_CORRELATION_ID,
@@ -327,21 +329,19 @@ class TestHappyPath:
             broker=broker,
         )
 
-        assert len(captured) == 2
-        assert all(h._future.cancelled() for h in captured)
+        assert len(captured) == 1
+        assert captured[0]._future.cancelled()
 
 
 class TestHistoryForwarding:
     """The fan-out forwards ``envelope.history`` from its INPUT envelope
-    (the parent that the router consumed) to every OUTPUT envelope it
+    (the parent that the router consumed) to the OUTPUT envelope it
     publishes to ``bridge.synthesized.in``.
 
     Without this forwarding, the synthesized-in consumer would receive
     an empty ``envelope.history``, pass ``prefetched_history=()`` to
-    ``BridgeIngress.handle``, and every fan-out assistant would run
-    with no channel history — defeating the single-fetch-per-fan-out
-    design (bridge fetches once at ambient publish; all fan-out
-    targets share that snapshot).
+    ``BridgeIngress.handle``, and the addressed assistant would run
+    with no channel history.
     """
 
     def _record_dicts(self) -> list[dict[str, Any]]:
@@ -366,13 +366,13 @@ class TestHistoryForwarding:
     async def test_synthesized_envelope_carries_parent_history(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
-        """Each synthesized publish must include the parent's history
+        """The synthesized publish must include the parent's history
         records in its ``state.metadata["history"]``."""
         records = self._record_dicts()
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
-                decision=RoutingDecision(agents=["scribe"], reasoning="match"),
+                decision=RoutingDecision(agent_id="scribe", reasoning="match"),
                 history=records,
             ),
             correlation_id=_CORRELATION_ID,
@@ -388,31 +388,6 @@ class TestHistoryForwarding:
         assert forwarded[0]["content"] == "hi from ryan"
         assert forwarded[1]["author_agent_id"] == "scribe"
 
-    async def test_history_forwarded_to_every_fan_out_target(
-        self, client: MagicMock, broker: MagicMock
-    ) -> None:
-        """Multi-agent decisions share one snapshot — every synthesized
-        publish carries the SAME history list."""
-        records = self._record_dicts()
-        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        await consumer.handler(
-            envelope=_envelope(
-                decision=RoutingDecision(
-                    agents=["scribe", "conan"], reasoning="both"
-                ),
-                history=records,
-            ),
-            correlation_id=_CORRELATION_ID,
-            headers=_headers(),
-            broker=broker,
-        )
-
-        assert client._invoke.await_count == 2
-        for call in client._invoke.await_args_list:
-            forwarded = call.kwargs["state"].metadata["history"]
-            assert len(forwarded) == 2
-            assert forwarded[0]["content"] == "hi from ryan"
-
     async def test_empty_history_input_produces_empty_forward(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
@@ -423,7 +398,7 @@ class TestHistoryForwarding:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
-                decision=RoutingDecision(agents=["scribe"], reasoning="m"),
+                decision=RoutingDecision(agent_id="scribe", reasoning="m"),
                 # history defaults to _HISTORY_UNSET → no history key in metadata
             ),
             correlation_id=_CORRELATION_ID,
@@ -441,62 +416,127 @@ class TestRouterSelfFilter:
         self, client: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A misbehaving LLM that picks the router's own id is filtered
-        out — synthesizing a wire to the router would loop forever."""
+        out — synthesizing a wire to the router would loop forever.
+        The skip is WARN-logged with full context (channel, author,
+        correlation_id, reasoning) so an operator investigating "agent
+        didn't reply" can distinguish a model error from a wiring
+        bug that exposed the router's id to the roster."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.INFO, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.WARNING, logger="calfkit_organization.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
-                        agents=[ROUTER_AGENT_ID, "scribe"], reasoning="m"
+                        agent_id=ROUTER_AGENT_ID, reasoning="picked self"
                     ),
                 ),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
             )
-        # Only scribe got a synthesized publish.
-        assert client._invoke.await_count == 1
-        kwargs = client._invoke.await_args.kwargs
-        assert kwargs["state"].metadata["wire"]["slash_target"] == "scribe"
-        # And we logged the skip.
-        assert any("router's own id" in r.message for r in caplog.records)
-
-    async def test_only_routers_own_id_publishes_nothing(
-        self, client: MagicMock, broker: MagicMock
-    ) -> None:
-        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        await consumer.handler(
-            envelope=_envelope(
-                decision=RoutingDecision(agents=[ROUTER_AGENT_ID], reasoning="m"),
-            ),
-            correlation_id=_CORRELATION_ID,
-            headers=_headers(),
-            broker=broker,
-        )
         assert client._invoke.await_count == 0
+        warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warn_records, "expected a WARN log line"
+        msg = warn_records[0].message
+        assert "router's own id" in msg
+        # Full context for operator debugging.
+        assert "channel=6789" in msg
+        assert "author=alice" in msg
+        assert "picked self" in msg
 
 
 class TestErrorPaths:
-    async def test_empty_agents_list_publishes_nothing(
-        self, client: MagicMock, broker: MagicMock
+    async def test_agent_id_none_publishes_nothing(
+        self,
+        client: MagicMock,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Defensive empty handling: the router's prompt requires at
-        least one agent per ambient message, but if a misbehaving LLM
-        ever emits an empty list anyway, the fan-out consumer must
+        """Defense-in-depth: the router's prompt requires picking
+        exactly one agent, but if a misbehaving LLM emits a tool call
+        with no ``agent_id`` (``None``), the fan-out consumer must
         no-op rather than crash or publish a malformed wire. The
-        schema deliberately allows empty (``min_length=0``) so this
+        schema deliberately allows ``None`` (no required=True) so this
         path stays reachable — see
-        :mod:`calfkit_organization.agents.routing` module docstring."""
+        :mod:`calfkit_organization.agents.routing` module docstring.
+
+        The skip is WARN-logged (not INFO) because ``None`` is a
+        prompt-disobedience signal — operators investigating "no agent
+        replied to this user's ambient message" need a greppable
+        signal, and the log line includes channel/author/correlation_id
+        plus the LLM's reasoning so they can diagnose why the model
+        declined to pick."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        await consumer.handler(
-            envelope=_envelope(
-                decision=RoutingDecision(agents=[], reasoning="small talk"),
-            ),
-            correlation_id=_CORRELATION_ID,
-            headers=_headers(),
-            broker=broker,
-        )
+        with caplog.at_level(logging.WARNING, logger="calfkit_organization.router.fanout"):
+            await consumer.handler(
+                envelope=_envelope(
+                    decision=RoutingDecision(reasoning="small talk; no clear addressee"),
+                ),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
         assert client._invoke.await_count == 0
+        warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warn_records, "expected a WARN log line"
+        msg = warn_records[0].message
+        assert "no agent_id" in msg
+        # Full context for operator debugging.
+        assert "channel=6789" in msg
+        assert "author=alice" in msg
+        assert "small talk; no clear addressee" in msg
+
+    async def test_publish_failure_logs_error_with_full_context(
+        self,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A broker hiccup, serialization error, or connection drop
+        during ``invoke_node_with_metadata`` would otherwise silently
+        drop the user's ambient message — the envelope is ACKed under
+        ``AckPolicy.ACK_FIRST`` so the consumer harness won't
+        redeliver. The fan-out logs ERROR with full operator-debuggable
+        context (channel, author, correlation_id, event_id, agent_id)
+        and re-raises so the harness's own consume_fn-raised ERROR
+        also fires (two signals: rich operator-greppable line from us
+        + harness's traceback). The harness catches the re-raise
+        (matches the legacy ``raise_envelope_error`` paths)."""
+        client = MagicMock()
+        client.reply_topic = "calfkit.router.reply"
+        client._invoke = AsyncMock(
+            side_effect=RuntimeError("broker hiccup")
+        )
+
+        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
+        with caplog.at_level(
+            logging.ERROR, logger="calfkit_organization.router.fanout"
+        ):
+            # The harness swallows the raise (matches the established
+            # pattern in this file — e.g. test_missing_metadata_logs_
+            # infra_error). We assert the ERROR log fires instead of
+            # relying on propagation.
+            await consumer.handler(
+                envelope=_envelope(
+                    decision=RoutingDecision(
+                        agent_id="scribe", reasoning="match"
+                    ),
+                ),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
+        publish_failure_records = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and "publish failed" in r.message
+        ]
+        assert publish_failure_records, "expected our 'publish failed' ERROR log"
+        msg = publish_failure_records[0].message
+        assert "agent=scribe" in msg
+        assert "channel=6789" in msg
+        assert "author=alice" in msg
+        assert f"correlation_id={_CORRELATION_ID}" in msg
+        # ``exc_info=True`` was passed — pytest's caplog captures the
+        # full traceback in the record's ``exc_info`` attribute.
+        assert publish_failure_records[0].exc_info is not None
 
     async def test_missing_final_output_gate_rejects(
         self, client: MagicMock, broker: MagicMock
@@ -589,52 +629,6 @@ class TestErrorPaths:
             for r in caplog.records
         )
 
-    async def test_publish_failure_for_one_target_doesnt_block_others(
-        self,
-        broker: MagicMock,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A transient broker hiccup for one target should not drop
-        the entire multi-agent reply. Strengthened to check identity:
-        the second publish must target the SECOND agent (not a retry
-        of the first). A regression that retried the failed target
-        twice would pass the count assertion but fail this one."""
-        client = MagicMock()
-        client.reply_topic = "calfkit.router.reply"
-        call_count = {"n": 0}
-
-        async def _invoke(*_a: Any, **_kw: Any) -> Any:
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise RuntimeError("first publish failed")
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            return handle
-
-        client._invoke = AsyncMock(side_effect=_invoke)
-
-        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.router.fanout"):
-            await consumer.handler(
-                envelope=_envelope(
-                    decision=RoutingDecision(
-                        agents=["scribe", "conan"], reasoning="both"
-                    ),
-                ),
-                correlation_id=_CORRELATION_ID,
-                headers=_headers(),
-                broker=broker,
-            )
-        # Both attempted; the second succeeded.
-        assert client._invoke.await_count == 2
-        assert any("publish failed" in r.message for r in caplog.records)
-        # The second call must target the second agent (conan), not a
-        # retry of the first (scribe).
-        first_metadata = client._invoke.await_args_list[0].kwargs["state"].metadata
-        second_metadata = client._invoke.await_args_list[1].kwargs["state"].metadata
-        assert first_metadata["wire"]["slash_target"] == "scribe"
-        assert second_metadata["wire"]["slash_target"] == "conan"
-
 
 class TestTypedEnvelopeError:
     """The infra-error helper now raises a typed
@@ -682,54 +676,8 @@ class TestTypedEnvelopeError:
         assert exc_info.value.__cause__ is original
 
 
-class TestDedupe:
-    """Duplicate ``agent_id`` entries in a ``RoutingDecision`` (e.g., a
-    misbehaving LLM emitting ``["scribe", "scribe"]``) MUST NOT produce
-    two synthesized invocations for the same agent. The dedupe lives
-    at the :class:`RoutingDecision` schema validator (see
-    :mod:`tests.agents.test_routing_schema`); the fan-out's job here
-    is to publish whatever ``decision.agents`` contains, having
-    already been deduplicated."""
-
-    async def test_duplicate_agent_id_published_once(
-        self, broker: MagicMock
-    ) -> None:
-        client = MagicMock()
-        client.reply_topic = "calfkit.router.reply"
-
-        async def _invoke(*_a: Any, **_kw: Any) -> Any:
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            return handle
-
-        client._invoke = AsyncMock(side_effect=_invoke)
-
-        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        # The schema dedupes at construction time: agents tuple is
-        # already ("scribe", "conan") before the fan-out ever sees it.
-        decision = RoutingDecision(
-            agents=["scribe", "scribe", "conan"],
-            reasoning="both with a dupe",
-        )
-        assert decision.agents == ("scribe", "conan")
-        await consumer.handler(
-            envelope=_envelope(decision=decision),
-            correlation_id=_CORRELATION_ID,
-            headers=_headers(),
-            broker=broker,
-        )
-        assert client._invoke.await_count == 2
-        slash_targets = {
-            client._invoke.await_args_list[i].kwargs["state"].metadata["wire"][
-                "slash_target"
-            ]
-            for i in range(2)
-        }
-        assert slash_targets == {"scribe", "conan"}
-
-
 class TestPhonebookValidation:
-    """The fan-out validates every chosen ``agent_id`` against the
+    """The fan-out validates the chosen ``agent_id`` against the
     publisher's phonebook snapshot in ``envelope.phonebook``. An
     LLM-hallucinated agent_id (passes regex, not in the registry)
     is skipped at the fan-out before any synthesized publish so it
@@ -747,12 +695,6 @@ class TestPhonebookValidation:
             "display_name": display_name or agent_id.capitalize(),
             "description": f"{agent_id} agent",
         }
-
-    @staticmethod
-    def _scribe_only_phonebook() -> list[dict[str, Any]]:
-        return [
-            TestPhonebookValidation._entry("scribe"),
-        ]
 
     @staticmethod
     def _two_agent_phonebook() -> list[dict[str, Any]]:
@@ -779,7 +721,7 @@ class TestPhonebookValidation:
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
-                        agents=["hallucinated_agent"],
+                        agent_id="hallucinated_agent",
                         reasoning="LLM picked an id that doesn't exist",
                     ),
                     phonebook=self._two_agent_phonebook(),
@@ -796,17 +738,17 @@ class TestPhonebookValidation:
             for r in caplog.records
         )
 
-    async def test_mixed_known_and_unknown_only_known_publish(
+    async def test_empty_phonebook_rejects_chosen_id(
         self,
         client: MagicMock,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """When some chosen ids are known and some aren't, the known
-        ones publish and the unknown ones are skipped with ERROR.
-        Partial degradation is correct: the LLM picked multiple
-        respondents and we shouldn't drop the good ones because of
-        one bad one."""
+        """An empty phonebook (registry has no assistants) means the
+        chosen id is by definition unknown. The fan-out rejects it
+        and publishes nothing — preventing wasted synthesized
+        publishes from an empty-registry deployment where the
+        router's LLM hallucinated anyway."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(
             logging.ERROR, logger="calfkit_organization.router.fanout"
@@ -814,50 +756,8 @@ class TestPhonebookValidation:
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
-                        agents=["scribe", "ghost", "conan"],
-                        reasoning="LLM picked scribe + a fake + conan",
-                    ),
-                    phonebook=self._two_agent_phonebook(),
-                ),
-                correlation_id=_CORRELATION_ID,
-                headers=_headers(),
-                broker=broker,
-            )
-        # scribe + conan publish; ghost is skipped.
-        assert client._invoke.await_count == 2
-        slash_targets = {
-            client._invoke.await_args_list[i].kwargs["state"].metadata["wire"][
-                "slash_target"
-            ]
-            for i in range(2)
-        }
-        assert slash_targets == {"scribe", "conan"}
-        # The skipped id produces a single ERROR.
-        assert any(
-            "unknown agent_id" in r.message and "ghost" in r.message
-            for r in caplog.records
-        )
-
-    async def test_empty_phonebook_rejects_all_chosen_ids(
-        self,
-        client: MagicMock,
-        broker: MagicMock,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """An empty phonebook (registry has no assistants) means
-        every chosen id is by definition unknown. The fan-out
-        rejects all of them and publishes nothing — preventing
-        wasted synthesized publishes from an empty-registry
-        deployment where the router's LLM hallucinated anyway."""
-        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
-        ):
-            await consumer.handler(
-                envelope=_envelope(
-                    decision=RoutingDecision(
-                        agents=["scribe", "conan"],
-                        reasoning="both",
+                        agent_id="scribe",
+                        reasoning="scribe",
                     ),
                     phonebook=[],
                 ),
@@ -875,7 +775,7 @@ class TestPhonebookValidation:
     ) -> None:
         """A missing phonebook on the ambient envelope is an infra
         bug — production producers ALWAYS pack the phonebook so the
-        fan-out can validate every chosen ``agent_id``. The fan-out
+        fan-out can validate the chosen ``agent_id``. The fan-out
         fails closed (logs ERROR and raises) rather than silently
         skipping validation, which would let LLM hallucinations
         through. This replaces the older "skip validation on None"
@@ -893,7 +793,7 @@ class TestPhonebookValidation:
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
-                        agents=["scribe", "conan"],
+                        agent_id="scribe",
                         reasoning="missing phonebook is an infra bug",
                     ),
                     phonebook=None,
@@ -908,16 +808,16 @@ class TestPhonebookValidation:
             "missing phonebook" in r.message for r in caplog.records
         )
 
-    async def test_all_known_agents_publish(
+    async def test_known_agent_publishes(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
-        """Regression positive: when every chosen id is in the
-        phonebook, the validation is silent and all publish."""
+        """Regression positive: when the chosen id is in the
+        phonebook, the validation is silent and the publish runs."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
                 decision=RoutingDecision(
-                    agents=["scribe", "conan"], reasoning="both known"
+                    agent_id="scribe", reasoning="known"
                 ),
                 phonebook=self._two_agent_phonebook(),
             ),
@@ -925,7 +825,7 @@ class TestPhonebookValidation:
             headers=_headers(),
             broker=broker,
         )
-        assert client._invoke.await_count == 2
+        assert client._invoke.await_count == 1
 
     async def test_malformed_phonebook_entry_fails_at_envelope_extract(
         self,
@@ -955,7 +855,7 @@ class TestPhonebookValidation:
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
-                        agents=["scribe"], reasoning="just scribe"
+                        agent_id="scribe", reasoning="just scribe"
                     ),
                     phonebook=phonebook,
                 ),
@@ -971,10 +871,10 @@ class TestPhonebookValidation:
 
 
 class TestReasoningIsolation:
-    """Issue 9: the routing decision's ``reasoning`` is operator-side
-    only — it must never appear in a synthesized wire's ``content``
-    (otherwise the LLM's chain-of-thought would be posted as a reply
-    to the human). Pin the boundary."""
+    """The routing decision's ``reasoning`` is operator-side only — it
+    must never appear in the synthesized wire's ``content`` (otherwise
+    the LLM's chain-of-thought would be posted as a reply to the
+    human). Pin the boundary."""
 
     async def test_reasoning_not_in_synthesized_wire_content(
         self, broker: MagicMock
@@ -994,7 +894,7 @@ class TestReasoningIsolation:
         await consumer.handler(
             envelope=_envelope(
                 decision=RoutingDecision(
-                    agents=["scribe"], reasoning=secret
+                    agent_id="scribe", reasoning=secret
                 ),
                 # Use a distinct wire content so we can grep for it.
                 wire_content="please summarize the meeting notes",

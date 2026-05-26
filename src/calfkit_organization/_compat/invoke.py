@@ -159,8 +159,7 @@ class MetadataEnvelope(BaseModel):
     instances. ``tuple`` (not ``list``) because ``frozen=True`` only
     freezes attribute reassignment, not in-place mutation of a
     mutable container — using a tuple makes the envelope deeply
-    immutable, matching :data:`RoutingDecision.agents` and
-    :data:`AgentDefinition.tools`.
+    immutable, matching :data:`AgentDefinition.tools`.
 
     **Why this lives on the envelope (not just in deps).** Calfkit's
     ``NodeResult`` does NOT expose ``Envelope.context.deps`` to

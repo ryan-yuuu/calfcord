@@ -2,7 +2,7 @@
 
 The four duplication sites
 (:class:`AgentDefinition.agent_id`, :class:`PhonebookEntry.agent_id`,
-:class:`RoutingDecision.agents`, the bridge normalizer's mention scanner)
+:class:`RoutingDecision.agent_id`, the bridge normalizer's mention scanner)
 all import from this module, so the regex can't drift between them.
 These tests pin the regex itself.
 """

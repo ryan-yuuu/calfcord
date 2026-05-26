@@ -2,9 +2,9 @@
 
 The pattern ``[a-z0-9_-]{1,32}`` appears in four places across the
 codebase: :class:`AgentDefinition.agent_id`,
-:class:`PhonebookEntry.agent_id`, :class:`RoutingDecision.agents`
-elements, and the bridge normalizer's @-mention scanner. This module
-is the canonical definition; importers should reach for
+:class:`PhonebookEntry.agent_id`, :class:`RoutingDecision.agent_id`,
+and the bridge normalizer's @-mention scanner. This module is the
+canonical definition; importers should reach for
 :data:`AGENT_ID_PATTERN` or the :data:`AgentId` annotated type rather
 than re-declaring the regex.
 
