@@ -129,6 +129,7 @@ upstream fix."""
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "claude-sonnet-4-5",
     "openai": "gpt-5-mini",
+    "openai-codex": "gpt-5.2-codex",
 }
 """Default model name per provider when neither ``definition.model`` nor
 ``CALFKIT_AGENT_DEFAULT_MODEL`` is set. Each provider's model namespace is
@@ -152,6 +153,12 @@ def _default_model_client_factory(provider: Provider, model_name: str) -> Pydant
         return AnthropicModelClient(model_name=model_name)
     if provider == "openai":
         return OpenAIModelClient(model_name=model_name)
+    if provider == "openai-codex":
+        # Lazy import: pulls in authlib + OpenHands auth machinery only when
+        # an agent actually opts in to ChatGPT subscription billing.
+        from calfkit_organization.providers.codex import build_codex_subscription_client
+
+        return build_codex_subscription_client(model_name=model_name)
     # Unreachable when ``provider`` is typed as Provider; defensive for
     # runtime callers that bypass the Literal.
     raise ValueError(

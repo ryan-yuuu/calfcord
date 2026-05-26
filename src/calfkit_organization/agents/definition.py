@@ -41,12 +41,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
 
-Provider = Literal["anthropic", "openai"]
+Provider = Literal["anthropic", "openai", "openai-codex"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.
 
 The factory maps each provider to a concrete model-client class:
     - ``"anthropic"`` → :class:`calfkit.AnthropicModelClient`
     - ``"openai"`` → :class:`calfkit.OpenAIModelClient`
+    - ``"openai-codex"`` →
+      :class:`calfkit_organization.providers.codex.CodexSubscriptionModelClient`
+      (routes through ChatGPT Plus/Pro subscription billing rather than
+      OpenAI API credits; requires ``uv run calfkit-auth codex login``).
 """
 
 ThinkingEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]

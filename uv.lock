@@ -493,6 +493,7 @@ name = "calfkit-organization"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "authlib" },
     { name = "calfkit" },
     { name = "discord-py" },
     { name = "openhands-sdk" },
@@ -512,6 +513,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "authlib", specifier = ">=1.7.2" },
     { name = "calfkit", specifier = "~=0.3.1" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },

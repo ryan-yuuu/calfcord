@@ -5,6 +5,7 @@ description = "Multi-agent organization on Discord."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "authlib>=1.7.2",
     "calfkit~=0.3.1",
     "discord-py>=2.7.1",
     "openhands-sdk>=1.23.1",
@@ -21,6 +22,7 @@ calfkit-bridge = "calfkit_organization.bridge.gateway:main"
 calfkit-agent = "calfkit_organization.agents.runner:main"
 calfkit-tools = "calfkit_organization.tools.runner:main"
 calfkit-router = "calfkit_organization.router.runner:main"
+calfkit-auth = "calfkit_organization.providers.codex.cli:main"
 
 [build-system]
 requires = ["hatchling"]
