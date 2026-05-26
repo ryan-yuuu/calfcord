@@ -121,10 +121,19 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
     without standing up Discord/Kafka. The guard prevents the worker from
     starting in an inert state where it subscribes to no topics — a
     failure mode that would be very confusing in production logs.
+
+    Empty-registry is most commonly caused by a typo in
+    ``CALFCORD_TOOLS_INCLUDE`` (per-tool images), so the SystemExit
+    message includes the env var value to short-circuit the operator's
+    "why is my registry empty" hunt.
     """
     nodes = list(registry.values())
     if not nodes:
-        raise SystemExit("TOOL_REGISTRY is empty; nothing to host")
+        include_filter = os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>"
+        raise SystemExit(
+            "TOOL_REGISTRY is empty; nothing to host "
+            f"(CALFCORD_TOOLS_INCLUDE={include_filter})"
+        )
     return nodes
 
 

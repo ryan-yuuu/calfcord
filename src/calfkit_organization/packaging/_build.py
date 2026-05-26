@@ -151,6 +151,16 @@ def run_build(
         sys.stderr.write(f"error: failed to invoke docker: {e}\n")
         sys.stderr.write(f"  Dockerfile retained at {dockerfile_path} for inspection.\n")
         return 1
+    except KeyboardInterrupt:
+        # Ctrl-C during a long build is common (multi-arch arm64 emulation
+        # is slow). The default behavior would orphan the tempdir
+        # without telling the operator where it went — print the
+        # retained path explicitly before re-raising so the standard
+        # SIGINT exit code surfaces and the dockerfile is recoverable.
+        sys.stderr.write(
+            f"\ninterrupted; Dockerfile retained at {dockerfile_path}\n"
+        )
+        raise
 
     if result.returncode != 0:
         # Leave the tempdir for forensic value — the operator likely

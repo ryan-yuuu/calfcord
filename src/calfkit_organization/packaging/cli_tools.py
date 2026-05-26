@@ -78,15 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     include_tools = _validate_tool_names(args.names)
-
-    # Pull the registry keys for the Dockerfile header banner. Same
-    # import-triggered discovery as above; cheap on second call.
-    from calfkit_organization.tools import TOOL_REGISTRY
-
-    dockerfile_content = render_tools_dockerfile(
-        include_tools=include_tools,
-        registry_keys=sorted(TOOL_REGISTRY),
-    )
+    dockerfile_content = render_tools_dockerfile(include_tools=include_tools)
 
     context = args.context if args.context is not None else repo_root()
     return run_build(

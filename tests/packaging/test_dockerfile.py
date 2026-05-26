@@ -53,10 +53,7 @@ class TestOsDepsForTools:
 
 class TestRenderToolsDockerfile:
     def _render(self, names: list[str]) -> str:
-        return render_tools_dockerfile(
-            include_tools=names,
-            registry_keys=["shell", "grep", "glob", "read_file"],
-        )
+        return render_tools_dockerfile(include_tools=names)
 
     def test_bakes_include_filter_env_var(self) -> None:
         dockerfile = self._render(["shell", "grep"])
@@ -89,8 +86,11 @@ class TestRenderToolsDockerfile:
         # Header is operator-forensic; an inspected image should
         # tell you which CLI invocation produced it.
         assert "calfcord-package-tools" in dockerfile
-        assert "grep" in dockerfile.split("\n")[0]
-        assert "shell" in dockerfile.split("\n")[0]
+        # Header banner now lives below the # syntax= directive on
+        # line 1; check the banner block (lines 2+).
+        banner_line = dockerfile.split("\n", 2)[1]
+        assert "grep" in banner_line
+        assert "shell" in banner_line
 
     def test_deterministic_ordering(self) -> None:
         # Same inputs in different order produce identical output —
@@ -109,6 +109,33 @@ class TestRenderToolsDockerfile:
         dockerfile = self._render(["shell"])
         assert "USER calfcord" in dockerfile
 
+    def test_runtime_copy_chowns_to_calfcord(self) -> None:
+        """The runtime stage's ``COPY --from=builder`` MUST set
+        ``--chown=calfcord:calfcord`` so /app is owned by the non-root
+        user. A templater bug that drops this would silently produce an
+        image where calfcord (uid 1000) can't write to /app or its
+        venv — bind-mount semantics break, .pyc compilation fails (if
+        ever re-enabled), etc. Load-bearing for the non-root model."""
+        dockerfile = self._render(["shell"])
+        assert "COPY --from=builder --chown=calfcord:calfcord /app /app" in dockerfile
+
+    def test_bakes_banner_suppression(self) -> None:
+        """Per-tool images bake OPENHANDS_SUPPRESS_BANNER=1 so boot
+        logs stay readable. Operators can still override at runtime
+        with ``-e OPENHANDS_SUPPRESS_BANNER=0``."""
+        dockerfile = self._render(["shell"])
+        assert "OPENHANDS_SUPPRESS_BANNER=1" in dockerfile
+
+    def test_syntax_directive_on_line_one(self) -> None:
+        """Docker only honors the ``# syntax=`` frontend-selector
+        directive when it's the first non-blank line of the
+        Dockerfile. A regression that puts the generated banner above
+        it would silently disable the 1.x BuildKit frontend that the
+        ``--mount=type=cache`` lines depend on."""
+        dockerfile = self._render(["shell"])
+        first_line = dockerfile.split("\n", 1)[0]
+        assert first_line.startswith("# syntax=docker/dockerfile:")
+
 
 class TestRenderAgentsDockerfile:
     def test_copies_only_selected_agents(self) -> None:
@@ -122,21 +149,23 @@ class TestRenderAgentsDockerfile:
         assert "COPY agents ./agents" not in dockerfile
 
     def test_no_tools_os_deps(self) -> None:
-        # Agent images don't host tool bodies, so tmux / ripgrep are
-        # unnecessary weight. Slice out just the apt-install block
+        # Agent images don't host tool bodies, so tmux / ripgrep / git
+        # are unnecessary weight. Slice out just the apt-install block
         # before asserting absence — the explanatory comment above
-        # the block mentions tmux/ripgrep by name to explain WHY
-        # they're not installed, which would otherwise false-positive
-        # a substring check on the whole Dockerfile.
+        # the block mentions the excluded packages by name to explain
+        # WHY they're not installed, which would otherwise
+        # false-positive a substring check on the whole Dockerfile.
         dockerfile = render_agents_dockerfile(include_agents=["scribe"])
         apt_block_start = dockerfile.index("RUN apt-get update")
         apt_block_end = dockerfile.index("rm -rf /var/lib/apt/lists/*")
         apt_block = dockerfile[apt_block_start:apt_block_end]
         assert "tmux" not in apt_block
         assert "ripgrep" not in apt_block
-        # Always-on deps still present in the block.
+        # git intentionally excluded from agent images — ~30MB savings
+        # vs. zero use case (no tool body to run git commands).
+        assert "git" not in apt_block
+        # The trust store is still needed for LLM-provider HTTP calls.
         assert "ca-certificates" in apt_block
-        assert "git" in apt_block
 
     def test_no_tools_include_env_var(self) -> None:
         dockerfile = render_agents_dockerfile(include_agents=["scribe"])
@@ -159,7 +188,32 @@ class TestRenderAgentsDockerfile:
     def test_header_names_inputs(self) -> None:
         dockerfile = render_agents_dockerfile(include_agents=["scribe"])
         assert "calfcord-package-agents" in dockerfile
-        assert "scribe" in dockerfile.split("\n")[0]
+        # Header banner now lives BELOW the # syntax= directive on
+        # line 1; look at line 2 onward for the names.
+        assert "scribe" in dockerfile.split("\n", 2)[1]
+
+    def test_runtime_copy_chowns_to_calfcord(self) -> None:
+        """Same chown contract as tools images. Bind-mount semantics
+        on the agent service depend on /app being calfcord-owned."""
+        dockerfile = render_agents_dockerfile(include_agents=["scribe"])
+        assert "COPY --from=builder --chown=calfcord:calfcord /app /app" in dockerfile
+
+    def test_bakes_banner_suppression(self) -> None:
+        dockerfile = render_agents_dockerfile(include_agents=["scribe"])
+        assert "OPENHANDS_SUPPRESS_BANNER=1" in dockerfile
+
+    def test_syntax_directive_on_line_one(self) -> None:
+        dockerfile = render_agents_dockerfile(include_agents=["scribe"])
+        first_line = dockerfile.split("\n", 1)[0]
+        assert first_line.startswith("# syntax=docker/dockerfile:")
+
+    def test_no_redundant_mkdir(self) -> None:
+        """Docker auto-creates COPY destination directories, so the
+        previously-emitted ``RUN mkdir -p ./agents`` was dead weight.
+        Pin its absence so a future "be defensive" refactor doesn't
+        silently re-add it."""
+        dockerfile = render_agents_dockerfile(include_agents=["scribe"])
+        assert "mkdir -p ./agents" not in dockerfile
 
 
 @pytest.mark.parametrize(

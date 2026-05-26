@@ -38,9 +38,16 @@ def _validate_agent_names(names: list[str], agents_dir: Path) -> list[str]:
     # Local import keeps ``--help`` cheap.
     from calfkit_organization.agents.loader import load_agents_dir
 
+    # Narrow the catch: ``load_agents_dir`` raises on missing dir
+    # (FileNotFoundError / NotADirectoryError) and on bad frontmatter
+    # (ValueError via parse_agent_md). Letting everything else
+    # propagate as a real traceback preserves the project's "infra bugs
+    # are loud" contract — a future loader change that newly raises
+    # AttributeError shouldn't be silently re-labelled "cannot load
+    # agents."
     try:
         defs = load_agents_dir(agents_dir)
-    except Exception as e:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as e:
         sys.stderr.write(f"error: cannot load agents from {agents_dir}: {e}\n")
         sys.exit(2)
 

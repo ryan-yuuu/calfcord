@@ -1,22 +1,25 @@
 """Render slim per-agent / per-tool Dockerfiles.
 
 The shape mirrors the project's canonical ``Dockerfile`` exactly,
-varying only three things:
+varying these things:
 
 1. The runtime stage's ``apt-get install`` list — narrowed by the
    per-tool OS-dep mapping (e.g. no ``tmux`` if ``shell`` isn't
    included, no ``ripgrep`` if neither ``grep`` nor ``glob`` is).
 2. The builder's ``COPY agents`` line — for per-agent images, COPYs
    only the selected ``agents/<name>.md`` files rather than the whole
-   directory.
+   directory. For per-tool images, the line is OMITTED entirely (a
+   tools-only worker has no use for agent definitions).
 3. The runtime ``ENV`` block — bakes ``CALFCORD_TOOLS_INCLUDE`` for
    per-tool images so the auto-discovery loader filters to just those
-   tools at boot.
+   tools at boot. Also bakes ``OPENHANDS_SUPPRESS_BANNER=1`` so the
+   container's boot logs aren't drowned in the openhands SDK ASCII
+   banner.
 
 If the canonical ``Dockerfile`` is ever restructured, the constants in
 this module must be updated to match. Tests in
-``tests/packaging/test_dockerfile.py`` golden-test the output so drift
-fails CI.
+``tests/packaging/test_dockerfile.py`` assert structural properties
+of the output so drift fails CI.
 
 Pure Python, no external deps — the CLIs in this package can invoke
 the templater without spinning up the full ``TOOL_REGISTRY``.
@@ -26,11 +29,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-# Always-on OS packages. ``ca-certificates`` is needed by any tool that
-# talks HTTPS; ``git`` is small and ubiquitous enough that agents and
-# operators expect it. Pulling either of these conditionally produced
-# more bugs than image-size savings in early testing.
-_ALWAYS_ON_OS_DEPS: tuple[str, ...] = ("ca-certificates", "git")
+# Always-on OS packages for TOOLS images. ``ca-certificates`` is needed
+# by any tool that talks HTTPS (web_fetch, web_search, and any
+# third-party tool an operator might add later). ``git`` is small (~5MB)
+# and the ``shell`` tool's most common ergonomic use — agents asking
+# for ``git status`` / ``git log`` — only works if the binary is
+# present. Removing either to save a few MB would trade image size for
+# "works in dev, fails in prod" surprises.
+_ALWAYS_ON_TOOL_OS_DEPS: tuple[str, ...] = ("ca-certificates", "git")
+
+# Always-on OS packages for AGENTS images. Narrower than the tools set:
+# agent containers don't host tool bodies, so ``git`` is dead weight
+# (~30MB on disk). Keep ``ca-certificates`` because the LLM-provider
+# HTTP clients (anthropic, openai SDKs) need a trust store.
+_ALWAYS_ON_AGENT_OS_DEPS: tuple[str, ...] = ("ca-certificates",)
 
 # Per-tool OS-dep mapping. Tools not listed here imply no extra OS
 # packages — they're pure Python. When adding a new tool that needs an
@@ -57,12 +69,12 @@ _TOOL_OS_DEPS: dict[str, tuple[str, ...]] = {
 def os_deps_for_tools(include_tools: Iterable[str]) -> list[str]:
     """Return the sorted union of OS package names needed for the given tools.
 
-    Includes :data:`_ALWAYS_ON_OS_DEPS` regardless of the tool list.
-    Unknown tool names are silently skipped — validation happens at the
-    CLI layer, not here, so the templater stays loose-coupled to the
-    live ``TOOL_REGISTRY``.
+    Includes :data:`_ALWAYS_ON_TOOL_OS_DEPS` regardless of the tool
+    list. Unknown tool names are silently skipped — validation happens
+    at the CLI layer, not here, so the templater stays loose-coupled
+    to the live ``TOOL_REGISTRY``.
     """
-    deps: set[str] = set(_ALWAYS_ON_OS_DEPS)
+    deps: set[str] = set(_ALWAYS_ON_TOOL_OS_DEPS)
     for tool in include_tools:
         deps.update(_TOOL_OS_DEPS.get(tool, ()))
     return sorted(deps)
@@ -100,31 +112,29 @@ def _generated_header(*, kind: str, names: Iterable[str]) -> str:
 def render_tools_dockerfile(
     *,
     include_tools: list[str],
-    registry_keys: list[str],
 ) -> str:
     """Render a Dockerfile for an image hosting only ``include_tools``.
 
     Args:
-        include_tools: Tool schema names to include. Must be a subset
-            of ``registry_keys`` — validation is the CLI's job; this
-            function trusts its input.
-        registry_keys: The full set of known tool names. Used to
-            stamp the file's header comment for forensic value
-            (an operator inspecting a built image can tell which
-            calfcord version produced it).
+        include_tools: Tool schema names to include. Validation against
+            ``TOOL_REGISTRY`` is the CLI's job; this function trusts
+            its input.
 
     Returns:
         The complete Dockerfile content as a string, ready to write
         to a tempdir and feed to ``docker buildx build``.
     """
-    _ = registry_keys  # currently unused; kept for the header-stamping plan
     apt_block = _render_apt_install(os_deps_for_tools(include_tools))
     include_csv = ",".join(sorted(include_tools))
     header = _generated_header(kind="tools", names=include_tools)
 
-    return f"""{header}
-# syntax=docker/dockerfile:1.7
-#
+    # ``# syntax=`` MUST be on line 1 of the Dockerfile for Docker's
+    # frontend selector to honor it. The generated banner comment goes
+    # below the directive — Docker still treats the rest of the file
+    # correctly, but the syntax directive's "first non-blank,
+    # non-directive line" rule means the banner can't be above it.
+    return f"""# syntax=docker/dockerfile:1.7
+{header}#
 # Per-tool calfcord image. Hosts ONLY: {include_csv}
 #
 # Tools subscribe to ``tool.<name>.input`` topics; this image's
@@ -164,9 +174,16 @@ RUN groupadd --gid ${{GID}} calfcord \\
 
 WORKDIR /app
 
+# OPENHANDS_SUPPRESS_BANNER silences the openhands SDK's ASCII boot
+# banner. The banner is operationally noise (printed on every import
+# of the openhands package, before any calfcord work begins) and
+# pollutes both compose-logs output and ad-hoc ``docker run`` sessions
+# operators use to inspect the registry. The override survives any
+# ``-e OPENHANDS_SUPPRESS_BANNER=0`` the operator passes at run time.
 ENV PATH=/app/.venv/bin:$PATH \\
     PYTHONUNBUFFERED=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
+    OPENHANDS_SUPPRESS_BANNER=1 \\
     CALFCORD_TOOLS_INCLUDE={include_csv}
 
 COPY --from=builder --chown=calfcord:calfcord /app /app
@@ -194,26 +211,30 @@ def render_agents_dockerfile(
 
     Returns:
         Complete Dockerfile content. Differs from
-        :func:`render_tools_dockerfile` in three places:
+        :func:`render_tools_dockerfile`:
 
         * No ``CALFCORD_TOOLS_INCLUDE`` (agent images don't host tools).
-        * No ``tmux`` / ``ripgrep`` (same reason).
+        * No ``tmux`` / ``ripgrep`` / ``git`` (agent containers don't
+          execute tool bodies).
         * The ``COPY agents`` line names individual files instead of
           the whole directory, so the image's ``/app/agents/`` only
           contains the selected agents.
     """
     # Agent images don't host tools, so no tool-driven OS deps.
-    apt_block = _render_apt_install(_ALWAYS_ON_OS_DEPS)
+    apt_block = _render_apt_install(_ALWAYS_ON_AGENT_OS_DEPS)
     header = _generated_header(kind="agents", names=include_agents)
     # COPY each agent's .md file individually. Sorted for deterministic
     # layer hashes — same inputs produce byte-identical Dockerfiles.
+    # No explicit ``mkdir -p ./agents`` needed: Docker auto-creates
+    # COPY destination directories.
     agent_copy_lines = "\n".join(
         f"COPY agents/{name}.md ./agents/{name}.md" for name in sorted(include_agents)
     )
 
-    return f"""{header}
-# syntax=docker/dockerfile:1.7
-#
+    # ``# syntax=`` must be on line 1 — same constraint as the tools
+    # render. The banner header goes below.
+    return f"""# syntax=docker/dockerfile:1.7
+{header}#
 # Per-agent calfcord image. Hosts ONLY: {", ".join(sorted(include_agents))}
 #
 # The image's ``/app/agents/`` contains only the listed agent .md
@@ -241,14 +262,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \\
 # Per-agent COPY: only the .md files explicitly named in the build
 # command end up in the image. Agents not in the list literally
 # don't exist inside this container.
-RUN mkdir -p ./agents
 {agent_copy_lines}
 
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
-# OS packages: agent images don't run tool bodies, so no tmux/ripgrep.
+# OS packages: agent images don't run tool bodies, so no tmux/ripgrep/git.
 {apt_block}
 
 ARG UID=1000
@@ -258,9 +278,12 @@ RUN groupadd --gid ${{GID}} calfcord \\
 
 WORKDIR /app
 
+# OPENHANDS_SUPPRESS_BANNER silences the openhands SDK's ASCII boot
+# banner. Same rationale as the tools image — boot-log signal/noise.
 ENV PATH=/app/.venv/bin:$PATH \\
     PYTHONUNBUFFERED=1 \\
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \\
+    OPENHANDS_SUPPRESS_BANNER=1
 
 COPY --from=builder --chown=calfcord:calfcord /app /app
 

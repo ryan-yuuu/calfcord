@@ -203,3 +203,22 @@ def discover_tools(
                 tool_name,
                 origin,
             )
+
+    # If the include filter named tools that don't exist in this
+    # package, every one of them was silently skipped above. Warn at
+    # WARNING level so operators with a typo in their
+    # ``CALFCORD_TOOLS_INCLUDE`` env var see the cause — without this,
+    # a typo produces an empty registry and the only downstream signal
+    # is ``_resolve_tool_nodes``'s "registry is empty" SystemExit,
+    # which doesn't name the filter as the cause.
+    if include_set is not None:
+        unknown_in_filter = include_set - {
+            name for name, origin in origins.items() if origin != "<pre-populated>"
+        }
+        if unknown_in_filter:
+            logger.warning(
+                "CALFCORD_TOOLS_INCLUDE names not found in discovered tools: %s; "
+                "discovered: %s",
+                sorted(unknown_in_filter),
+                sorted(registry),
+            )

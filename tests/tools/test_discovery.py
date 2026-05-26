@@ -431,3 +431,134 @@ def test_dunder_all_does_not_gate_discovery(
     registry: dict[str, ToolNodeDef] = {}
     discover_tools(pkg, registry)
     assert "included" in registry
+
+
+# ── CALFCORD_TOOLS_INCLUDE filter ─────────────────────────────────────────
+#
+# The filter is the load-bearing half of the per-tool image story (PR 5):
+# images bake ``ENV CALFCORD_TOOLS_INCLUDE=...`` so the same calfcord
+# image hosts a different tool subset at boot. The tests below pin every
+# documented edge case of ``_resolve_include_filter`` and the
+# ``discover_tools`` skip branch.
+
+
+def _three_tool_pkg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pkg_name: str):
+    """Build a fixture package with three tools (alpha, beta, gamma).
+
+    Returns the imported package object, ready for ``discover_tools``.
+    Used by every filter test so the fixture is consistent and the
+    test bodies focus on the include-set behavior under test.
+    """
+    _write_package(
+        tmp_path,
+        pkg_name,
+        {
+            "alpha": _tool_source("alpha"),
+            "beta": _tool_source("beta"),
+            "gamma": _tool_source("gamma"),
+        },
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return _import_fresh(pkg_name)
+
+
+def test_include_filter_restricts_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CALFCORD_TOOLS_INCLUDE=alpha,gamma`` registers only those two."""
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha,gamma")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_filter_subset")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "gamma"}
+
+
+def test_include_filter_unset_registers_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default behavior when the env var is absent — every tool registers."""
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_filter_unset")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "beta", "gamma"}
+
+
+def test_include_filter_empty_string_treated_as_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty string == unset. Pins the documented semantic so a future
+    refactor that changes "empty" to mean "register nothing" fails CI."""
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_filter_empty")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "beta", "gamma"}
+
+
+def test_include_filter_whitespace_only_treated_as_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-with-commas is the kind of thing that ends up in a
+    hand-edited ``.env``. Must normalize to "no filter," not "empty
+    include list."""
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "  ,  ")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_filter_whitespace")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "beta", "gamma"}
+
+
+def test_include_filter_unknown_name_yields_empty_registry_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo in the env var (``shel`` instead of ``shell``) produces an
+    empty registry. ``discover_tools`` MUST emit a WARNING with the
+    typo'd name so the operator's "why is my registry empty"
+    investigation lands on the cause immediately."""
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "definitely_not_a_tool")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_filter_typo")
+
+    registry: dict[str, ToolNodeDef] = {}
+    with caplog.at_level("WARNING"):
+        discover_tools(pkg, registry)
+    assert registry == {}
+    # The warning message must name the typo'd entry AND list what was
+    # actually discovered — both are needed for the operator to
+    # diagnose the typo without grepping the source.
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("definitely_not_a_tool" in m for m in warnings), (
+        f"expected a WARNING naming the unknown filter entry; got: {warnings}"
+    )
+
+
+def test_include_filter_does_not_short_circuit_import_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filter is applied AFTER import. A broken module in the
+    package must still fail loud even when the filter would have
+    excluded it — preserves the ``ImportError`` propagation contract
+    documented in the module docstring."""
+    pkg_name = "fake_pkg_filter_and_broken"
+    _write_package(
+        tmp_path,
+        pkg_name,
+        {
+            "alpha": _tool_source("alpha"),
+            "broken": "raise ImportError('intentionally broken')\n",
+        },
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pkg = _import_fresh(pkg_name)
+
+    # Filter would skip ``broken`` even by name, but it's processed
+    # alphabetically BEFORE alpha, so its import error fires before
+    # the filter ever gets to consider it.
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha")
+    registry: dict[str, ToolNodeDef] = {}
+    with pytest.raises(ImportError, match="intentionally broken"):
+        discover_tools(pkg, registry)

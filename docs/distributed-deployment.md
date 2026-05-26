@@ -215,15 +215,30 @@ Caveats:
 
 ## 7. Failure modes
 
-**Remote tool host down.** The agent's calfkit RPC times out at 60s
-(overridable via `CALFKIT_TOOLS_TIMEOUT_SECONDS`). The LLM gets an
-`error: target 'shell' did not reply within 60s` string and can adapt
-— typically by reporting to the user or trying a different tool. The
-bridge and agent stay up.
+**Remote tool host down.** Behavior depends on which tool the agent
+invoked:
+
+- **`private_chat`** has a 60-second default A2A timeout (overridable
+  via `CALFKIT_TOOLS_TIMEOUT_SECONDS`). When the target agent is
+  unreachable, the caller's LLM gets an `error: target 'X' did not
+  reply within 60s` string and can adapt.
+- **Every other builtin tool** (`shell`, `read_file`, etc.) currently
+  has **no default per-call timeout** at the calfkit layer. If the
+  tool's host is down, the calling agent's `execute_node` RPC blocks
+  until the broker drops the connection or the operator restarts the
+  agent. Mitigation: enforce a deadline inside the tool body itself
+  (e.g. `shell`'s upstream openhands executor accepts a `timeout`
+  arg), or rely on Docker / supervisor health-restart of the calling
+  agent process. A future calfkit release may add a default
+  per-tool-call timeout; track that upstream.
+
+In either case, the bridge and agent processes themselves stay up —
+only the in-flight call hangs.
 
 **Broker partition / network blip.** Standard Kafka semantics; aiokafka
-reconnects automatically. In-flight RPCs time out as above; subsequent
-calls succeed once the network recovers.
+reconnects automatically. `private_chat` calls in flight time out per
+the 60s rule above; other tool calls remain blocked until reconnect
+unless the tool body imposes its own deadline.
 
 **Multiple tool hosts on the same `tool.<name>.input` topic.** Kafka
 consumer-group semantics: each partition delivers to exactly one

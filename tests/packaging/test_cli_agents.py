@@ -78,6 +78,32 @@ class TestNameValidation:
         assert code == 2
         assert "agents directory not found" in stderr
 
+    def test_malformed_agent_md_surfaces_as_exit_2(self, tmp_path: Path) -> None:
+        """An ``agents/<name>.md`` with bad frontmatter must fail the
+        CLI build with an actionable message — that's the explicit
+        rationale for using ``load_agents_dir`` over a bare
+        ``Path.exists`` check (PR 5 design intent). Without this test
+        a future refactor that swaps the validator for a file-only
+        check would silently regress."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        # Invalid frontmatter: ``name`` must match the agent_id
+        # pattern ``[a-z0-9_-]{1,32}``. Spaces fail validation.
+        (agents_dir / "bad.md").write_text(
+            "---\n"
+            "name: 'bad name with spaces'\n"
+            "slash: /bad\n"
+            "display_name: Bad\n"
+            "description: malformed for testing.\n"
+            "---\n"
+            "Body.\n"
+        )
+        code, _, stderr = _run(
+            ["bad", "--tag", "x:1", "--dry-run", "--context", str(tmp_path)],
+        )
+        assert code == 2
+        assert "cannot load agents" in stderr
+
 
 class TestArgparseSurface:
     def test_help_shows_usage(self) -> None:

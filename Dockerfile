@@ -82,10 +82,16 @@ WORKDIR /app
 
 # PATH puts the venv's bin first so the entry-point scripts resolve
 # without a wrapper. PYTHONUNBUFFERED makes ``docker compose logs`` show
-# stdout/stderr in real time.
+# stdout/stderr in real time. OPENHANDS_SUPPRESS_BANNER silences the
+# openhands SDK's ASCII boot banner — it's printed unconditionally on
+# first import of the openhands package and pollutes both
+# ``docker compose logs`` and ad-hoc ``docker run`` sessions that
+# inspect the tool registry. Operators who want the banner can
+# override with ``-e OPENHANDS_SUPPRESS_BANNER=0`` at run time.
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    OPENHANDS_SUPPRESS_BANNER=1
 
 # Copy the venv + source from the builder. ``--chown`` sets ownership
 # in one step rather than running ``chown -R`` post-copy (which would
