@@ -122,6 +122,60 @@ class TestMakePersistCallback:
 
         store.save.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_callback_swallows_non_int_expires_in(self) -> None:
+        """H1 regression: a refresh response with a non-int ``expires_in``
+        raises ValueError from ``int(...)``. The callback must catch it and
+        skip persistence — otherwise the exception escapes through authlib's
+        ``await update_token`` and kills the in-flight HTTP request."""
+        store = MagicMock()
+        callback = make_persist_callback(store)
+
+        # Should NOT raise — callback runs inside authlib's request hot path
+        await callback({"access_token": "x", "refresh_token": "y", "expires_in": "soon"})
+
+        store.save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_callback_swallows_oserror_from_store_save(self) -> None:
+        """H1 regression: disk failures during ``store.save`` (disk full,
+        EACCES, EROFS) must not propagate into authlib's request path. The
+        in-memory token is already updated by authlib at this point; the
+        request must continue."""
+        store = MagicMock()
+        store.save.side_effect = OSError("disk full")
+        callback = make_persist_callback(store)
+
+        token = {
+            "token_type": "Bearer",
+            "access_token": "x",
+            "refresh_token": "y",
+            "expires_at": int(time.time()) + 3600,
+        }
+        # Must not raise
+        await callback(token)
+        store.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_callback_swallows_unexpected_exception(self) -> None:
+        """H1 regression: any unexpected exception (pydantic ValidationError
+        on a future schema drift, a custom CredentialStore subclass raising
+        something exotic) must be caught so authlib's refresh path stays
+        alive. The catch-all is defensive — callbacks in someone else's
+        critical path should never tear down the caller."""
+        store = MagicMock()
+        store.save.side_effect = RuntimeError("unexpected internal error")
+        callback = make_persist_callback(store)
+
+        token = {
+            "token_type": "Bearer",
+            "access_token": "x",
+            "refresh_token": "y",
+            "expires_at": int(time.time()) + 3600,
+        }
+        # Must not raise
+        await callback(token)
+
 
 class TestGetCredentialsDir:
     def test_default_path(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -366,6 +366,68 @@ class TestUpstreamParseFailures:
         with pytest.raises(CodexPromptsUnavailableError, match="not a list"):
             await resolver.ensure_loaded()
 
+    async def test_200_with_garbage_does_not_poison_existing_cache(
+        self, tmp_path: Path
+    ) -> None:
+        """C2 regression: if upstream serves a 200 with malformed body
+        (transient bad deploy, content-type mismatch, partial response),
+        the fetcher must NOT overwrite the on-disk cache. Without the
+        validator-before-save guard, the next ensure_loaded would send
+        If-None-Match against the bad ETag, get 304, and re-raise — permanent
+        breakage until manual ``calfkit-auth codex clear-prompts``.
+        """
+        cache = PromptCache(base_dir=tmp_path / "cache")
+        # Pre-populate with a valid, parseable body + ETag.
+        good_body = json.dumps(
+            {"models": [{"slug": "gpt-5.2", "base_instructions": "GOOD CACHED"}]}
+        ).encode()
+        cache.save("models.json", good_body, etag="good-etag")
+        cache.save("prompt.md", SAMPLE_PROMPT_MD, etag="prompt-etag")
+
+        # Upstream returns 200 + garbage that would silently corrupt the cache.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == MODELS_JSON_URL:
+                return httpx.Response(
+                    200, content=b"not json at all", headers={"etag": "evil-etag"}
+                )
+            return httpx.Response(304)  # prompt.md cache hit
+
+        def factory() -> httpx.AsyncClient:
+            return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        resolver = PromptResolver(cache=cache, http_client_factory=factory)
+        # Should succeed by falling back to the prior cached body.
+        await resolver.ensure_loaded()
+        assert resolver.resolve("gpt-5.2") == "GOOD CACHED"
+
+        # The disk cache must still hold the OLD body and OLD etag — the
+        # garbage 200 must not have been written.
+        reread = cache.load("models.json")
+        assert reread is not None
+        assert reread.body == good_body
+        assert reread.etag == "good-etag"
+
+    async def test_200_with_garbage_no_cache_raises(self, tmp_path: Path) -> None:
+        """C2 regression: when no cache exists, a malformed upstream 200 must
+        hard-fail at bootstrap rather than silently caching the garbage and
+        raising at parse time (which would still leave the cache poisoned)."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == MODELS_JSON_URL:
+                return httpx.Response(
+                    200, content=b"<html>error page</html>", headers={"etag": "junk"}
+                )
+            return httpx.Response(200, content=SAMPLE_PROMPT_MD)
+
+        def factory() -> httpx.AsyncClient:
+            return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        cache = PromptCache(base_dir=tmp_path / "cache")
+        resolver = PromptResolver(cache=cache, http_client_factory=factory)
+        with pytest.raises(CodexPromptsUnavailableError, match="unusable body"):
+            await resolver.ensure_loaded()
+        # Cache must remain empty — no garbage written
+        assert cache.load("models.json") is None
+
     async def test_models_entry_missing_fields_skipped(self, tmp_path: Path) -> None:
         body = json.dumps(
             {

@@ -49,7 +49,7 @@ from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.factory import AgentFactory
+from calfkit_organization.agents.factory import AgentFactory, resolve_provider
 from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
 from calfkit_organization.router.fanout import build_fanout_consumer
 
@@ -158,26 +158,43 @@ def _build_router_nodes(
     return [router_node, fanout_node]
 
 
+async def _prewarm_codex_if_needed(definition: AgentDefinition) -> None:
+    """If the router uses openai-codex, prewarm the prompt cache.
+
+    Uses :func:`resolve_provider` rather than ``definition.provider``
+    directly so the ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env-var fallback
+    is honoured. Today :func:`build_router_definition` always sets
+    ``provider`` explicitly, but resolve_provider future-proofs against
+    a refactor that lets it be ``None``.
+
+    Raises:
+        BootstrapError: if the upstream prompt fetch fails AND no cache
+            exists. Includes a hint pointing the operator at
+            ``calfkit-auth codex refresh-prompts``.
+    """
+    if resolve_provider(definition) != "openai-codex":
+        return
+    # Lazy import: keeps authlib + openhands-sdk auth machinery out of the
+    # import graph for deployments that don't use Codex subscription.
+    from calfkit_organization.providers.codex import (
+        CodexPromptsUnavailableError,
+        prewarm_codex_prompts,
+    )
+    try:
+        await prewarm_codex_prompts()
+    except CodexPromptsUnavailableError as exc:
+        raise BootstrapError(
+            f"openai-codex router declared but upstream Codex prompts "
+            f"are unavailable: {exc}. Check internet connectivity, or "
+            f"run once: uv run calfkit-auth codex refresh-prompts"
+        ) from exc
+
+
 async def _amain() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
     definition = build_router_definition()
-    needs_codex = definition.provider == "openai-codex"
-    if needs_codex:
-        # Lazy import: keeps authlib + openhands-sdk auth machinery out of
-        # the import graph for deployments that don't use Codex subscription.
-        from calfkit_organization.providers.codex import (
-            CodexPromptsUnavailableError,
-            prewarm_codex_prompts,
-        )
-        try:
-            await prewarm_codex_prompts()
-        except CodexPromptsUnavailableError as exc:
-            raise BootstrapError(
-                f"openai-codex router declared but upstream Codex prompts "
-                f"are unavailable: {exc}. Check internet connectivity, or "
-                f"run once: uv run calfkit-auth codex refresh-prompts"
-            ) from exc
+    await _prewarm_codex_if_needed(definition)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client:
         # Eagerly start the broker so the reply dispatcher is live

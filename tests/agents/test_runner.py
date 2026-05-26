@@ -16,6 +16,7 @@ from calfkit_organization.agents.runner import (
     _load_or_bootstrap_state,
     _parse_args,
     _parse_channel_ids,
+    _prewarm_codex_if_needed,
     _resolve_agent_specs,
     _run_worker,
     bootstrap_env_var,
@@ -591,3 +592,92 @@ class TestRunWorker:
         # The drain log line is exercised by the real-signal path which
         # we can't unit-test portably; this test guards against the
         # cancel/drain path hanging or raising the wrong exception type.
+
+
+class TestPrewarmCodexIfNeeded:
+    """``_prewarm_codex_if_needed`` is the runner's bridge between agent specs
+    and the openai-codex prompt resolver. Must invoke prewarm exactly when at
+    least one resolved agent ends up on the openai-codex provider — including
+    via the ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env-var path, which a naive
+    ``spec.provider == "openai-codex"`` check would miss for agents that omit
+    the frontmatter field entirely.
+    """
+
+    def _spec(self, provider: str | None) -> tuple:
+        """Build a (definition, state, store) triple matching the runner's spec shape."""
+        definition = MagicMock(spec=AgentDefinition)
+        definition.provider = provider
+        definition.agent_id = "test-agent"
+        return (definition, MagicMock(spec=AgentRuntimeState), MagicMock(spec=AgentStateStore))
+
+    @pytest.mark.asyncio
+    async def test_skips_prewarm_when_no_codex_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No agent declares openai-codex and no env-var override — prewarm
+        must NOT be invoked (avoids the authlib/openhands-sdk import cost for
+        non-codex deployments)."""
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        called = False
+
+        async def _fake_prewarm() -> None:
+            nonlocal called
+            called = True
+
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", _fake_prewarm)
+        await _prewarm_codex_if_needed([self._spec("anthropic"), self._spec("openai")])
+        assert called is False
+
+    @pytest.mark.asyncio
+    async def test_invokes_prewarm_when_any_agent_declares_openai_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        prewarm = AsyncMock()
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
+        await _prewarm_codex_if_needed(
+            [self._spec("anthropic"), self._spec("openai-codex")]
+        )
+        prewarm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_invokes_prewarm_when_env_var_default_is_openai_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard for the C1 fix: an agent that omits ``provider:``
+        from its frontmatter must still trigger prewarm when the operator has
+        set ``CALFKIT_AGENT_DEFAULT_PROVIDER=openai-codex``. The pre-fix
+        check (``spec[0].provider == "openai-codex"``) saw ``None`` and
+        silently skipped, leaving the factory to crash mid-construction with
+        an opaque RuntimeError."""
+        monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai-codex")
+        prewarm = AsyncMock()
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
+        # Agent's frontmatter omits provider; only the env var selects codex.
+        await _prewarm_codex_if_needed([self._spec(None)])
+        prewarm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_converts_codex_prompts_unavailable_to_bootstrap_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When upstream prompts can't be fetched and no cache exists, the
+        runner must wrap the typed exception in BootstrapError with a hint
+        pointing the operator at the CLI — otherwise the worker process would
+        crash with an unactionable traceback."""
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
+        import calfkit_organization.providers.codex as codex_pkg
+
+        async def _failing_prewarm() -> None:
+            raise CodexPromptsUnavailableError("simulated network failure")
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", _failing_prewarm)
+        with pytest.raises(BootstrapError, match="refresh-prompts"):
+            await _prewarm_codex_if_needed([self._spec("openai-codex")])

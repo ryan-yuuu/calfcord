@@ -97,3 +97,71 @@ class TestRunWorkerShutdownContract:
         worker.run = AsyncMock(side_effect=returns_immediately)
         with pytest.raises(RuntimeError, match="returned unexpectedly"):
             await runner._run_worker(worker)
+
+
+class TestPrewarmCodexIfNeeded:
+    """Router-side equivalent of the agents-runner prewarm bridge. Must invoke
+    prewarm when the router definition resolves to openai-codex (including via
+    the env-var default-provider path), skip otherwise, and convert upstream
+    failures into BootstrapError."""
+
+    def _definition(self, provider: str | None):
+        from calfkit_organization.agents.definition import AgentDefinition
+
+        definition = MagicMock(spec=AgentDefinition)
+        definition.provider = provider
+        definition.agent_id = "router"
+        return definition
+
+    @pytest.mark.asyncio
+    async def test_skips_prewarm_when_router_not_openai_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        prewarm = AsyncMock()
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
+        await runner._prewarm_codex_if_needed(self._definition("anthropic"))
+        prewarm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invokes_prewarm_when_router_uses_openai_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        prewarm = AsyncMock()
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
+        await runner._prewarm_codex_if_needed(self._definition("openai-codex"))
+        prewarm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_invokes_prewarm_when_env_var_default_is_openai_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Future-proofs against a router-definition refactor that lets
+        ``provider`` be None — the env-var fallback must still trigger prewarm."""
+        monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai-codex")
+        prewarm = AsyncMock()
+        import calfkit_organization.providers.codex as codex_pkg
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
+        await runner._prewarm_codex_if_needed(self._definition(None))
+        prewarm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_converts_codex_prompts_unavailable_to_bootstrap_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
+        import calfkit_organization.providers.codex as codex_pkg
+
+        async def _failing_prewarm() -> None:
+            raise CodexPromptsUnavailableError("simulated network failure")
+
+        monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", _failing_prewarm)
+        with pytest.raises(runner.BootstrapError, match="refresh-prompts"):
+            await runner._prewarm_codex_if_needed(self._definition("openai-codex"))

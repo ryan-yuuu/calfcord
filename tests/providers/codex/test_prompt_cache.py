@@ -103,7 +103,7 @@ class TestLoadFailureModes:
 
 
 class TestClear:
-    def test_clear_removes_all_files(self, tmp_path: Path) -> None:
+    def test_clear_removes_body_and_meta_files(self, tmp_path: Path) -> None:
         cache = _make_cache(tmp_path)
         cache.save("models.json", b"a", etag="e1")
         cache.save("prompt.md", b"b", etag="e2")
@@ -113,9 +113,37 @@ class TestClear:
         cache.clear()
 
         assert cache.files() == []
-        # All siblings should be gone too (body + meta + lock).
+        # Body + meta files should be gone; lock files are preserved
+        # (see test_clear_preserves_lock_files for the rationale).
         remaining = sorted(p.name for p in cache.base_dir.iterdir() if p.is_file())
-        assert remaining == []
+        assert all(name.endswith(".lock") for name in remaining)
+
+    def test_clear_preserves_lock_files(self, tmp_path: Path) -> None:
+        """H2 regression: clear() must NOT unlink ``.lock`` files. A concurrent
+        writer in another process may be holding ``<name>.lock`` via filelock;
+        unlinking the lock file races against the in-flight save (POSIX creates
+        a new inode at the same path on next save; Windows raises OSError).
+
+        We can't easily simulate a concurrent live filelock in a unit test
+        (filelock cleans up its sentinel files on POSIX after release), so we
+        place a sentinel ``.lock`` file directly and verify ``clear()`` leaves
+        it alone.
+        """
+        cache = _make_cache(tmp_path)
+        cache.save("models.json", b"a", etag="e1")
+        # Simulate a concurrent writer's lock file being present.
+        sentinel_lock = cache.base_dir / "in-flight.lock"
+        sentinel_lock.write_text("")
+        assert sentinel_lock.exists()
+
+        cache.clear()
+
+        # Lock file must survive the clear so the in-flight writer's
+        # coordination isn't undermined.
+        assert sentinel_lock.exists()
+        # Body + meta should be gone, only the lock remains.
+        remaining = sorted(p.name for p in cache.base_dir.iterdir() if p.is_file())
+        assert remaining == ["in-flight.lock"]
 
     def test_clear_tolerates_missing_dir(self, tmp_path: Path) -> None:
         cache = PromptCache(base_dir=tmp_path / "never-existed")

@@ -96,12 +96,43 @@ def make_persist_callback(store: CredentialStore):
         # callbacks that need diffing; we ignore them — the new values live in
         # ``token``.
         del refresh_token, access_token
+        # This callback runs inside authlib's request hot path. Authlib has
+        # ALREADY updated its in-memory token by the time we're invoked; any
+        # exception escaping here propagates up through ``await update_token``
+        # and kills the in-flight HTTP request the user is waiting on. None
+        # of the failures below are worth tearing down a healthy refresh — the
+        # in-memory token is good either way and the next process restart will
+        # force a fresh refresh that re-attempts persistence.
         try:
             creds = authlib_token_to_credentials(token)
-        except KeyError as exc:
-            logger.error("Refresh response missing required field; not persisting: %s", exc)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error(
+                "Codex refresh response is malformed (%s); skipping persistence. "
+                "In-memory token still valid until process restart.",
+                exc,
+            )
             return
-        store.save(creds)
+        try:
+            store.save(creds)
+        except OSError as exc:
+            logger.error(
+                "Could not persist refreshed Codex credentials (%s). "
+                "In-memory token is valid; restart will force re-refresh. "
+                "Check disk space and permissions on the credential dir.",
+                exc,
+            )
+            return
+        except Exception:
+            # Defensive catch-all: anything unexpected (pydantic ValidationError
+            # on a future schema drift, a third-party CredentialStore subclass
+            # raising something exotic, etc.) gets logged with a full traceback
+            # and swallowed. The in-flight refresh stays alive; the operator
+            # sees the issue in logs.
+            logger.exception(
+                "Unexpected error persisting refreshed Codex credentials; "
+                "in-memory token is valid until process restart"
+            )
+            return
         logger.info("Codex access token refreshed; new expiry in %ds", creds.expires_at // 1000 - int(time.time()))
 
     return _persist

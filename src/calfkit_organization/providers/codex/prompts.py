@@ -64,6 +64,42 @@ class CodexPromptsUnavailableError(RuntimeError):
     """
 
 
+class _BodyValidationError(RuntimeError):
+    """Internal: raised by ``_validate_body`` when an upstream 200 body is
+    structurally unusable. Never escapes ``_fetch_one`` — it's translated to
+    either a cache fallback (when cache is present) or
+    ``CodexPromptsUnavailableError`` (when cache is empty).
+    """
+
+
+def _validate_body(cache_name: str, body: bytes) -> None:
+    """Verify a freshly fetched upstream body is structurally usable.
+
+    For ``models.json`` we parse and assert the top-level shape we depend on —
+    so a 200 response carrying garbage (caching layer mishap, content-type
+    mismatch, partial body) is rejected before it can poison the disk cache.
+    For ``prompt.md`` we only check it decodes as UTF-8 and isn't empty.
+    """
+    if cache_name == _MODELS_CACHE_NAME:
+        try:
+            doc = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise _BodyValidationError(f"not valid JSON: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise _BodyValidationError("top-level JSON is not an object")
+        if not isinstance(doc.get("models"), list):
+            raise _BodyValidationError("'models' field is missing or not a list")
+        return
+    if cache_name == _FALLBACK_CACHE_NAME:
+        if not body:
+            raise _BodyValidationError("body is empty")
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise _BodyValidationError(f"not valid UTF-8: {exc}") from exc
+        return
+
+
 class PromptResolver:
     """In-memory store of Codex CLI system prompts.
 
@@ -249,6 +285,24 @@ class PromptResolver:
 
         body = resp.content
         etag = resp.headers.get("etag")
+        # Validate body shape BEFORE writing to disk. Otherwise an upstream blip
+        # that returns 200 with malformed content (transient bad deploy, content
+        # type mismatch, edge cache serving stale fragments) would poison the
+        # cache, and the next ensure_loaded would 304 against the bad ETag and
+        # re-raise — permanent breakage until `calfkit-auth codex clear-prompts`.
+        try:
+            _validate_body(cache_name, body)
+        except _BodyValidationError as exc:
+            if cached is not None:
+                logger.error(
+                    "Upstream %s returned 200 but body is unusable (%s); "
+                    "keeping prior cached body, NOT overwriting cache",
+                    url, exc,
+                )
+                return cached.body
+            raise CodexPromptsUnavailableError(
+                f"Upstream {url} returned 200 with unusable body and no cache: {exc}"
+            ) from exc
         self._cache.save(cache_name, body, etag)
         return body
 

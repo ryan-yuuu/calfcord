@@ -155,14 +155,22 @@ class PromptCache:
             self._atomic_write_bytes(meta_path, meta_payload)
 
     def clear(self) -> None:
-        """Remove every cached body, meta, and lock file in the cache dir.
+        """Remove every cached body and meta file in the cache dir.
+
+        ``.lock`` files are preserved so a concurrent writer in another
+        process (holding ``<name>.lock`` via filelock) doesn't get its
+        coordination file pulled out from under it. On POSIX unlinking a
+        held lock file silently creates a new inode at the same path on
+        next save, racing the in-flight writer; on Windows the unlink
+        would raise. Leaving them in place is harmless — they're empty
+        coordination artifacts that get reused.
 
         Safe to call on a missing directory.
         """
         if not self._base_dir.exists():
             return
         for entry in self._base_dir.iterdir():
-            if not entry.is_file():
+            if not entry.is_file() or entry.suffix == ".lock":
                 continue
             try:
                 entry.unlink()

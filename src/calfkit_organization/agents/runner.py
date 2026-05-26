@@ -69,7 +69,7 @@ from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.factory import AgentFactory
+from calfkit_organization.agents.factory import AgentFactory, resolve_provider
 from calfkit_organization.agents.loader import load_agents_dir
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.discord.persona import DiscordPersonaSender
@@ -396,29 +396,50 @@ async def _run_worker(worker: Worker, *, num_agents: int) -> None:
         raise worker_exc
 
 
+async def _prewarm_codex_if_needed(
+    specs: list[tuple[AgentDefinition, AgentRuntimeState, AgentStateStore]],
+) -> None:
+    """If any spec uses the openai-codex provider, prewarm the prompt cache.
+
+    Uses :func:`resolve_provider` rather than reading ``spec[0].provider``
+    directly so the ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env-var fallback is
+    honoured — a bare attribute access would be ``None`` for any agent that
+    omits ``provider:`` from its frontmatter, even if the operator selected
+    openai-codex globally via env var. Missing that case would skip prewarm
+    and crash mid-factory with an opaque ``RuntimeError`` instead of the
+    actionable :class:`BootstrapError` raised here.
+
+    Raises:
+        BootstrapError: if the upstream prompt fetch fails AND no cache
+            exists. Includes a hint pointing the operator at
+            ``calfkit-auth codex refresh-prompts``.
+    """
+    needs_codex = any(resolve_provider(spec[0]) == "openai-codex" for spec in specs)
+    if not needs_codex:
+        return
+    # Lazy import: keeps authlib + openhands-sdk auth machinery out of the
+    # import graph for deployments that don't use Codex subscription.
+    from calfkit_organization.providers.codex import (
+        CodexPromptsUnavailableError,
+        prewarm_codex_prompts,
+    )
+    try:
+        await prewarm_codex_prompts()
+    except CodexPromptsUnavailableError as exc:
+        raise BootstrapError(
+            f"openai-codex agents declared but upstream Codex prompts "
+            f"are unavailable: {exc}. Check internet connectivity, or "
+            f"run once: uv run calfkit-auth codex refresh-prompts"
+        ) from exc
+
+
 async def _amain(args: argparse.Namespace) -> None:
     """Build and run the agent(s). Pure-ish: callers configure logging+env."""
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
     state_dir = Path(os.getenv(_STATE_DIR_ENV, _STATE_DIR_DEFAULT))
 
     specs = await _resolve_agent_specs(args.agent, agents_dir, state_dir)
-
-    needs_codex = any(spec[0].provider == "openai-codex" for spec in specs)
-    if needs_codex:
-        # Lazy import: keeps authlib + openhands-sdk auth machinery out of
-        # the import graph for deployments that don't use Codex subscription.
-        from calfkit_organization.providers.codex import (
-            CodexPromptsUnavailableError,
-            prewarm_codex_prompts,
-        )
-        try:
-            await prewarm_codex_prompts()
-        except CodexPromptsUnavailableError as exc:
-            raise BootstrapError(
-                f"openai-codex agents declared but upstream Codex prompts "
-                f"are unavailable: {exc}. Check internet connectivity, or "
-                f"run once: uv run calfkit-auth codex refresh-prompts"
-            ) from exc
+    await _prewarm_codex_if_needed(specs)
 
     settings = DiscordSettings()  # type: ignore[call-arg]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
