@@ -90,7 +90,7 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
 
     The router agent is **filtered out** of the phonebook: it has no
     A2A inbox (``agent.{id}.in`` topic) so it can't receive
-    :func:`~calfkit_organization.tools.private_chat.private_chat`
+    :func:`~calfkit_organization.tools.builtin.private_chat.private_chat`
     invocations, and listing it as a peer would mislead assistants'
     LLMs into trying to call it (the call would publish to a topic
     with no consumer and time out). The router fan-out's per-call

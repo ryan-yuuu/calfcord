@@ -18,7 +18,8 @@ import pytest
 from calfkit.worker import Worker
 
 from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.tools import private_chat, runner
+from calfkit_organization.tools import runner
+from calfkit_organization.tools.builtin import private_chat
 
 
 class TestResolveTimeout:

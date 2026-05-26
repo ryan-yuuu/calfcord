@@ -44,7 +44,8 @@ from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.sender import DiscordSender
 from calfkit_organization.discord.settings import DiscordSettings
-from calfkit_organization.tools import TOOL_REGISTRY, private_chat
+from calfkit_organization.tools import TOOL_REGISTRY
+from calfkit_organization.tools.builtin import private_chat
 
 logger = logging.getLogger(__name__)
 

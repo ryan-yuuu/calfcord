@@ -1,6 +1,6 @@
 """Integration tests linking the agent-side wiring with the tool-side runner.
 
-The unit tests in :mod:`tests.tools.test_private_chat` exercise the tool
+The unit tests in :mod:`tests.tools.builtin.test_private_chat` exercise the tool
 body in isolation, and :mod:`tests.agents.test_factory` exercises the
 factory's tool-resolution path against a fake registry. These tests
 connect the two: an agent declared with ``tools: [private_chat]`` must
@@ -32,7 +32,7 @@ from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.tools import TOOL_REGISTRY
-from calfkit_organization.tools.private_chat import private_chat_tool
+from calfkit_organization.tools.builtin.private_chat import private_chat_tool
 
 
 def _definition(tools: tuple[str, ...]) -> AgentDefinition:
@@ -127,7 +127,7 @@ class TestWireConventionRoundTrip:
         self,
     ) -> None:
         from calfkit_organization.agents.phonebook import phonebook_from_deps
-        from calfkit_organization.tools import private_chat as pc
+        from calfkit_organization.tools.builtin import private_chat as pc
 
         # Stub calfkit Client to capture the deps the bridge writes —
         # no Kafka, no real publish. Reuses the same fixture pattern as

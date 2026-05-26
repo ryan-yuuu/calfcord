@@ -91,7 +91,7 @@ _AGENT_INBOX_TOPIC_TEMPLATE: Final[str] = "agent.{agent_id}.in"
 """Per-agent inbox topic. The outbox's retry path publishes to this
 topic to re-invoke the agent with a revised request. Must match
 :data:`calfkit_organization.agents.factory._AGENT_INBOX_TOPIC_TEMPLATE`
-and :data:`calfkit_organization.tools.private_chat._AGENT_INBOX_TOPIC_TEMPLATE`."""
+and :data:`calfkit_organization.tools.builtin.private_chat._AGENT_INBOX_TOPIC_TEMPLATE`."""
 
 
 def build_outbox_consumer(

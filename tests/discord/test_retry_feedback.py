@@ -2,7 +2,7 @@
 
 Covers the pure helpers consumed by both
 :mod:`calfkit_organization.bridge.outbox` (channel replies, async
-republish) and :mod:`calfkit_organization.tools.private_chat` (A2A
+republish) and :mod:`calfkit_organization.tools.builtin.private_chat` (A2A
 audit projections, sync re-invocation):
 
 * :func:`build_retry_reminder` — pure function shape, override map.

@@ -9,27 +9,39 @@ tool advertising) and its subscribe topic (where ``Agent`` publishes a
 ``Call`` when the LLM invokes the tool).
 
 Adding a new tool:
-    1. Define the tool function under ``calfkit_organization.tools`` and
-       decorate with ``@agent_tool`` to produce a :class:`ToolNodeDef`.
-    2. Register it in :data:`TOOL_REGISTRY` below by importing the
-       module and inserting the node by its tool name.
-    3. The ``calfkit-tools`` runner imports the same node and registers
-       it on its :class:`Worker` so the body runs in that process.
+    1. Drop a ``.py`` file in ``src/calfkit_organization/tools/builtin/``
+       that declares an ``async def`` decorated by :func:`agent_tool` and
+       assigns the resulting :class:`ToolNodeDef` to a module-level
+       attribute (the convention is ``<name>_tool``).
+    2. Restart ``calfkit-tools``. The auto-discovery loader at
+       :func:`~calfkit_organization.tools.discovery.discover_tools` walks
+       ``tools/builtin/`` at import time and registers every
+       :class:`ToolNodeDef` it finds — no edits to this file required.
+    3. The ``calfkit-tools`` runner picks up the same registry and hosts
+       the tool's body. The agent process imports this module solely for
+       the schema + subscribe-topic that the LLM dispatch needs.
+
+See :mod:`calfkit_organization.tools.discovery` for the discovery rules
+(file naming, collision handling, re-export dedup) and
+``docs/authoring-tools.md`` for the contributor walkthrough.
 """
 
 from __future__ import annotations
 
 from calfkit.nodes.tool import ToolNodeDef
 
-# The registry is intentionally defined BEFORE any tool module is imported.
-# Tool modules transitively import bridge code, which imports agent code,
-# which imports the agent factory, which imports back into this module —
-# the registry name must already exist by that point so the cycle resolves
-# to an empty dict (then mutated below once the imports complete).
+# ``TOOL_REGISTRY`` must be a defined name before the builtin package
+# is imported below. Tool modules transitively import back into this
+# package (via bridge/agent code), and Python resolves the cycle by
+# binding to whatever ``TOOL_REGISTRY`` references at that point — an
+# empty dict here, mutated by ``discover_tools`` once the cycle resolves.
 TOOL_REGISTRY: dict[str, ToolNodeDef] = {}
-"""Tool name → :class:`ToolNodeDef`. Keep entries in alphabetical order
-for easy scanning."""
+"""Tool name → :class:`ToolNodeDef`. Populated at import time by
+:func:`~calfkit_organization.tools.discovery.discover_tools` walking
+``tools/builtin/``. Order of insertion is deterministic (alphabetical by
+module then by attribute name) so boot logs are reproducible."""
 
-from calfkit_organization.tools.private_chat import private_chat_tool  # noqa: E402
+from calfkit_organization.tools import builtin as _builtin  # noqa: E402
+from calfkit_organization.tools.discovery import discover_tools  # noqa: E402
 
-TOOL_REGISTRY["private_chat"] = private_chat_tool
+discover_tools(_builtin, TOOL_REGISTRY)
