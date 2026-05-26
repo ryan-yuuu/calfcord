@@ -81,6 +81,6 @@ jobs:
         # notes from PRs merged between the prior tag and this one.
         # Conventional commit prefixes (``feat:``, ``fix:``, ...) make
         # the auto-grouping readable.
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
