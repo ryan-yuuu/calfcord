@@ -1,4 +1,4 @@
-# calfcord
+# Calfcord
 
 [![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
@@ -88,6 +88,8 @@ Calfcord ships 11 builtin tools out of the box. Declare them in an agent's `tool
 | `todo_write` | Replace the calling agent's task list. |
 
 Tools are auto-discovered from `src/calfkit_organization/tools/builtin/` at boot — drop a `.py` file there with a `*_tool: ToolNodeDef = agent_tool(...)` at module bottom and the next `calfkit-tools` restart picks it up. Full authoring guide: [`docs/authoring-tools.md`](./docs/authoring-tools.md).
+
+Tools are location-transparent over Kafka. By default every tool runs in the same `calfkit-tools` container, but you can build a slim image hosting only a subset (e.g. just `shell`) and deploy it on a separate host — agents elsewhere call it the same way. See [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
 
 ## Agent-to-agent communication
 
@@ -232,6 +234,7 @@ tests/                  # pytest suite
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — adding and configuring agents.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — adding a builtin tool.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
+- [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — splitting tools and agents across hosts.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
 - [`docs/design/`](./docs/design/) — historical design notes.

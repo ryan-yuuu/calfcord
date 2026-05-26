@@ -1,0 +1,290 @@
+# Distributed Deployments
+
+How to split calfcord across multiple hosts by building slim per-tool or
+per-agent images and pointing them at a shared Kafka broker. This is the
+operator reference for the packaging CLIs introduced in PR 5; for the
+single-host default, the README's `Running` section still applies.
+
+The two CLIs are local-only — they build images, they don't push them.
+Operators push to whichever registry they want via plain `docker push`
+after the build. See `docs/security.md` § Distributed deployments for
+the threat model that goes with this.
+
+## 1. Why split
+
+Tools are location-transparent over Kafka. An agent declaring
+`tools: [shell]` can't tell whether the `calfkit-tools` process
+answering on `tool.shell.input` is on the same host or behind a
+Tailscale exit node — calfkit's RPC layer abstracts the wire and
+calfcord inherits the contract.
+
+The killer use case is the **remote shell tool**. Run
+`calfcord-package-tools shell` on a remote dev box with that box's
+project bind-mounted at `/workspace`. Run the bridge + router + agent
+on your laptop. When the agent's LLM calls `shell("git log")`, the
+command executes against the remote box's filesystem — the LLM never
+knew the difference, but the side effects landed on a different
+machine.
+
+When NOT to split: single-host deployments don't benefit. The shipped
+`calfcord:latest` image hosts every tool and every agent on one
+process; if you're on a laptop or a single VPS, `docker compose up` is
+fine. Splitting only buys something when the tool surface needs to
+reach resources on a different host than the agents.
+
+## 2. Building a per-tool image
+
+The basic shape:
+
+```bash
+uv run calfcord-package-tools shell --tag my-shell:1.0
+```
+
+That writes a slim Dockerfile that filters tool discovery via the
+`CALFCORD_TOOLS_INCLUDE=shell` env var (consumed by
+`src/calfkit_organization/tools/discovery.py`) and installs only the
+OS deps that `shell` actually needs (`tmux` for persistent sessions,
+plus the always-on `ca-certificates`). The image is materially smaller
+than `calfcord:latest`:
+
+```bash
+docker image inspect my-shell:1.0 --format '{{.Size}}'
+```
+
+Verify the resulting registry contains only the tools you asked for:
+
+```bash
+docker run --rm --entrypoint /bin/sh my-shell:1.0 \
+  -c "python -c 'from calfkit_organization.tools import TOOL_REGISTRY; print(sorted(TOOL_REGISTRY))'"
+# ['shell']
+```
+
+OS-dep slimming is per-tool: `shell` brings `tmux`; `grep` and `glob`
+bring `ripgrep`; web tools (`web_fetch`, `web_search`) bring
+`ca-certificates` (which is always on regardless of which tools you
+pick). Other builtins bring nothing extra.
+
+Multiple tools in one image:
+
+```bash
+uv run calfcord-package-tools shell read_file write_file edit_file \
+  --tag my-coding-tools:1.0
+```
+
+To inspect the generated Dockerfile without building anything, pass
+`--dry-run`:
+
+```bash
+uv run calfcord-package-tools shell --tag my-shell:1.0 --dry-run
+```
+
+NOTE: v1 does no Python-dep slimming. Every generated image installs the
+full `pyproject.toml` deps. The size win comes from OS-dep slimming and
+from skipping unused tool *code paths* at runtime, not from a smaller
+Python wheel set.
+
+## 3. Building a per-agent image
+
+```bash
+uv run calfcord-package-agents scribe --tag my-scribe:1.0
+```
+
+The generated Dockerfile `COPY`s only `agents/scribe.md` instead of the
+full `agents/` directory. The selected agents are wired into the same
+`calfkit-agent` entrypoint as the all-in-one image.
+
+This is mostly useful for crash isolation per agent (a misbehaving
+agent's container can restart without touching its peers). Most
+deployments don't need it — the all-in-one `calfkit-agent` Worker hosts
+every agent in one process without trouble. If you do split, list each
+agent's image as its own compose service with `restart: unless-stopped`
+so the supervisor recovers them independently.
+
+## 4. Worked example: remote shell tool
+
+Two hosts: **laptop** runs broker + bridge + router + agent; **builder**
+(a remote dev box) runs only the shell tool against its own project
+directory.
+
+**Network prereq.** Builder needs to reach the broker. For trusted
+hosts, run **Tailscale** or **WireGuard** between them — broker stays
+unauthenticated, the overlay is the perimeter. For public-internet
+exposure, use SASL/SCRAM + TLS (see § 5). This walkthrough assumes
+Tailscale with hostnames `laptop` and `builder`.
+
+**Laptop side.** Bring up the broker plus everything EXCEPT the
+all-in-one tools (the remote box owns `shell`; see § 9 for excluding
+it from the local tools process if you keep one):
+
+```bash
+docker compose up -d redpanda bridge router agent
+```
+
+Redpanda's external listener is already published on `:19092`. Verify
+from builder: `rpk cluster info --brokers=laptop:19092`.
+
+**Remote host.** On builder, with the project directory at
+`/home/me/my-project`:
+
+```bash
+docker run -d \
+  --name calfcord-shell \
+  --restart unless-stopped \
+  -e CALF_HOST_URL=laptop:19092 \
+  -e DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN \
+  -e DISCORD_APPLICATION_ID=$DISCORD_APPLICATION_ID \
+  -e DISCORD_GUILD_ID=$DISCORD_GUILD_ID \
+  -e CALFCORD_WORKSPACE_DIR=/workspace \
+  -v /home/me/my-project:/workspace \
+  my-shell:1.0
+```
+
+The Discord env vars are required because `calfkit-tools` boots an
+`A2AChannelResolver` for the audit channel even when no A2A tool is
+hosted (see `src/calfkit_organization/tools/runner.py`).
+
+**Verify.** In Discord: `` @scribe please run `pwd && uname -a` via shell ``.
+The reply should contain builder's hostname and `/workspace` — proving
+the call landed on the remote box. If you see laptop's hostname, you
+have a duplicate `shell` consumer; see § 9.
+
+## 5. Broker authentication
+
+The default Redpanda runs with `--mode=dev-container` (see
+`docker-compose.yml`) — **no authentication, no TLS**. Fine on
+localhost or a trusted overlay. NOT fine on the public internet.
+
+**Trusted overlay (recommended for small teams).** Tailscale or
+WireGuard between every host. The broker stays unauthenticated; the
+overlay is the perimeter. No SASL config, no certs to rotate. Configure
+the broker to advertise its tailnet address rather than `localhost`:
+
+```yaml
+# in docker-compose.yml's redpanda command, swap external advertise:
+- --advertise-kafka-addr=internal://redpanda:9092,external://laptop:19092
+```
+
+**SASL/SCRAM + TLS.** Broker exposed on the public internet, gated by
+auth. Redpanda configures this via `rpk cluster config set` plus
+`rpk acl user create` — see the
+[Redpanda security docs](https://docs.redpanda.com/current/manage/security/authentication/)
+for the canonical setup. Two calfcord-specific notes:
+
+- **The Kafka client is `aiokafka`** (via calfkit). The standard env
+  vars (`KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`,
+  `KAFKA_SASL_PASSWORD`, plus TLS cert paths) are the upstream contract.
+  calfcord's `runner.py` currently only forwards `CALF_HOST_URL`; if
+  your deployment needs SASL, the auth env vars need to be plumbed
+  through at the calfkit level. File a calfkit issue describing what
+  you need — this is a follow-up, not a blocker.
+- **Broker auth IS the perimeter.** Anyone who can publish to
+  `tool.<name>.input` can invoke that tool with arbitrary arguments.
+  Rotate broker credentials like you rotate the Discord bot token.
+
+For most ops teams on shared infra, the overlay path is the lazier-but-
+secure default; SASL is the option when overlay networking isn't
+available.
+
+## 6. Workspace mount semantics
+
+Per-tool images consume the same `CALFCORD_WORKSPACE_DIR` env var as
+the all-in-one image. Bind-mount the project root into that path:
+
+```bash
+docker run -e CALFCORD_WORKSPACE_DIR=/workspace \
+           -v /home/me/my-project:/workspace \
+           my-shell:1.0
+```
+
+Once mounted, `read_file("foo.py")` inside the container operates on
+`/workspace/foo.py`, which is `/home/me/my-project/foo.py` on the host.
+Same path-resolution semantics as the default compose deployment (see
+`docs/security.md` § 1).
+
+Caveats:
+
+- **UID alignment matters on Linux.** The shipped Dockerfile runs as
+  UID 1000; if the host directory is owned by a different UID, the
+  tool process sees permission errors on writes. Rebuild with
+  `--build-arg UID=$(id -u) GID=$(id -g)` or chown to match. macOS
+  Docker Desktop handles this automatically.
+- **Read/write reaches everything under the mount.** The shell tool
+  can `rm -rf /workspace`. Pick the mount target deliberately.
+- **Symlinks follow.** A symlink inside the workspace that points to
+  `$HOME/.ssh` will be dereferenced inside the container.
+
+## 7. Failure modes
+
+**Remote tool host down.** The agent's calfkit RPC times out at 60s
+(overridable via `CALFKIT_TOOLS_TIMEOUT_SECONDS`). The LLM gets an
+`error: target 'shell' did not reply within 60s` string and can adapt
+— typically by reporting to the user or trying a different tool. The
+bridge and agent stay up.
+
+**Broker partition / network blip.** Standard Kafka semantics; aiokafka
+reconnects automatically. In-flight RPCs time out as above; subsequent
+calls succeed once the network recovers.
+
+**Multiple tool hosts on the same `tool.<name>.input` topic.** Kafka
+consumer-group semantics: each partition delivers to exactly one
+consumer in the group. With calfcord's single-partition default,
+exactly one consumer receives each call — effectively random per call.
+To intentionally scale horizontally, bump the partition count; to pin
+a tool to one host, see § 9.
+
+**Empty registry.** A per-tool image where `CALFCORD_TOOLS_INCLUDE`
+filters down to nothing fails fast in `runner.py` with `TOOL_REGISTRY
+is empty; nothing to host`. Separately, the agent boot hard-fails with
+a "known tools: …" error if its `tools:` list references a name not in
+its agent-side registry — that's an agent-side check, not a tool-side
+one.
+
+## 8. What changes when you split
+
+Almost nothing, by design.
+
+- **Agent definitions stay identical.** An agent with
+  `tools: [shell, web_fetch]` works the same whether the tools are in
+  one image, in two images on two hosts, or in the all-in-one
+  `calfcord:latest`. Kafka topic names don't change.
+- **Per-tool log isolation.** A misbehaving tool can crash its own
+  container without taking down the others; compose's
+  `restart: unless-stopped` recovers each independently.
+- **Independent rollout.** Ship a new `shell` by redeploying only
+  the `my-shell` image — the bridge never read the tool code, so it
+  needs no restart.
+- **No tool-authoring change.** The packaging CLIs change deployment
+  topology, not the contract. `docs/authoring-tools.md`'s rules (the
+  `agent_tool` decorator, the `"error: "` discriminator, the
+  `RuntimeError` boundary) are unchanged.
+
+## 9. Combining with all-in-one
+
+You can run `calfcord:latest` on host A AND a per-tool image like
+`my-shell:1.0` on host B at the same time. Kafka load-balances calls to
+`tool.shell.input` between them via consumer-group semantics — but
+because each call lands on exactly ONE of the two consumers, the
+effective behavior is "shell runs on either A or B, randomly per call".
+This is almost never what you want.
+
+To pin `shell` to the remote host:
+
+```bash
+# On host A (the all-in-one), exclude shell from the tool registry:
+docker run -e CALFCORD_TOOLS_INCLUDE=read_file,write_file,edit_file,grep,glob,web_fetch,web_search,todo_view,todo_write,private_chat \
+           calfcord:latest calfkit-tools
+```
+
+Now host A serves every tool *except* shell; host B serves shell only;
+each tool has exactly one host responsible for it. This is the
+intended distributed shape.
+
+The same `CALFCORD_TOOLS_INCLUDE` env var is consumed by both the slim
+images (where it's baked into the Dockerfile's `ENV`) and the all-in-one
+image (where you set it at `docker run` time). The semantics are
+identical: filter `tools/discovery.py`'s scan down to the listed names.
+
+For the broader security model that goes with running tools on multiple
+hosts, see `docs/security.md` § Distributed deployments. For the
+tool-authoring contract those tools still need to follow, see
+`docs/authoring-tools.md`.

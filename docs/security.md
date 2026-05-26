@@ -322,3 +322,53 @@ predict — please report it privately via the process documented in
 `SECURITY.md` at the repo root. Don't open a public issue first; the
 GitHub Security Advisory path keeps the report off the public tracker
 until there's a fix to disclose.
+
+## 7. Distributed deployments: securing the broker
+
+The threat model above assumes a single-host deployment where the
+broker only listens on localhost. Once you split calfcord across hosts
+— see `docs/distributed-deployment.md` for the operational walkthrough
+— the broker becomes the network perimeter, and the default
+`--mode=dev-container` Redpanda setup is no longer adequate.
+
+The shipped `docker-compose.yml` starts Redpanda **unauthenticated and
+without TLS**. That is fine when the broker only listens on `localhost`
+or only on a trusted overlay's interface. It is NOT fine when the
+broker is reachable over any network the operator does not control.
+
+### 7.1 Two paths for cross-network deployments
+
+**Trusted overlay (recommended).** Run Tailscale, WireGuard, or an
+equivalent overlay between every host. Bind the broker only to the
+overlay's interface so it is unreachable from anywhere else. The
+broker stays unauthenticated; the overlay is the perimeter. Win: no
+SASL config, no cert rotation, no extra moving parts.
+
+**SASL/SCRAM + TLS.** Broker exposed publicly, gated by auth.
+Configure via `rpk cluster config set` + `rpk acl user create` per
+the [Redpanda security docs](https://docs.redpanda.com/current/manage/security/authentication/).
+Note that calfcord's `runner.py` currently only forwards
+`CALF_HOST_URL`; the standard aiokafka SASL/SSL env vars
+(`KAFKA_SASL_MECHANISM`, etc.) need to be plumbed through at the
+calfkit level for now. Treat this as a follow-up if you need it; it
+does not affect the trusted-overlay path.
+
+### 7.2 What broker compromise looks like
+
+Anyone who can publish to `tool.<name>.input` on the broker can
+**invoke that tool with arbitrary arguments**. The tools-image host
+blindly executes whatever calls come in — the trusted-workspace model
+from § 1 assumes the broker is also trusted. There is no per-call
+signing, no per-caller allowlist, no replay protection beyond what
+Kafka inherently provides.
+
+The implication: for distributed deployments, **broker auth IS the
+perimeter** for tool invocation. Rotate broker credentials like you
+rotate the Discord bot token (§ 5.1). A leaked broker password gives
+the holder the same blast radius as a leaked bot token gives them
+inside Discord.
+
+For the operational mechanics of splitting calfcord across hosts —
+including the network prereq, per-tool image build, and
+`CALFCORD_TOOLS_INCLUDE` pinning — see
+[`docs/distributed-deployment.md`](./distributed-deployment.md).

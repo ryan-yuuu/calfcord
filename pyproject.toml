@@ -23,6 +23,8 @@ calfkit-agent = "calfkit_organization.agents.runner:main"
 calfkit-tools = "calfkit_organization.tools.runner:main"
 calfkit-router = "calfkit_organization.router.runner:main"
 calfkit-auth = "calfkit_organization.providers.codex.cli:main"
+calfcord-package-tools = "calfkit_organization.packaging.cli_tools:main"
+calfcord-package-agents = "calfkit_organization.packaging.cli_agents:main"
 
 [build-system]
 requires = ["hatchling"]

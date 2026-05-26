@@ -67,12 +67,43 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import pkgutil
 from types import ModuleType
 
 from calfkit.nodes.tool import ToolNodeDef
 
 logger = logging.getLogger(__name__)
+
+_INCLUDE_ENV = "CALFCORD_TOOLS_INCLUDE"
+"""Env var that, when set, restricts registration to a comma-separated list
+of tool schema names. Used by per-tool images built with
+``calfcord-package-tools`` to host only the subset they were built for.
+Unset (or empty) means "register everything the walk finds" — the
+default for the all-in-one image.
+
+The filter happens AFTER the import has succeeded, so a tool's heavy
+deps still load (no Python-dep slimming in v1). The win is wire-level:
+the worker subscribes to only the listed ``tool.<name>.input`` topics,
+and the boot log shows operators exactly which surface the container
+serves."""
+
+
+def _resolve_include_filter() -> set[str] | None:
+    """Parse ``CALFCORD_TOOLS_INCLUDE`` into a set of tool names, or ``None``.
+
+    Empty / unset env returns ``None`` so the caller can use ``is None``
+    as the "no filter" signal — cleaner than checking for an empty set.
+    Whitespace-only values are also treated as unset (defensive against
+    a stray space in an env file).
+    """
+    raw = os.environ.get(_INCLUDE_ENV, "").strip()
+    if not raw:
+        return None
+    names = {name.strip() for name in raw.split(",") if name.strip()}
+    if not names:
+        return None
+    return names
 
 
 def discover_tools(
@@ -114,6 +145,12 @@ def discover_tools(
     # known origin (they were pre-populated by the caller); we surface that
     # explicitly with ``<pre-populated>`` in the message.
     origins: dict[str, str] = {name: "<pre-populated>" for name in registry}
+    include_set = _resolve_include_filter()
+    if include_set is not None:
+        logger.info(
+            "CALFCORD_TOOLS_INCLUDE is set; only registering tools in: %s",
+            sorted(include_set),
+        )
     modules = sorted(pkgutil.iter_modules(package.__path__), key=lambda m: m.name)
     for mod_info in modules:
         # Underscore prefix marks "private support module, not a tool" — same
@@ -141,6 +178,19 @@ def discover_tools(
             seen.add(id(value))
             tool_name = value.tool_schema.name
             origin = f"{full_name}:{attr_name}"
+            # CALFCORD_TOOLS_INCLUDE filter: skip tools not on the list.
+            # Applied AFTER the module import + ToolNodeDef discovery so
+            # the import-error contract (broken modules fail loud)
+            # stays intact regardless of whether the tool ends up
+            # registered. Logs at DEBUG to keep boot output tidy when
+            # the filter is doing its job; the INFO line above already
+            # told operators what's coming.
+            if include_set is not None and tool_name not in include_set:
+                logger.debug(
+                    "skipping tool=%s (not in CALFCORD_TOOLS_INCLUDE)",
+                    tool_name,
+                )
+                continue
             if tool_name in registry:
                 raise ValueError(
                     f"tool name {tool_name!r} from {origin} collides with "

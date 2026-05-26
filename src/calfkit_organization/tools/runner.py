@@ -225,13 +225,14 @@ async def _amain() -> None:
         worker = Worker(client, tool_nodes)
         logger.info(
             "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s "
-            "timeout_s=%.1f a2a_channel=%s a2a_category=%s",
+            "timeout_s=%.1f a2a_channel=%s a2a_category=%s include_filter=%s",
             sorted(TOOL_REGISTRY),
             server_urls,
             _REPLY_TOPIC,
             timeout_seconds,
             channel_name,
             category_name,
+            os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>",
         )
         await _run_worker(worker)
 
