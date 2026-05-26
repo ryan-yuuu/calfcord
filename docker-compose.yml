@@ -1,0 +1,182 @@
+# Calfcord deployment via Docker Compose.
+#
+# Three usage modes:
+#
+#   1. Full stack (recommended for first run):
+#        cp .env.example .env       # fill in Discord + LLM creds
+#        docker compose up --build
+#      Brings up Redpanda plus the four calfcord services (bridge,
+#      agent, router, tools). The ``--build`` flag rebuilds the image
+#      after any Dockerfile change; omit it for plain restarts.
+#
+#   2. Broker only (for native development):
+#        docker compose up redpanda
+#      Then in three or four terminals (or under a process supervisor):
+#        CALF_HOST_URL=localhost:19092 uv run calfkit-bridge
+#        CALF_HOST_URL=localhost:19092 uv run calfkit-agent
+#        CALF_HOST_URL=localhost:19092 uv run calfkit-router
+#        CALF_HOST_URL=localhost:19092 uv run calfkit-tools
+#
+#   3. Fully native:
+#        Don't use this file at all. Point ``CALF_HOST_URL`` at your
+#        own Kafka broker and run the uv commands above.
+#
+# All modes share the same ``.env``. Per-service ``environment:`` blocks
+# below override ``.env`` defaults for Docker-network-specific values
+# (e.g. ``CALF_HOST_URL`` → ``redpanda:9092``).
+#
+# Linux hosts with UID != 1000:
+#   docker compose build \
+#     --build-arg UID=$(id -u) --build-arg GID=$(id -g)
+# so files the tools container writes to bind-mounted host dirs stay
+# owned by the caller. macOS Docker Desktop handles UID translation
+# automatically — no flags needed.
+
+# Shared build + image config for the four calfcord services. YAML
+# anchor (``&calfcord-base``) defined once and merged into each service
+# below via ``<<: *calfcord-base`` so we don't re-declare the build
+# context, image tag, env_file, and restart policy four times.
+#
+# The build args expand from shell env, defaulting to 1000 when unset.
+# Linux users with a non-1000 UID set them once on the command line
+# (see header).
+x-calfcord-base: &calfcord-base
+  build:
+    context: .
+    args:
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+  image: calfcord:latest
+  env_file: .env
+  restart: unless-stopped
+  depends_on:
+    redpanda:
+      condition: service_healthy
+
+services:
+  # Single-binary Kafka-compatible broker. Dev-container mode is a
+  # single broker with one partition by default; production deploys
+  # would tune mode + smp + replication.
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: calfcord-redpanda
+    command:
+      - redpanda
+      - start
+      # Two listeners: ``internal://`` for in-network calfcord services
+      # at redpanda:9092, ``external://`` published to the host at
+      # localhost:19092 so native processes can reach the same broker
+      # without re-routing.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --smp=1
+      - --default-log-level=warn
+    ports:
+      # Only the external listener is published. Internal communication
+      # between containerized services uses the Docker network and
+      # needs no host port.
+      - "19092:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      # Forces an actual Kafka handshake against the internal listener.
+      # Previously used ``rpk cluster health`` which queries the admin
+      # API on port 9644 — that can flip "healthy" a few ms before the
+      # Kafka listener at 9092 finishes binding, leading to calfcord
+      # services starting and failing with "no broker available" errors.
+      test: ["CMD-SHELL", "rpk cluster info --brokers=redpanda:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  # The Discord gateway: loads the agent registry, normalizes inbound
+  # events, and posts agent replies back as persona webhooks.
+  bridge:
+    <<: *calfcord-base
+    container_name: calfcord-bridge
+    command: calfkit-bridge
+    environment:
+      # Override .env so this service always dials the in-network
+      # broker regardless of what the host-side .env says.
+      CALF_HOST_URL: redpanda:9092
+    volumes:
+      # Agent definitions are loaded at boot. Read-only because the
+      # bridge process has no reason to mutate them; note that this
+      # does NOT prevent the tools container from editing agents/*.md
+      # via its /workspace mount — that constraint is the README's
+      # "Security model" section. This mount is plain defense in
+      # depth on the bridge process itself.
+      - ./agents:/app/agents:ro
+
+  # One or more LLM-backed agent nodes. Defaults to "all agents in one
+  # Worker"; for crash isolation per agent, override ``command:`` to
+  # ``calfkit-agent <name>`` in a compose.override.yml. No
+  # ``container_name`` — operators may want ``docker compose up
+  # --scale agent=N`` and compose auto-numbers the replicas.
+  agent:
+    <<: *calfcord-base
+    command: calfkit-agent
+    environment:
+      CALF_HOST_URL: redpanda:9092
+    volumes:
+      - ./agents:/app/agents:ro
+      # Per-agent runtime state (channel subscriptions, .json files
+      # under state/agents/). Read-write so the agent service can
+      # persist updates.
+      - ./state:/app/state
+      # Per-agent persistent memory. Pre-wired here so future memory
+      # features write to a host-visible path instead of the
+      # ephemeral container filesystem. The directory is created on
+      # first write; .gitignore excludes its contents from source
+      # control.
+      - ./agent-memory:/app/agent-memory
+
+  # The ambient-channel router. Subscribes to discord.ambient.in,
+  # selects which agent (if any) should handle a non-@-mentioned
+  # message, and publishes the routing decision back to Kafka. See
+  # docs/ambient-routing.md for the design. Single instance — the
+  # router holds no per-channel state and a second instance would
+  # only contend for partitions.
+  router:
+    <<: *calfcord-base
+    container_name: calfcord-router
+    command: calfkit-router
+    environment:
+      CALF_HOST_URL: redpanda:9092
+    volumes:
+      # Router reads agents/*.md at boot for the peer roster.
+      - ./agents:/app/agents:ro
+
+  # The A2A + builtin-tool runner. This is the service that runs the
+  # shell / fs / grep / glob / web tools — it has the trusted shared
+  # workspace bind-mounted at /workspace.
+  tools:
+    <<: *calfcord-base
+    container_name: calfcord-tools
+    command: calfkit-tools
+    environment:
+      CALF_HOST_URL: redpanda:9092
+      CALFCORD_WORKSPACE_DIR: /workspace
+    volumes:
+      # Trusted shared workspace: the entire project root, read-write.
+      # Agents can read/edit any file in the checkout (agents/*.md,
+      # src/, state/, etc.). Because this mount includes state/ at
+      # /workspace/state, the tools service does NOT separately mount
+      # ./state at /app/state — the data is already reachable through
+      # the project-root mount. To narrow this (e.g. only a scratch
+      # dir) or widen it (e.g. mount $HOME), drop a
+      # compose.override.yml next to this file with a ``volumes:``
+      # override.
+      - .:/workspace
+
+# Named volume for Redpanda data so it survives ``docker compose down``.
+# ``docker compose down -v`` wipes it; that DESTROYS all Kafka topic
+# history including in-flight A2A audit data — flag this in any deploy
+# runbook.
+volumes:
+  redpanda-data:

@@ -1,0 +1,46 @@
+# Keep the build context lean: nothing here is needed inside the image,
+# and most of it would slow the build (large directories) or leak
+# secrets (the live .env file).
+
+# Local virtualenv from native `uv sync` — re-built inside the image.
+.venv/
+
+# Runtime state and bind-mount targets — provided at compose-up time.
+state/
+agent-memory/
+
+# Secrets — env is provided via compose's env_file directive at runtime.
+.env
+
+# Git history and editor scratch dirs.
+.git/
+.gitignore
+.vscode/
+.claude/
+
+# Python build/test caches.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.python-version
+
+# Tests aren't needed at runtime (the image is for deploys, not test
+# runs). Drop them to keep the image small. CI can run pytest against a
+# fresh checkout if needed.
+tests/
+
+# Docs and design notes aren't needed at runtime either.
+docs/
+*-plan.md
+
+# Build artifacts that should never enter the image.
+*.egg-info/
+dist/
+build/
+
+# OS noise.
+.DS_Store
+Thumbs.db
