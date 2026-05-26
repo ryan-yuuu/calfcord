@@ -89,7 +89,13 @@ Calfcord ships 11 builtin tools out of the box. Declare them in an agent's `tool
 
 Tools are auto-discovered from `src/calfkit_organization/tools/builtin/` at boot — drop a `.py` file there with a `*_tool: ToolNodeDef = agent_tool(...)` at module bottom and the next `calfkit-tools` restart picks it up. Full authoring guide: [`docs/authoring-tools.md`](./docs/authoring-tools.md).
 
-Tools are location-transparent over Kafka. By default every tool runs in the same `calfkit-tools` container, but you can build a slim image hosting only a subset (e.g. just `shell`) and deploy it on a separate host — agents elsewhere call it the same way. See [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
+Tools are location-transparent over Kafka. By default every tool runs in the same `calfkit-tools` container, but `calfcord-package-tools` builds a slim image hosting only a subset:
+
+```bash
+uv run calfcord-package-tools shell grep --tag calfcord-shell:1.0
+```
+
+Deploy that image on a separate host (with `CALF_HOST_URL` pointing at the shared broker), and agents elsewhere call the tool the same way — the broker routes the RPC. The parallel `calfcord-package-agents` builds an image that ships only the named agent definitions, useful for crash isolation per agent. Full walkthrough — including broker auth/TLS for cross-network deployments and `--dry-run` to inspect the generated Dockerfile — in [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
 
 ## Agent-to-agent communication
 
@@ -234,7 +240,7 @@ tests/                  # pytest suite
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — adding and configuring agents.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — adding a builtin tool.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
-- [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — splitting tools and agents across hosts.
+- [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — splitting tools and agents across hosts via `calfcord-package-tools` / `calfcord-package-agents`.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
 - [`docs/design/`](./docs/design/) — historical design notes.
