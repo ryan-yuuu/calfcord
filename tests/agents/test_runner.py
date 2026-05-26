@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import signal
+import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,11 +21,13 @@ from calfkit_organization.agents.runner import (
     _parse_args,
     _parse_channel_ids,
     _prewarm_codex_if_needed,
+    _publish_departures_best_effort,
     _resolve_agent_specs,
     _run_worker,
     bootstrap_env_var,
 )
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
+from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
 
 
 def _write_agent_md(dir_: Path, name: str) -> None:
@@ -681,3 +687,321 @@ class TestPrewarmCodexIfNeeded:
         monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", _failing_prewarm)
         with pytest.raises(BootstrapError, match="refresh-prompts"):
             await _prewarm_codex_if_needed([self._spec("openai-codex")])
+
+
+# ---------------------------------------------------------------------------
+# Helpers + fakes for control-plane wiring tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeConnection:
+    """Records (topic, payload) tuples for every publish call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def publish(self, payload: str, *, topic: str) -> None:
+        self.calls.append({"topic": topic, "payload": payload})
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self._connection = _FakeConnection()
+
+
+class _StuckConnection:
+    """publish() never completes — simulates a hung Kafka producer."""
+
+    async def publish(self, payload: str, *, topic: str) -> None:
+        await asyncio.Event().wait()  # never returns
+
+
+class _StuckClient:
+    def __init__(self) -> None:
+        self._connection = _StuckConnection()
+
+
+class _RaisingConnection:
+    """publish() always raises."""
+
+    async def publish(self, payload: str, *, topic: str) -> None:
+        raise RuntimeError("simulated kafka outage")
+
+
+class _RaisingClient:
+    def __init__(self) -> None:
+        self._connection = _RaisingConnection()
+
+
+def _make_ref(agent_id: str) -> AgentDefinitionRef:
+    """Build an AgentDefinitionRef around a minimal valid AgentDefinition."""
+    return AgentDefinitionRef(
+        current=AgentDefinition(
+            agent_id=agent_id,
+            slash=f"/{agent_id}",
+            display_name=agent_id.title(),
+            description=f"Test agent {agent_id}.",
+            system_prompt=f"You are {agent_id}.",
+        ),
+    )
+
+
+class TestPublishDeparturesBestEffort:
+    """The shutdown helper must publish once per agent, swallow timeouts /
+    exceptions, and bound total wall time at ~timeout regardless of count."""
+
+    async def test_publishes_one_per_agent(self) -> None:
+        """Every AgentDefinitionRef gets a departure publish."""
+        client = _FakeClient()
+        refs = [_make_ref("echo"), _make_ref("scribe"), _make_ref("bridge")]
+
+        await _publish_departures_best_effort(client, refs)  # type: ignore[arg-type]
+
+        assert len(client._connection.calls) == 3
+        topics = {call["topic"] for call in client._connection.calls}
+        assert topics == {"agent.state"}
+
+        agent_ids = sorted(
+            json.loads(call["payload"])["agent_id"]
+            for call in client._connection.calls
+        )
+        assert agent_ids == ["bridge", "echo", "scribe"]
+
+        # Each payload carries the departure discriminator on the wire so
+        # the bridge dispatches it correctly.
+        kinds = {json.loads(call["payload"])["kind"] for call in client._connection.calls}
+        assert kinds == {"departure"}
+
+    async def test_timeout_is_swallowed(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A publish that exceeds the timeout is logged and skipped, not raised."""
+        client = _StuckClient()
+        refs = [_make_ref("echo")]
+
+        with caplog.at_level(logging.WARNING):
+            await _publish_departures_best_effort(
+                client, refs, timeout=0.05,  # type: ignore[arg-type]
+            )
+
+        warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "departure publish timed out for agent=echo" in r.message
+            for r in warnings
+        ), f"expected timeout warning, got: {[r.message for r in caplog.records]}"
+
+    async def test_exception_is_swallowed(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A publish that raises is logged at ERROR and skipped, not raised."""
+        client = _RaisingClient()
+        refs = [_make_ref("echo")]
+
+        with caplog.at_level(logging.ERROR):
+            await _publish_departures_best_effort(
+                client, refs, timeout=1.0,  # type: ignore[arg-type]
+            )
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "departure publish failed for agent=echo" in r.message
+            for r in errors
+        )
+        # exc_info attached via logger.exception so operators get the traceback.
+        assert any(r.exc_info is not None for r in errors)
+
+    async def test_parallel_total_time_is_bounded(self) -> None:
+        """With N stalled publishes, total time is ~timeout (not N*timeout)."""
+        client = _StuckClient()
+        refs = [_make_ref(f"agent-{i}") for i in range(5)]
+        timeout = 0.1
+
+        start = time.monotonic()
+        await _publish_departures_best_effort(
+            client, refs, timeout=timeout,  # type: ignore[arg-type]
+        )
+        elapsed = time.monotonic() - start
+
+        # Generous slack for scheduling on a busy CI runner. The serial
+        # equivalent would be 5*0.1 = 0.5s; we want to prove parallel.
+        assert elapsed < timeout + 0.5, (
+            f"total elapsed {elapsed:.3f}s exceeded parallel budget"
+        )
+
+
+class _HangingWorker:
+    """A worker.run() that blocks until externally cancelled."""
+
+    async def run(self) -> None:
+        await asyncio.Event().wait()
+
+
+class _CrashingWorker:
+    """A worker.run() that raises on first await."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def run(self) -> None:
+        raise self._exc
+
+
+class TestRunWorkerShutdownCallback:
+    """``_run_worker`` accepts an optional ``on_shutdown_signal`` callback.
+    It must fire on the signal-received branch only — never on the crash
+    branch (broker may be why we crashed), never when not provided, and
+    its own exceptions must not prevent the worker drain."""
+
+    @staticmethod
+    def _disable_signal_handlers(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[int, Any]:
+        """Patch ``loop.add_signal_handler`` to capture (sig, callback) pairs
+        rather than register OS-level handlers. Tests can fire a captured
+        handler synchronously to simulate a signal without process-level
+        side effects."""
+        loop = asyncio.get_running_loop()
+        captured: dict[int, Any] = {}
+
+        def _fake_add(sig: int, cb: Any, *args: Any) -> None:
+            captured[sig] = cb
+
+        monkeypatch.setattr(loop, "add_signal_handler", _fake_add)
+        return captured
+
+    async def test_callback_fires_on_signal(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When stop_task wins, on_shutdown_signal is awaited before draining."""
+        captured = self._disable_signal_handlers(monkeypatch)
+        callback_fired = asyncio.Event()
+
+        async def _on_shutdown() -> None:
+            callback_fired.set()
+
+        run_task = asyncio.create_task(
+            _run_worker(
+                _HangingWorker(),  # type: ignore[arg-type]
+                num_agents=1,
+                on_shutdown_signal=_on_shutdown,
+            ),
+        )
+        # Give _run_worker a chance to register handlers + start tasks.
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if signal.SIGINT in captured:
+                break
+        assert signal.SIGINT in captured, "handler never registered"
+
+        # Synchronously set the stop event the way the real signal handler would.
+        captured[signal.SIGINT]()
+        await run_task
+        assert callback_fired.is_set()
+
+    async def test_callback_does_not_fire_on_worker_crash(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When worker_task wins with an exception, on_shutdown_signal is NOT called."""
+        self._disable_signal_handlers(monkeypatch)
+        callback_fired = asyncio.Event()
+
+        async def _on_shutdown() -> None:
+            callback_fired.set()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await _run_worker(
+                _CrashingWorker(RuntimeError("boom")),  # type: ignore[arg-type]
+                num_agents=1,
+                on_shutdown_signal=_on_shutdown,
+            )
+        assert not callback_fired.is_set()
+
+    async def test_callback_does_not_fire_on_clean_return(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A clean worker.run() return is treated as a phantom shutdown (a
+        synthetic crash) so the callback path must be skipped — the broker
+        may still be wedged in a way we don't trust to publish."""
+        self._disable_signal_handlers(monkeypatch)
+        callback_fired = asyncio.Event()
+
+        async def _on_shutdown() -> None:
+            callback_fired.set()
+
+        worker = MagicMock()
+        worker.run = AsyncMock(return_value=None)
+
+        with pytest.raises(RuntimeError, match="returned unexpectedly"):
+            await _run_worker(
+                worker,
+                num_agents=1,
+                on_shutdown_signal=_on_shutdown,
+            )
+        assert not callback_fired.is_set()
+
+    async def test_callback_does_not_fire_when_not_provided(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default None: existing behavior unchanged (no callback path
+        exercised, no surprises for pre-PR-2 call sites)."""
+        captured = self._disable_signal_handlers(monkeypatch)
+
+        run_task = asyncio.create_task(
+            _run_worker(_HangingWorker(), num_agents=1),  # type: ignore[arg-type]
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if signal.SIGINT in captured:
+                break
+        captured[signal.SIGINT]()
+        # Must complete without raising — the absence of a callback is
+        # not an error.
+        await run_task
+
+    async def test_callback_exception_does_not_prevent_drain(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """If on_shutdown_signal raises, the worker still gets drained and
+        the failure is logged at ERROR so operators can see what happened."""
+        captured = self._disable_signal_handlers(monkeypatch)
+
+        async def _bad_callback() -> None:
+            raise RuntimeError("callback boom")
+
+        # Build the worker so we can observe the drain (cancellation) after
+        # the callback raises.
+        cancelled = asyncio.Event()
+
+        class _ObservableWorker:
+            async def run(self) -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+        with caplog.at_level(logging.ERROR):
+            run_task = asyncio.create_task(
+                _run_worker(
+                    _ObservableWorker(),  # type: ignore[arg-type]
+                    num_agents=1,
+                    on_shutdown_signal=_bad_callback,
+                ),
+            )
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if signal.SIGINT in captured:
+                    break
+            captured[signal.SIGINT]()
+            # Must NOT raise — callback errors are swallowed.
+            await run_task
+
+        assert cancelled.is_set(), "worker_task was not cancelled after callback"
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "on_shutdown_signal callback raised" in r.message for r in errors
+        ), f"expected callback-raised log, got: {[r.message for r in errors]}"
