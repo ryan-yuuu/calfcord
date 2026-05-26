@@ -377,7 +377,7 @@ class TestModelSettings:
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.invoke_node.call_args.kwargs["model_settings"] is None
 
-        await registry.set_thinking_effort("scheduler", "high")
+        registry.apply_local_thinking_effort_override("scheduler", "high")
         await ingress.handle(_wire(event_id="evt-2", slash_target="scheduler"))
         assert client.invoke_node.call_args.kwargs["model_settings"] == {
             "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}

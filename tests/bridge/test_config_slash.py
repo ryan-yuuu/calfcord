@@ -5,8 +5,15 @@ entry point so we don't need a live ``app_commands.CommandTree`` or a
 real ``discord.Interaction``. The fake interaction is a SimpleNamespace
 extended with an ``AsyncMock`` for ``response.send_message``.
 
-Each test writes its agent ``.md`` files to ``tmp_path`` so the
-registry's ``set_thinking_effort`` path can rewrite real frontmatter.
+After PR 3, ``/thinking-effort`` is fire-and-forget: the bridge
+optimistically updates its in-memory registry via
+``apply_local_thinking_effort_override`` and publishes a
+:class:`SetThinkingEffortOp` to the agent's control topic. No disk I/O
+is performed here — the agent rewrites its own ``.md`` asynchronously.
+
+A fake calfkit ``Client`` records ``_connection.publish`` calls so we
+can assert the published topic and payload (same pattern as
+``tests/control_plane/test_publish.py``).
 """
 
 from __future__ import annotations
@@ -25,6 +32,11 @@ from calfkit_organization.bridge.slash import (
     _THINKING_EFFORT_COMMAND_NAME,
     SlashCommandManager,
 )
+from calfkit_organization.control_plane.schema import (
+    AgentControlEnvelope,
+    SetThinkingEffortOp,
+)
+from calfkit_organization.control_plane.topics import control_topic_for
 
 _OWNER_USER_ID = 9999
 
@@ -54,7 +66,13 @@ def _write_agent_md(
 
 @pytest.fixture
 def agents_dir(tmp_path: Path) -> Path:
-    """Two agents on disk: ``scribe`` (openai) and ``echo`` (no provider)."""
+    """Two agents on disk: ``scribe`` (openai) and ``echo`` (anthropic).
+
+    The registry loads from this directory so we get realistic
+    :class:`AgentDefinition` instances; the bridge slash path no longer
+    touches these files but the loader is still the most convenient way
+    to populate a registry for tests.
+    """
     _write_agent_md(tmp_path, agent_id="scribe", provider="openai")
     _write_agent_md(tmp_path, agent_id="echo", provider="anthropic")
     return tmp_path
@@ -74,25 +92,70 @@ def _interaction(*, user_id: int = _OWNER_USER_ID) -> Any:
     return SimpleNamespace(id=42, user=user, response=response)
 
 
-@pytest.fixture
-def manager(agents_dir: Path) -> SlashCommandManager:
-    """A SlashCommandManager backed by a real registry loaded from tmp_path."""
+class _FakeConnection:
+    """Records each publish call so tests can assert topic + payload."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def publish(self, payload: str, *, topic: str) -> None:
+        self.calls.append({"topic": topic, "payload": payload})
+
+
+class _FakeCalfkitClient:
+    """A stand-in for ``calfkit.client.Client`` exposing only the bits
+    the publish helpers reach into."""
+
+    def __init__(self) -> None:
+        self._connection = _FakeConnection()
+
+
+def _make_manager(
+    agents_dir: Path,
+    *,
+    owner_user_id: int | None = _OWNER_USER_ID,
+    calfkit_client: _FakeCalfkitClient | None = None,
+    guild_id: int | None = None,
+) -> tuple[SlashCommandManager, _FakeCalfkitClient]:
     registry = AgentRegistry.from_agents_dir(agents_dir)
-    return SlashCommandManager(
+    client = calfkit_client or _FakeCalfkitClient()
+    manager = SlashCommandManager(
         client=_fake_discord_client(),
         registry=registry,
         ingress=MagicMock(spec=BridgeIngress),
         slash_normalizer=MagicMock(),
-        owner_user_id=_OWNER_USER_ID,
+        calfkit_client=client,  # type: ignore[arg-type]
+        owner_user_id=owner_user_id,
+        guild_id=guild_id,
     )
+    return manager, client
+
+
+@pytest.fixture
+def manager_and_client(agents_dir: Path) -> tuple[SlashCommandManager, _FakeCalfkitClient]:
+    return _make_manager(agents_dir)
+
+
+@pytest.fixture
+def manager(
+    manager_and_client: tuple[SlashCommandManager, _FakeCalfkitClient],
+) -> SlashCommandManager:
+    return manager_and_client[0]
+
+
+@pytest.fixture
+def calfkit_client(
+    manager_and_client: tuple[SlashCommandManager, _FakeCalfkitClient],
+) -> _FakeCalfkitClient:
+    return manager_and_client[1]
 
 
 class TestAuthorization:
-    async def test_non_owner_is_rejected_no_write(
-        self, manager: SlashCommandManager, agents_dir: Path
+    async def test_non_owner_is_rejected_no_publish(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
     ) -> None:
-        original = (agents_dir / "scribe.md").read_text(encoding="utf-8")
-
         interaction = _interaction(user_id=_OWNER_USER_ID + 1)
         await manager._on_thinking_effort(interaction, "scribe", "high")
 
@@ -100,36 +163,23 @@ class TestAuthorization:
         msg, kwargs = interaction.response.send_message.call_args
         assert "owner" in msg[0].lower()
         assert kwargs.get("ephemeral") is True
-
-        # File unchanged.
-        assert (agents_dir / "scribe.md").read_text(encoding="utf-8") == original
+        # No control command was published, and the registry wasn't
+        # optimistically updated.
+        assert calfkit_client._connection.calls == []
+        assert manager._registry.by_id("scribe").thinking_effort is None
 
     async def test_owner_id_unset_permits_any_caller(self, agents_dir: Path) -> None:
         """When ``owner_user_id`` is None, the slash is open to anyone."""
-        registry = AgentRegistry.from_agents_dir(agents_dir)
-        manager = SlashCommandManager(
-            client=_fake_discord_client(),
-            registry=registry,
-            ingress=MagicMock(spec=BridgeIngress),
-            slash_normalizer=MagicMock(),
-            owner_user_id=None,
-        )
+        manager, calfkit_client = _make_manager(agents_dir, owner_user_id=None)
         interaction = _interaction(user_id=123456)
         await manager._on_thinking_effort(interaction, "scribe", "low")
 
-        assert registry.by_id("scribe").thinking_effort == "low"
+        # Optimistic update happened and the control command went out.
+        assert manager._registry.by_id("scribe").thinking_effort == "low"
+        assert len(calfkit_client._connection.calls) == 1
 
 
-class TestPersistence:
-    async def test_writes_thinking_effort_to_frontmatter(
-        self, manager: SlashCommandManager, agents_dir: Path
-    ) -> None:
-        interaction = _interaction()
-        await manager._on_thinking_effort(interaction, "scribe", "high")
-
-        reloaded = frontmatter.load(agents_dir / "scribe.md")
-        assert reloaded.metadata["thinking_effort"] == "high"
-
+class TestOptimisticUpdate:
     async def test_swaps_in_memory_definition(
         self, manager: SlashCommandManager
     ) -> None:
@@ -140,46 +190,86 @@ class TestPersistence:
 
         assert manager._registry.by_id("scribe").thinking_effort == "high"
 
+    async def test_does_not_touch_disk(
+        self,
+        manager: SlashCommandManager,
+        agents_dir: Path,
+    ) -> None:
+        """The bridge no longer rewrites ``.md`` files; the agent does
+        it asynchronously after applying the control command."""
+        original = (agents_dir / "scribe.md").read_text(encoding="utf-8")
+
+        interaction = _interaction()
+        await manager._on_thinking_effort(interaction, "scribe", "high")
+
+        assert (agents_dir / "scribe.md").read_text(encoding="utf-8") == original
+
     async def test_overwrites_existing_value(
         self, agents_dir: Path
     ) -> None:
-        # Pre-existing tier in the file.
-        _write_agent_md(agents_dir, agent_id="scribe", provider="openai", thinking_effort="low")
-        registry = AgentRegistry.from_agents_dir(agents_dir)
-        manager = SlashCommandManager(
-            client=_fake_discord_client(),
-            registry=registry,
-            ingress=MagicMock(spec=BridgeIngress),
-            slash_normalizer=MagicMock(),
-            owner_user_id=_OWNER_USER_ID,
+        # Pre-existing tier on the in-memory definition (loaded from
+        # the pre-written .md).
+        _write_agent_md(
+            agents_dir, agent_id="scribe", provider="openai", thinking_effort="low"
         )
+        manager, _ = _make_manager(agents_dir)
 
         interaction = _interaction()
         await manager._on_thinking_effort(interaction, "scribe", "max")
 
-        assert registry.by_id("scribe").thinking_effort == "max"
-        reloaded = frontmatter.load(agents_dir / "scribe.md")
-        assert reloaded.metadata["thinking_effort"] == "max"
+        assert manager._registry.by_id("scribe").thinking_effort == "max"
 
-    async def test_preserves_other_frontmatter_fields(
-        self, manager: SlashCommandManager, agents_dir: Path
+
+class TestControlCommandPublish:
+    async def test_publishes_set_thinking_effort_op_to_agent_topic(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
     ) -> None:
         interaction = _interaction()
-        await manager._on_thinking_effort(interaction, "scribe", "medium")
+        await manager._on_thinking_effort(interaction, "scribe", "high")
 
-        reloaded = frontmatter.load(agents_dir / "scribe.md")
-        assert reloaded.metadata["name"] == "scribe"
-        assert reloaded.metadata["slash"] == "/scribe"
-        assert reloaded.metadata["provider"] == "openai"
-        assert reloaded.content.strip() == "System prompt body."
+        assert len(calfkit_client._connection.calls) == 1
+        call = calfkit_client._connection.calls[0]
+        assert call["topic"] == control_topic_for("scribe")
+
+        envelope = AgentControlEnvelope.model_validate_json(call["payload"])
+        assert isinstance(envelope.command, SetThinkingEffortOp)
+        assert envelope.command.agent_id == "scribe"
+        assert envelope.command.value == "high"
+        assert envelope.command.issued_by == str(_OWNER_USER_ID)
+        # request_id is a UUID4 string; assert it's non-empty (the
+        # success reply checked below echoes the same id).
+        assert envelope.command.request_id
+
+    async def test_publish_failure_replies_with_error(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Break the publish path.
+        async def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("simulated broker failure")
+
+        calfkit_client._connection.publish = _boom  # type: ignore[assignment]
+
+        interaction = _interaction()
+        with caplog.at_level("ERROR"):
+            await manager._on_thinking_effort(interaction, "scribe", "high")
+
+        msg, kwargs = interaction.response.send_message.call_args
+        assert "couldn't publish" in msg[0].lower()
+        assert "request_id" in msg[0].lower()
+        assert kwargs.get("ephemeral") is True
 
 
 class TestErrorPaths:
-    async def test_unknown_agent_replies_ephemeral_no_write(
-        self, manager: SlashCommandManager, agents_dir: Path
+    async def test_unknown_agent_replies_ephemeral_no_publish(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
     ) -> None:
-        original = (agents_dir / "scribe.md").read_text(encoding="utf-8")
-
         interaction = _interaction()
         await manager._on_thinking_effort(interaction, "ghost", "high")
 
@@ -187,10 +277,12 @@ class TestErrorPaths:
         msg, kwargs = interaction.response.send_message.call_args
         assert "ghost" in msg[0]
         assert kwargs.get("ephemeral") is True
-        assert (agents_dir / "scribe.md").read_text(encoding="utf-8") == original
+        assert calfkit_client._connection.calls == []
 
-    async def test_unknown_effort_replies_ephemeral(
-        self, manager: SlashCommandManager
+    async def test_unknown_effort_replies_ephemeral_no_publish(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
     ) -> None:
         interaction = _interaction()
         await manager._on_thinking_effort(interaction, "scribe", "bananas")
@@ -200,88 +292,14 @@ class TestErrorPaths:
         assert "bananas" in msg[0].lower() or "unknown effort" in msg[0].lower()
         assert kwargs.get("ephemeral") is True
         assert manager._registry.by_id("scribe").thinking_effort is None
-
-    async def test_missing_md_file_replies_with_internal_error(
-        self,
-        manager: SlashCommandManager,
-        agents_dir: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        # Delete the .md AFTER the registry has indexed it — the slash
-        # path then tries to rewrite a file that vanished.
-        (agents_dir / "scribe.md").unlink()
-
-        interaction = _interaction()
-        with caplog.at_level("ERROR"):
-            await manager._on_thinking_effort(interaction, "scribe", "high")
-
-        msg = interaction.response.send_message.call_args[0][0]
-        assert "missing" in msg.lower() or "internal error" in msg.lower()
-
-    async def test_rewrite_oserror_replies_apologetically_with_id(
-        self,
-        manager: SlashCommandManager,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Disk-full / permission denied during rewrite: filesystem-error
-        reply with interaction id.
-
-        Patches the registry's bound reference (not just the module
-        attribute) so the real ``registry.set_thinking_effort`` control
-        flow is exercised — including the lock acquire/release and the
-        index not being touched on failure.
-        """
-
-        def _raise_oserror(*_args: Any, **_kwargs: Any) -> None:
-            raise OSError("simulated disk full")
-
-        monkeypatch.setattr(
-            "calfkit_organization.bridge.registry.update_thinking_effort",
-            _raise_oserror,
-        )
-
-        interaction = _interaction()
-        with caplog.at_level("ERROR"):
-            await manager._on_thinking_effort(interaction, "scribe", "high")
-
-        msg, kwargs = interaction.response.send_message.call_args
-        assert "filesystem error" in msg[0].lower()
-        assert str(interaction.id) in msg[0]
-        assert kwargs.get("ephemeral") is True
-        # In-memory definition stays at the pre-error value because
-        # registry._replace runs only after a successful write.
-        assert manager._registry.by_id("scribe").thinking_effort is None
-
-    async def test_rewrite_validation_error_replies_invalid_frontmatter(
-        self,
-        manager: SlashCommandManager,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Existing .md has malformed YAML / fails validation: invalid-frontmatter reply."""
-
-        def _raise_value_error(*_args: Any, **_kwargs: Any) -> None:
-            raise ValueError("simulated malformed frontmatter")
-
-        monkeypatch.setattr(
-            "calfkit_organization.bridge.registry.update_thinking_effort",
-            _raise_value_error,
-        )
-
-        interaction = _interaction()
-        with caplog.at_level("ERROR"):
-            await manager._on_thinking_effort(interaction, "scribe", "high")
-
-        msg, kwargs = interaction.response.send_message.call_args
-        assert "frontmatter is invalid" in msg[0].lower()
-        assert str(interaction.id) in msg[0]
-        assert kwargs.get("ephemeral") is True
+        assert calfkit_client._connection.calls == []
 
 
 class TestReplyText:
-    async def test_success_reply_mentions_agent_and_effort(
-        self, manager: SlashCommandManager
+    async def test_success_reply_mentions_fire_and_forget_and_request_id(
+        self,
+        manager: SlashCommandManager,
+        calfkit_client: _FakeCalfkitClient,
     ) -> None:
         interaction = _interaction()
         await manager._on_thinking_effort(interaction, "scribe", "high")
@@ -289,26 +307,13 @@ class TestReplyText:
         msg = interaction.response.send_message.call_args[0][0]
         assert "scribe" in msg
         assert "high" in msg
-        assert "next" in msg.lower()  # informs about take-effect timing
-
-    async def test_none_effort_reply_says_disabled(
-        self, manager: SlashCommandManager
-    ) -> None:
-        interaction = _interaction()
-        await manager._on_thinking_effort(interaction, "scribe", "none")
-
-        msg = interaction.response.send_message.call_args[0][0]
-        assert "disabled" in msg.lower()
-
-    async def test_reply_mentions_restart_for_ambient(
-        self, manager: SlashCommandManager
-    ) -> None:
-        """The reply should remind operators that ambient messages need a restart."""
-        interaction = _interaction()
-        await manager._on_thinking_effort(interaction, "scribe", "high")
-
-        msg = interaction.response.send_message.call_args[0][0]
-        assert "restart" in msg.lower() and "ambient" in msg.lower()
+        assert "fire-and-forget" in msg.lower()
+        # The reply echoes the same request_id the envelope carries.
+        envelope = AgentControlEnvelope.model_validate_json(
+            calfkit_client._connection.calls[0]["payload"]
+        )
+        assert isinstance(envelope.command, SetThinkingEffortOp)
+        assert envelope.command.request_id in msg
 
 
 class TestRegister:
@@ -324,12 +329,9 @@ class TestRegister:
     def test_thinking_effort_choices_exclude_router(
         self, manager: SlashCommandManager
     ) -> None:
-        """The built-in router has ``source_path=None`` so the
-        ``set_thinking_effort`` rewrite path would raise on selection.
-        It must not appear in the slash UI's choice list."""
-        # The manager fixture uses `from_agents_dir`, which auto-appends
-        # the built-in router. Verify it's in the registry but NOT in
-        # the choice list.
+        """The built-in router is project infrastructure, not a
+        user-invocable agent; it must not appear in the slash UI's
+        choice list."""
         agent_ids = {spec.agent_id for spec in manager._registry.all()}
         assert "_router" in agent_ids  # registry has it
         command = manager._build_thinking_effort_command()
@@ -340,3 +342,66 @@ class TestRegister:
         assert "_router" not in choice_ids
         assert "scribe" in choice_ids
         assert "echo" in choice_ids
+
+
+class TestScheduleResync:
+    async def test_schedule_resync_coalesces(
+        self,
+        manager: SlashCommandManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Multiple ``schedule_resync`` calls within the debounce window
+        create exactly one resync task."""
+        manager._resync_debounce_s = 0.05
+
+        # Stub out the Discord-side work so the task body succeeds
+        # without a real CommandTree / network sync.
+        manager._tree.remove_command = MagicMock()  # type: ignore[method-assign]
+        manager._tree.add_command = MagicMock()  # type: ignore[method-assign]
+
+        async def _fake_sync(_guild_id: int | None) -> None:
+            return None
+
+        monkeypatch.setattr(manager, "sync", _fake_sync)
+
+        manager.schedule_resync("scribe")
+        first_task = manager._resync_task
+        assert first_task is not None
+        # Subsequent calls before the debounce fires reuse the same task.
+        manager.schedule_resync("echo")
+        manager.schedule_resync("ghost")
+        assert manager._resync_task is first_task
+
+        await first_task
+
+        # remove_command + add_command + sync each fired exactly once.
+        assert manager._tree.remove_command.call_count == 1
+        assert manager._tree.add_command.call_count == 1
+
+    async def test_debounced_resync_rebuilds_slash(
+        self,
+        manager: SlashCommandManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager._resync_debounce_s = 0.01
+
+        remove_calls = MagicMock()
+        add_calls = MagicMock()
+        manager._tree.remove_command = remove_calls  # type: ignore[method-assign]
+        manager._tree.add_command = add_calls  # type: ignore[method-assign]
+
+        sync_calls: list[int | None] = []
+
+        async def _fake_sync(guild_id: int | None) -> None:
+            sync_calls.append(guild_id)
+
+        monkeypatch.setattr(manager, "sync", _fake_sync)
+
+        manager.schedule_resync("scribe")
+        task = manager._resync_task
+        assert task is not None
+        await task
+
+        remove_calls.assert_called_once_with(_THINKING_EFFORT_COMMAND_NAME)
+        add_calls.assert_called_once()
+        assert sync_calls == [manager._guild_id]

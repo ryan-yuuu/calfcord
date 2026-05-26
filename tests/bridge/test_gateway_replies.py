@@ -45,11 +45,16 @@ def _gateway() -> DiscordIngressGateway:
     ``_GatewayClient`` (discord.Client subclass). The discord.Client
     constructor is sync and offline, so this is safe without
     network. We do not call ``.start()``.
+
+    The calfkit client is mocked — its only use in non-``_on_ready``
+    paths is being passed to the :class:`SlashCommandManager` (which
+    stores it but doesn't invoke it during constructor wiring).
     """
     return DiscordIngressGateway(
         settings=_settings(),
         ingress=MagicMock(),
         registry=MagicMock(),
+        calfkit_client=MagicMock(),
     )
 
 
@@ -302,6 +307,9 @@ class TestOnReadyInjectsFetcher:
             type(gateway._client), "user", new=fake_user, create=True
         ), patch.object(
             gateway._slash, "sync", new=AsyncMock(return_value=None)
+        ), patch(
+            "calfkit_organization.bridge.gateway.publish_discovery_ping",
+            new=AsyncMock(return_value=None),
         ):
             await gateway._on_ready()
 
@@ -319,6 +327,9 @@ class TestOnReadyInjectsFetcher:
             type(gateway._client), "user", new=fake_user, create=True
         ), patch.object(
             gateway._slash, "sync", new=AsyncMock(return_value=None)
+        ), patch(
+            "calfkit_organization.bridge.gateway.publish_discovery_ping",
+            new=AsyncMock(return_value=None),
         ), caplog.at_level(
             logging.INFO, logger="calfkit_organization.bridge.gateway"
         ):

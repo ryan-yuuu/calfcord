@@ -4,14 +4,13 @@ Owns the ``app_commands.CommandTree`` for the bot. Two kinds of commands
 can be registered:
 
 * ``/thinking-effort agent:<name> effort:<tier>`` — the operator slash
-  registered by :meth:`register_thinking_effort`. Rewrites the
-  ``thinking_effort`` field of the agent's ``.md`` frontmatter via
-  :meth:`AgentRegistry.set_thinking_effort`, and swaps the in-memory
-  :class:`AgentDefinition` in the registry so the next invocation picks
-  up the new value. The frontmatter is validated **before** the disk
-  write so a malformed ``.md`` surfaces immediately rather than at next
-  agent boot. Authorization is restricted to
-  ``DiscordSettings.owner_user_id``.
+  registered by :meth:`register_thinking_effort`. Fire-and-forget: it
+  publishes a :class:`SetThinkingEffortOp` to the agent's control topic
+  and optimistically updates the bridge's in-memory registry copy. The
+  agent applies the command asynchronously and rewrites its own ``.md``
+  via :mod:`calfkit_organization.agents.md_writer`; the bridge's
+  projection reconciles when the agent's post-apply state event arrives.
+  Authorization is restricted to ``DiscordSettings.owner_user_id``.
 * Per-agent invocation slashes (``/echo``, ``/scribe``, …) built by
   :meth:`register_all`. Currently disabled in the bridge in favour of
   ``@<agent_id>`` text-prefix invocation, but the builder is preserved
@@ -22,20 +21,30 @@ can be registered:
   the outbox consumer, not by this callback — so the 15-minute Discord
   followup window is no longer the LLM's deadline (the followup echo
   is posted before the LLM runs; the reply is posted via webhook).
+
+State-event-driven roster changes (first-seen agent, agent departure)
+debounce a :meth:`schedule_resync` that rebuilds and re-syncs the
+``/thinking-effort`` choice list so the Discord UI reflects the live
+roster.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import cast, get_args
 
 import discord
+from calfkit.client import Client
 from discord import app_commands
 
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
 from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.control_plane.publish import publish_control_command
+from calfkit_organization.control_plane.schema import SetThinkingEffortOp
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +62,24 @@ class SlashCommandManager:
         ingress: BridgeIngress,
         slash_normalizer: SlashNormalizer,
         *,
+        calfkit_client: Client,
         owner_user_id: int | None = None,
+        guild_id: int | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
         self._ingress = ingress
         self._normalizer = slash_normalizer
+        self._client_calfkit = calfkit_client
         self._owner_user_id = owner_user_id
+        self._guild_id = guild_id
         self._tree = app_commands.CommandTree(client)
+        # Debounced re-sync state. The state consumer fires
+        # ``schedule_resync`` on every first-seen / departure event; we
+        # coalesce bursts into a single rebuild+sync to avoid hammering
+        # Discord's slash-sync endpoint when many agents come up at once.
+        self._resync_task: asyncio.Task[None] | None = None
+        self._resync_debounce_s: float = 1.0
 
     def register_all(self) -> None:
         """Add one :class:`app_commands.Command` per agent. Call once at startup."""
@@ -80,10 +99,9 @@ class SlashCommandManager:
 
     def _build_thinking_effort_command(self) -> app_commands.Command:
         # The built-in router is excluded from the choice list — its
-        # config is env-driven (CALFKIT_ROUTER_*) and its definition
-        # has source_path=None, so the underlying
-        # ``set_thinking_effort`` would raise on selection. Hiding it
-        # from the Discord UI prevents the dead choice.
+        # config is env-driven (CALFKIT_ROUTER_*) and it is not a
+        # user-invocable agent, so exposing it in the Discord UI would
+        # only confuse operators.
         agent_choices = [
             app_commands.Choice(name=spec.agent_id, value=spec.agent_id)
             for spec in self._registry.all()
@@ -145,7 +163,10 @@ class SlashCommandManager:
         spec = self._registry.by_id(agent_id)
         if spec is None:
             known = ", ".join(f"`{s.agent_id}`" for s in self._registry.all()) or "<none>"
-            await reply(f"No agent named `{agent_id}`. Known: {known}.")
+            await reply(
+                f"No agent named `{agent_id}` in the bridge's roster. "
+                f"Known: {known}."
+            )
             return
 
         if effort not in _THINKING_EFFORT_VALUES:
@@ -153,61 +174,80 @@ class SlashCommandManager:
             await reply(f"Unknown effort `{effort}`. Choose one of: {choices}")
             return
 
+        typed_effort = cast(ThinkingEffort, effort)
+
+        # Optimistic in-memory update. The bridge's projection will be
+        # reconciled when the agent applies the command and emits a
+        # fresh state event.
+        self._registry.apply_local_thinking_effort_override(agent_id, typed_effort)
+
+        request_id = str(uuid.uuid4())
+        command = SetThinkingEffortOp(
+            agent_id=agent_id,
+            value=typed_effort,
+            request_id=request_id,
+            issued_by=str(interaction.user.id),
+        )
         try:
-            await self._registry.set_thinking_effort(
-                agent_id, cast(ThinkingEffort, effort)
-            )
-        except FileNotFoundError:
-            logger.error(
-                "agent %s source_path missing on disk; cannot rewrite frontmatter",
-                agent_id,
-            )
-            await reply(
-                f"Internal error: agent `{agent_id}` source file is missing. "
-                "Check the bridge logs."
-            )
-            return
-        except ValueError:
-            # Includes pydantic ValidationError (subclass) and the
-            # md_writer's "malformed YAML" re-raise. The .md is unusable
-            # for this agent until the operator fixes it.
+            await publish_control_command(self._client_calfkit, agent_id, command)
+        except Exception:
             logger.exception(
-                "agent %s frontmatter validation failed interaction_id=%s",
+                "failed to publish control command agent=%s request_id=%s",
                 agent_id,
-                interaction.id,
+                request_id,
             )
             await reply(
-                f"Couldn't rewrite `{agent_id}`'s .md — frontmatter is invalid "
-                f"(interaction_id={interaction.id}). Check the bridge logs."
-            )
-            return
-        except OSError:
-            # Filesystem error during atomic write (permission, ENOSPC,
-            # EROFS, fsync failure). The on-disk file is unchanged
-            # because md_writer cleans up its tmp file.
-            logger.exception(
-                "filesystem error rewriting %s.md interaction_id=%s",
-                agent_id,
-                interaction.id,
-            )
-            await reply(
-                f"Couldn't write `{agent_id}`'s .md — filesystem error "
-                f"(interaction_id={interaction.id}). Check the bridge logs."
+                f"Couldn't publish control command for `{agent_id}` "
+                f"(request_id={request_id}). Check bridge logs."
             )
             return
 
-        if effort == "none":
-            await reply(
-                f"Saved `effort=none` for `{agent_id}`. Thinking is disabled; "
-                "applies to the next slash or @-mention message. "
-                "Restart the agent process to apply to ambient messages too."
+        await reply(
+            f"Sent `effort={effort}` to `{agent_id}` (fire-and-forget, "
+            f"request_id={request_id}). Bridge applies override on next "
+            f"slash/mention; agent rewrites its `.md` asynchronously."
+        )
+
+    def schedule_resync(self, agent_id: str) -> None:
+        """Schedule a debounced re-sync of ``/thinking-effort``.
+
+        Reflects the current agent roster to Discord. Idempotent:
+        multiple calls within the debounce window coalesce into one
+        re-sync. Called by the state consumer's ``on_first_seen`` and
+        ``on_departed`` callbacks. The ``agent_id`` argument is logged
+        but not otherwise used — the rebuild reads from the registry.
+        """
+        if self._resync_task is not None and not self._resync_task.done():
+            # A debounced resync is already pending; it'll pick up the
+            # new registry state when it fires.
+            return
+        self._resync_task = asyncio.create_task(self._debounced_resync())
+
+    async def _debounced_resync(self) -> None:
+        try:
+            await asyncio.sleep(self._resync_debounce_s)
+        except asyncio.CancelledError:
+            raise
+        try:
+            try:
+                self._tree.remove_command(_THINKING_EFFORT_COMMAND_NAME)
+            except Exception:
+                # Not registered yet or some other transient — proceed
+                # to add.
+                logger.debug("remove_command(/thinking-effort) raised; proceeding")
+            self._tree.add_command(self._build_thinking_effort_command())
+            await self.sync(self._guild_id)
+            non_router_count = sum(
+                1 for s in self._registry.all() if s.role != "router"
             )
-        else:
-            await reply(
-                f"Saved `effort={effort}` for `{agent_id}`. "
-                "Applies to the next slash or @-mention message. "
-                "Restart the agent process to apply to ambient messages too."
+            logger.info(
+                "re-synced /thinking-effort with %d agent choice(s)",
+                non_router_count,
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("debounced slash resync failed")
 
     async def sync(self, guild_id: int | None) -> None:
         """Push the command tree to Discord. Idempotent; safe to call on every boot."""

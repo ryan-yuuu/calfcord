@@ -35,7 +35,6 @@ import logging
 import os
 import signal
 from collections import OrderedDict
-from pathlib import Path
 
 import discord
 from calfkit.client import Client
@@ -56,8 +55,18 @@ from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.slash import SlashCommandManager
 from calfkit_organization.bridge.synthesized import build_synthesized_consumer
+
+# NOTE: ``calfkit_organization.control_plane.state_consumer`` imports
+# :class:`AgentRegistry`, which in turn triggers ``bridge.__init__`` (which
+# re-exports it). That ``__init__`` imports this module, so a top-level
+# import of ``state_consumer`` here would create a circular import. We do
+# top-level imports of ``publish_discovery_ping`` (whose module doesn't
+# depend on the bridge package) but defer ``register_state_consumer`` to
+# its single call site in ``main()``'s ``_run()``.
+from calfkit_organization.control_plane.publish import publish_discovery_ping
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.settings import DiscordSettings
+from calfkit_organization.router.definition import build_router_definition
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +82,12 @@ class DiscordIngressGateway:
         settings: DiscordSettings,
         ingress: BridgeIngress,
         registry: AgentRegistry,
+        calfkit_client: Client,
     ) -> None:
         self._settings = settings
         self._registry = registry
         self._ingress = ingress
+        self._calfkit_client = calfkit_client
         self._client = _GatewayClient(self)
 
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
@@ -91,7 +102,9 @@ class DiscordIngressGateway:
             registry=registry,
             ingress=self._ingress,
             slash_normalizer=self._slash_normalizer,
+            calfkit_client=calfkit_client,
             owner_user_id=settings.owner_user_id,
+            guild_id=settings.guild_id,
         )
         # Per-agent invocation slashes (``/echo``, ``/scribe``, …) are
         # disabled in favour of ``@<agent_id>`` text-prefix invocation parsed
@@ -142,6 +155,19 @@ class DiscordIngressGateway:
         self._ingress.set_fetcher(fetcher)
         logger.info("gateway ready as %s (id=%s); history fetcher injected", bot_user, bot_user.id)
         await self._slash.sync(self._settings.guild_id)
+
+        # Publish a one-shot discovery ping so already-running agents
+        # re-announce into the bridge's freshly-empty registry projection.
+        # On a cold start (no agents up yet) the ping is a no-op; on a
+        # bridge restart it's the only way to repopulate the registry
+        # without restarting every agent process.
+        try:
+            await publish_discovery_ping(self._calfkit_client)
+            logger.info("published discovery_ping; awaiting agent state events")
+        except Exception:
+            logger.exception(
+                "failed to publish discovery_ping; agents may need restart for visibility"
+            )
 
     async def _on_message(self, message: discord.Message) -> None:
         if message.guild is None:
@@ -329,8 +355,12 @@ def main() -> None:
     if settings.guild_id is None:
         raise SystemExit("DISCORD_GUILD_ID is required (global slash sync is too slow for dev)")
 
-    agents_dir = Path(os.getenv("CALFKIT_AGENTS_DIR", "agents"))
-    registry = AgentRegistry.from_agents_dir(agents_dir)
+    # Bridge no longer reads agents/*.md — agents announce themselves
+    # over Kafka via the control plane. Bootstrap with only the
+    # locally-built router; the state consumer fills in the rest as
+    # agents' startup announcements (and the on_ready discovery ping
+    # replies) arrive.
+    registry = AgentRegistry([build_router_definition()])
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
@@ -350,6 +380,14 @@ def main() -> None:
                     calfkit_client=calfkit_client,
                     registry=registry,
                     pending_wires=pending_wires,
+                )
+                # Construct the gateway early so its SlashCommandManager
+                # exists before we register the state consumer — the
+                # state consumer's callbacks must point at
+                # slash.schedule_resync so first-seen / departure events
+                # trigger debounced slash re-registration.
+                gateway = DiscordIngressGateway(
+                    settings, ingress, registry, calfkit_client
                 )
                 consumer_node = build_outbox_consumer(
                     persona_sender=persona_sender,
@@ -380,6 +418,30 @@ def main() -> None:
                 # registered subscriber on its own, which is what we need.
                 worker = Worker(calfkit_client, [consumer_node, synthesized_node])
                 worker.register_handlers()
+
+                # Register the state-event projection subscriber on the
+                # broker BEFORE broker.start(). State events from
+                # already-running agents will arrive after on_ready
+                # publishes the discovery ping; the subscriber must be
+                # live by then. ``schedule_resync`` is a bound method
+                # whose signature matches the consumer callback shape
+                # (``(agent_id: str) -> None``), so pass it directly.
+                #
+                # Imported here (not at module top) to avoid a circular
+                # import: ``state_consumer`` imports ``AgentRegistry``,
+                # which re-exports through ``bridge.__init__``, which
+                # imports this module.
+                from calfkit_organization.control_plane.state_consumer import (
+                    register_state_consumer,
+                )
+
+                register_state_consumer(
+                    calfkit_client,
+                    registry,
+                    on_first_seen=gateway._slash.schedule_resync,
+                    on_departed=gateway._slash.schedule_resync,
+                )
+
                 # ``broker.running`` is the public-ish state flag faststream
                 # sets True at the end of start() and False in stop(). Guarding
                 # on it (rather than calling start() unconditionally) matters
@@ -388,8 +450,6 @@ def main() -> None:
                 # consumer, drop the previous reference, and re-subscribe.
                 if not calfkit_client.broker.running:
                     await calfkit_client.broker.start()
-
-                gateway = DiscordIngressGateway(settings, ingress, registry)
 
                 stop = asyncio.Event()
                 loop = asyncio.get_running_loop()

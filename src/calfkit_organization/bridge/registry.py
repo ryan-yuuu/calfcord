@@ -2,28 +2,40 @@
 
 The registry is the single source of truth for which agents exist, what
 slash command each one owns, and what display name to attribute a
-persona-webhook message to. It is loaded once at daemon startup; new
-agents require a restart.
+persona-webhook message to. It is populated dynamically from
+``agent.state`` events published by agent processes (see PR 3 cutover);
+prior to that, the bridge read ``agents/*.md`` directly.
 
-The agent definitions themselves live in :mod:`calfkit_organization.agents`
-(parsed from ``agents/*.md`` files). This module owns the *index* the
-bridge uses (O(1) lookups by id, slash, and display name, plus rejection
-of duplicate ``slash`` or ``display_name`` across agents) and the
-in-process mutator for the one frontmatter field that operators can edit
-at runtime: ``thinking_effort``.
+The agent definitions themselves originate either from in-process code
+(the built-in router, :func:`build_router_definition`) or from agent
+processes that announce themselves over Kafka via the control plane.
+This module owns the *index* the bridge uses (O(1) lookups by id, slash,
+and display name, plus rejection of duplicate ``slash`` or
+``display_name`` across agents) and three mutators:
+
+* :meth:`upsert_from_state_event` — projection of an ``agent.state``
+  event into the registry. Returns ``True`` on first-seen, ``False`` on
+  re-announce.
+* :meth:`remove` — projection of an ``agent.state`` departure event.
+  Returns ``True`` if the agent was present and removed.
+* :meth:`apply_local_thinking_effort_override` — optimistic in-memory
+  mutation used by ``/thinking-effort`` after publishing the control
+  command. The eventual post-apply state event re-upserts with the
+  confirmed value.
 """
 
 from __future__ import annotations
 
-import asyncio
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Self
 
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
 from calfkit_organization.agents.loader import load_agents_dir
-from calfkit_organization.agents.md_writer import update_thinking_effort
 from calfkit_organization.router.definition import build_router_definition
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRegistry:
@@ -41,14 +53,6 @@ class AgentRegistry:
         self._by_slash: dict[str, AgentDefinition] = {}
         self._by_display_name: dict[str, AgentDefinition] = {}
         self._all: list[AgentDefinition] = list(definitions)
-        # Serializes concurrent set_thinking_effort calls. Today's writer
-        # (md_writer.update_thinking_effort) is fully synchronous, so on
-        # a single-threaded asyncio event loop two concurrent callers
-        # would already run end-to-end serially without this lock — it's
-        # forward-compat for a future async writer (aiofiles, threaded
-        # fsync). Keep it cheap; reintroduce a real interleaving test if
-        # the writer ever gains an ``await``.
-        self._write_lock = asyncio.Lock()
 
         for d in self._all:
             self._index(d)
@@ -59,14 +63,14 @@ class AgentRegistry:
         # actionable "duplicate slash" message before the role error.
         # Zero-router is NOT rejected here: the "exactly one router"
         # invariant applies to the production load path
-        # (:meth:`from_agents_dir` appends the built-in router
-        # unconditionally; :meth:`router` raises at lookup time on a
-        # zero-router registry), but in-memory test fixtures that
-        # don't exercise routing should be allowed to omit it. A
-        # multi-router list, by contrast, is always a wiring bug
-        # (only the built-in singleton should declare role="router";
-        # a user-defined ``agents/*.md`` accidentally setting it would
-        # land here too).
+        # (the bridge constructs the registry with
+        # ``[build_router_definition()]`` at boot;
+        # :meth:`router` raises at lookup time on a zero-router
+        # registry), but in-memory test fixtures that don't exercise
+        # routing should be allowed to omit it. A multi-router list,
+        # by contrast, is always a wiring bug (only the built-in
+        # singleton should declare role="router"; a user-defined
+        # ``agents/*.md`` accidentally setting it would land here too).
         routers = [d for d in self._all if d.role == "router"]
         if len(routers) > 1:
             ids = [r.agent_id for r in routers]
@@ -90,15 +94,29 @@ class AgentRegistry:
         self._by_slash[definition.slash] = definition
         self._by_display_name[definition.display_name] = definition
 
+    def _unindex(self, definition: AgentDefinition) -> None:
+        """Remove ``definition`` from all three indexes.
+
+        Caller is responsible for also removing it from ``self._all``
+        (because the order of operations differs between :meth:`remove`
+        and the key-field-change branch of
+        :meth:`upsert_from_state_event`).
+        """
+        self._by_id.pop(definition.agent_id, None)
+        self._by_slash.pop(definition.slash, None)
+        self._by_display_name.pop(definition.display_name, None)
+
     def _replace(self, old: AgentDefinition, new: AgentDefinition) -> None:
         """Swap an existing entry. Keys must match; only mutable fields change.
 
-        The asserts guard an internal invariant rather than user input —
-        today's only caller is ``set_thinking_effort`` and the writer
-        beneath it can't change ``agent_id``, ``slash``, or
-        ``display_name``. If you add another caller, audit whether its
-        write path can mutate any of those keys before reusing
-        ``_replace`` — under ``python -O`` these asserts vanish.
+        The asserts guard an internal invariant rather than user input.
+        Callers must have already verified that ``agent_id``, ``slash``,
+        and ``display_name`` are unchanged — :meth:`upsert_from_state_event`
+        handles key-field changes via remove-then-insert rather than
+        calling here, and :meth:`apply_local_thinking_effort_override`
+        only mutates ``thinking_effort``. Under ``python -O`` these
+        asserts vanish; the soft-handle path lives in
+        :meth:`upsert_from_state_event`.
         """
         assert old.agent_id == new.agent_id, "agent_id is immutable"
         assert old.slash == new.slash, "slash is immutable"
@@ -123,6 +141,11 @@ class AgentRegistry:
         file would collide with the built-in's ``agent_id`` (or its
         reserved ``slash``/``display_name``) and the duplicate-detection
         in :meth:`_index` would raise at construction time.
+
+        Used in test fixtures and any non-bridge code paths that still
+        load definitions from disk. The bridge itself (PR 3 onwards)
+        constructs the registry with only the router and fills the rest
+        from state events.
         """
         definitions = list(load_agents_dir(path))
         definitions.append(build_router_definition())
@@ -132,8 +155,8 @@ class AgentRegistry:
         """Return the singleton router :class:`AgentDefinition`.
 
         :meth:`from_agents_dir` appends the built-in router on every
-        load, so any registry loaded from disk in production carries
-        exactly one. Test fixtures that build the registry directly
+        load, and the bridge's ``main()`` seeds the registry with the
+        same router. Test fixtures that build the registry directly
         without a router will get a :class:`ValueError` from this
         accessor — the failure is intentional and indicates the
         registry was constructed without the router that production
@@ -147,17 +170,16 @@ class AgentRegistry:
         Raises:
             ValueError: if the registry has no router agent. Operators
                 running production paths see this only on a wiring
-                regression (e.g., a refactor of
-                :meth:`from_agents_dir` that drops the router append).
+                regression (e.g., a refactor that drops the router seed
+                from bridge ``main()``).
         """
         for d in self._all:
             if d.role == "router":
                 return d
         raise ValueError(
             "AgentRegistry has zero router agents; the registry was "
-            "constructed without one (production paths go through "
-            "AgentRegistry.from_agents_dir which appends "
-            "build_router_definition() automatically)"
+            "constructed without one (production paths seed it with "
+            "build_router_definition() at bridge boot)"
         )
 
     def by_id(self, agent_id: str) -> AgentDefinition | None:
@@ -172,36 +194,103 @@ class AgentRegistry:
     def all(self) -> Sequence[AgentDefinition]:
         return tuple(self._all)
 
-    async def set_thinking_effort(
-        self, agent_id: str, value: ThinkingEffort
-    ) -> AgentDefinition:
-        """Rewrite ``thinking_effort`` in the agent's ``.md`` and swap the in-memory copy.
+    def upsert_from_state_event(self, definition: AgentDefinition) -> bool:
+        """Insert or update from a projected state event. Returns True if first-seen.
 
-        The returned :class:`AgentDefinition` is the freshly-parsed
-        post-write entry. Returned (rather than ``None``) so a caller
-        holding the old reference can swap atomically without a second
-        ``by_id`` lookup. The same instance is now in all three indexes.
+        Router protection: state events whose ``agent_id`` matches an
+        existing router entry are rejected with a warning. The router is
+        built locally on the bridge (:func:`build_router_definition`)
+        and is never published over the wire by an agent process; an
+        incoming event with the router's id indicates a misconfigured
+        deployment.
 
-        Raises:
-            KeyError: ``agent_id`` is not in the registry.
-            ValueError: the registered definition has no ``source_path``
-                (in-memory construction without a real file), or the
-                existing ``.md`` fails validation, or the rewrite would
-                produce an invalid definition.
-            FileNotFoundError: the ``.md`` file is missing on disk.
-            OSError: a filesystem error during the tmp write or atomic
-                rename. Post-rename parent-dir fsync failures are
-                swallowed and logged at warning level — see
-                :mod:`calfkit_organization.agents.md_writer`.
+        Key-field changes (``slash``, ``display_name``) for an existing
+        ``agent_id`` are handled by remove-then-insert rather than
+        :meth:`_replace` (whose asserts treat those as immutable). In
+        practice agents don't rename mid-run, but defending here avoids
+        a hard crash on a misconfigured deployment. If the new
+        ``slash``/``display_name`` collides with a *different* agent
+        already in the registry, the old indexes are restored and the
+        :class:`ValueError` propagates so the caller (state consumer)
+        can log and skip.
         """
-        async with self._write_lock:
-            existing = self._by_id.get(agent_id)
-            if existing is None:
-                raise KeyError(agent_id)
-            if existing.source_path is None:
-                raise ValueError(
-                    f"agent {agent_id!r} has no source_path; cannot rewrite frontmatter"
-                )
-            new_definition = update_thinking_effort(existing.source_path, value)
-            self._replace(existing, new_definition)
-            return new_definition
+        incoming_id = definition.agent_id
+        existing = self._by_id.get(incoming_id)
+        if existing is not None and existing.role == "router":
+            # Should never happen: agents don't announce with role="router",
+            # and the only router is the locally-built singleton. Log and
+            # refuse.
+            logger.warning(
+                "refusing to upsert agent_id=%r from state event: matches "
+                "existing router definition; state events for router agent_id "
+                "must not be published",
+                incoming_id,
+            )
+            return False
+        if existing is None:
+            self._index(definition)
+            self._all.append(definition)
+            return True
+        # Key-field changes (slash, display_name) need full re-index, not
+        # _replace.
+        if (
+            existing.slash != definition.slash
+            or existing.display_name != definition.display_name
+        ):
+            self._unindex(existing)
+            try:
+                self._index(definition)
+            except ValueError:
+                # New slash/display_name collides with a DIFFERENT agent
+                # already in the registry. Restore the old definition's
+                # indexes to keep the registry consistent, and re-raise so
+                # the caller (state consumer) logs and skips.
+                self._index(existing)
+                raise
+            idx = self._all.index(existing)
+            self._all[idx] = definition
+            return False
+        self._replace(existing, definition)
+        return False
+
+    def remove(self, agent_id: str) -> bool:
+        """Remove ``agent_id`` from all indexes. Returns True if removed.
+
+        Router protection: removal requests for the router's
+        ``agent_id`` are rejected with a warning. Routers are locally
+        built and not subject to departure events. Returns False for
+        unknown agents (idempotent).
+        """
+        existing = self._by_id.get(agent_id)
+        if existing is None:
+            return False
+        if existing.role == "router":
+            logger.warning(
+                "refusing to remove router agent_id=%r from registry: routers "
+                "are locally built and not subject to departure events",
+                agent_id,
+            )
+            return False
+        self._unindex(existing)
+        self._all.remove(existing)
+        return True
+
+    def apply_local_thinking_effort_override(
+        self, agent_id: str, value: ThinkingEffort
+    ) -> AgentDefinition | None:
+        """Optimistically update an agent's in-memory ``thinking_effort``.
+
+        Returns the new (replaced) :class:`AgentDefinition`, or ``None``
+        if ``agent_id`` is not in the registry. The bridge's slash
+        handler calls this after publishing the
+        :class:`SetThinkingEffortOp` to the agent's control topic; the
+        agent's eventual post-apply state event will re-upsert with the
+        (now-confirmed) value. Pure in-memory operation — no disk I/O,
+        no awaits.
+        """
+        existing = self._by_id.get(agent_id)
+        if existing is None:
+            return None
+        new_def = existing.model_copy(update={"thinking_effort": value})
+        self._replace(existing, new_def)
+        return new_def
