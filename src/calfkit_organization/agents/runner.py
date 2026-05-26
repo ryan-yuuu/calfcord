@@ -403,6 +403,23 @@ async def _amain(args: argparse.Namespace) -> None:
 
     specs = await _resolve_agent_specs(args.agent, agents_dir, state_dir)
 
+    needs_codex = any(spec[0].provider == "openai-codex" for spec in specs)
+    if needs_codex:
+        # Lazy import: keeps authlib + openhands-sdk auth machinery out of
+        # the import graph for deployments that don't use Codex subscription.
+        from calfkit_organization.providers.codex import (
+            CodexPromptsUnavailableError,
+            prewarm_codex_prompts,
+        )
+        try:
+            await prewarm_codex_prompts()
+        except CodexPromptsUnavailableError as exc:
+            raise BootstrapError(
+                f"openai-codex agents declared but upstream Codex prompts "
+                f"are unavailable: {exc}. Check internet connectivity, or "
+                f"run once: uv run calfkit-auth codex refresh-prompts"
+            ) from exc
+
     settings = DiscordSettings()  # type: ignore[call-arg]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 

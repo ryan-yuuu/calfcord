@@ -52,10 +52,34 @@ def _seed(tmp_path: Path, *, account_id: str | None = None) -> CredentialStore:
     return store
 
 
+def _loaded_resolver(
+    tmp_path: Path,
+    models: dict[str, str] | None = None,
+    fallback: str = "FALLBACK PROMPT",
+):
+    """Build a PromptResolver loaded with synthetic prompts, no network."""
+    from calfkit_organization.providers.codex.prompt_cache import PromptCache
+    from calfkit_organization.providers.codex.prompts import PromptResolver
+
+    resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "prompts"))
+    # Bypass network: hydrate the resolver's private state directly for tests.
+    resolver._models = models or {
+        "gpt-5.2": "GPT-5.2 OFFICIAL PROMPT",
+        "gpt-5.3-codex": "GPT-5.3 OFFICIAL PROMPT",
+    }
+    resolver._fallback_prompt = fallback
+    resolver._loaded = True
+    return resolver
+
+
 class TestConstruction:
     def test_settings_carry_expected_headers(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="acct_demo")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         headers = client.model_settings.get("extra_headers", {})
         assert headers.get("originator") == ORIGINATOR
@@ -64,7 +88,11 @@ class TestConstruction:
 
     def test_account_id_header_absent_when_jwt_lacks_claim(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id=None)
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         headers = client.model_settings.get("extra_headers", {})
         # Required headers still set; account-id is omitted (warning logged)
@@ -74,21 +102,33 @@ class TestConstruction:
 
     def test_extra_body_forces_store_false(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         body = client.model_settings.get("extra_body", {})
         assert body.get("store") is False
 
     def test_send_reasoning_ids_disabled(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         # The setting is keyed as openai_send_reasoning_ids on OpenAIResponsesModelSettings
         assert client.model_settings.get("openai_send_reasoning_ids") is False
 
     def test_underlying_provider_uses_authlib_client(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         # Reach into pydantic-ai's provider to assert we wired the authlib transport.
         # Accessing _client / _http_client is fragile but is the only way to verify
@@ -101,7 +141,11 @@ class TestConstruction:
         """Verify we widened authlib's default 60s to give long-running services
         plenty of buffer before token expiry."""
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         provider = client._provider  # type: ignore[attr-defined]
         underlying: AsyncOAuth2Client = provider.client._client
@@ -109,7 +153,11 @@ class TestConstruction:
 
     def test_base_url_points_at_codex_backend(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
 
         # OpenAIProvider exposes base_url via its OpenAI client
         provider = client._provider  # type: ignore[attr-defined]
@@ -117,26 +165,48 @@ class TestConstruction:
         # The openai client normalises to include a trailing slash
         assert str(underlying.base_url).rstrip("/") == CODEX_BASE_URL
 
+    def test_raises_when_resolver_not_loaded(self, tmp_path: Path) -> None:
+        """If runner forgot to prewarm, construction should fail loudly."""
+        from calfkit_organization.providers.codex.prompt_cache import PromptCache
+        from calfkit_organization.providers.codex.prompts import PromptResolver
+
+        store = _seed(tmp_path, account_id="x")
+        unloaded_resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "prompts"))
+        # NOT calling ensure_loaded() — simulates runner bug
+        with pytest.raises(RuntimeError, match="ensure_loaded"):
+            CodexSubscriptionModelClient(
+                model_name="gpt-5.2-codex",
+                store=store,
+                resolver=unloaded_resolver,
+            )
+
 
 class TestImpersonationTransformation:
     @pytest.mark.asyncio
-    async def test_map_messages_substitutes_instructions(self, tmp_path: Path) -> None:
-        """The agent's actual system prompt should NOT be sent as ``instructions``.
-
-        Instead it's prepended to the first user message and ``instructions``
-        is replaced with the short fixed string OpenHands' transformation
-        returns.
+    async def test_map_messages_uses_resolved_codex_prompt(self, tmp_path: Path) -> None:
+        """``instructions`` returned to pydantic-ai should be the verbatim
+        per-model Codex CLI prompt resolved at construction time, not the
+        agent's own system prompt or OpenHands' branded short string.
         """
-        from calfkit._vendor.pydantic_ai.messages import ModelRequest, SystemPromptPart, UserPromptPart
+        from calfkit._vendor.pydantic_ai.messages import (
+            ModelRequest,
+            SystemPromptPart,
+            UserPromptPart,
+        )
         from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 
         store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(model_name="gpt-5.2-codex", store=store)
+        resolver = _loaded_resolver(tmp_path, models={"gpt-5.2": "OFFICIAL GPT-5.2 PROMPT"})
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=resolver,
+        )
 
         messages = [
             ModelRequest(
                 parts=[
-                    SystemPromptPart(content="You are a banana expert. Always mention bananas."),
+                    SystemPromptPart(content="You are a banana expert."),
                     UserPromptPart(content="hello"),
                 ]
             )
@@ -147,19 +217,39 @@ class TestImpersonationTransformation:
             client.model_settings,
             ModelRequestParameters(),
         )
-
-        # The instructions returned to pydantic-ai are NOT the agent's prompt.
-        # They are the short fixed string that OpenHands' transform substitutes
-        # (we don't assert the exact text — it lives in openhands-sdk and may
-        # change across versions — but it must be a non-empty string distinct
-        # from the agent's actual prompt).
-        assert isinstance(new_instructions, str)
-        assert new_instructions != "You are a banana expert. Always mention bananas."
-        assert len(new_instructions) > 0
-
-        # The agent's real prompt is prepended to a user message as input_text.
+        # gpt-5.2-codex longest-prefix matches gpt-5.2 → official prompt
+        assert new_instructions == "OFFICIAL GPT-5.2 PROMPT"
+        # Agent's real prompt still smuggled into a user message
         flattened = _flatten_text(transformed)
-        assert "You are a banana expert. Always mention bananas." in flattened
+        assert "You are a banana expert." in flattened
+
+    @pytest.mark.asyncio
+    async def test_map_messages_uses_longest_prefix_match(self, tmp_path: Path) -> None:
+        """gpt-5.2-codex should pull the gpt-5.2 entry's prompt via longest-prefix."""
+        from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+        from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
+
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_resolver(
+            tmp_path,
+            models={
+                "gpt-5": "GENERIC GPT-5",
+                "gpt-5.2": "SPECIFIC GPT-5.2",
+            },
+        )
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=resolver,
+        )
+
+        messages = [ModelRequest(parts=[UserPromptPart(content="hi")])]
+        new_instructions, _ = await client._map_messages(
+            messages,
+            client.model_settings,
+            ModelRequestParameters(),
+        )
+        assert new_instructions == "SPECIFIC GPT-5.2"
 
 
 # --- Helpers -----------------------------------------------------------------

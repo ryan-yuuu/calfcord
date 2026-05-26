@@ -48,11 +48,23 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.agents.factory import AgentFactory
 from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
 from calfkit_organization.router.fanout import build_fanout_consumer
 
 logger = logging.getLogger(__name__)
+
+
+class BootstrapError(RuntimeError):
+    """A recoverable router-startup failure that produces a clean CLI exit.
+
+    Mirrors :class:`calfkit_organization.agents.runner.BootstrapError`:
+    raised when a required external resource (e.g. upstream Codex prompts)
+    cannot be fetched at boot time. :func:`main` converts this into
+    ``SystemExit(message)`` so operators see the actionable error on
+    stderr without a traceback.
+    """
 
 _REPLY_TOPIC = "calfkit.router.reply"
 """Named reply topic for the router client. ``Client.connect``
@@ -125,13 +137,22 @@ async def _run_worker(worker: Worker) -> None:
 def _build_router_nodes(
     factory: AgentFactory,
     client: Client,
+    definition: AgentDefinition | None = None,
 ) -> list:
     """Construct the router agent + fan-out consumer.
 
     Extracted from ``_amain`` so the boot wiring can be exercised in
     tests without standing up Kafka.
+
+    ``definition`` is an optional pre-built router definition; when
+    ``None`` (the default, used by tests), :func:`build_router_definition`
+    is called internally. ``_amain`` passes a pre-built definition so it
+    can inspect ``definition.provider`` before this call and prewarm the
+    Codex prompt cache if needed (avoiding a re-read of the router env
+    vars on the hot path).
     """
-    definition = build_router_definition()
+    if definition is None:
+        definition = build_router_definition()
     router_node = factory.build_node(definition, state=None, store=None)
     fanout_node = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
     return [router_node, fanout_node]
@@ -139,6 +160,24 @@ def _build_router_nodes(
 
 async def _amain() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+
+    definition = build_router_definition()
+    needs_codex = definition.provider == "openai-codex"
+    if needs_codex:
+        # Lazy import: keeps authlib + openhands-sdk auth machinery out of
+        # the import graph for deployments that don't use Codex subscription.
+        from calfkit_organization.providers.codex import (
+            CodexPromptsUnavailableError,
+            prewarm_codex_prompts,
+        )
+        try:
+            await prewarm_codex_prompts()
+        except CodexPromptsUnavailableError as exc:
+            raise BootstrapError(
+                f"openai-codex router declared but upstream Codex prompts "
+                f"are unavailable: {exc}. Check internet connectivity, or "
+                f"run once: uv run calfkit-auth codex refresh-prompts"
+            ) from exc
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client:
         # Eagerly start the broker so the reply dispatcher is live
@@ -151,7 +190,7 @@ async def _amain() -> None:
         # path; ``None`` is the explicit "I don't need Discord" call
         # site signal. See module docstring.
         factory = AgentFactory(persona_sender=None, calfkit_client=client)
-        nodes = _build_router_nodes(factory, client)
+        nodes = _build_router_nodes(factory, client, definition=definition)
 
         worker = Worker(client, nodes)
         logger.info(
@@ -172,6 +211,8 @@ def main() -> None:
     _parse_args()
     try:
         asyncio.run(_amain())
+    except BootstrapError as e:
+        raise SystemExit(str(e)) from None
     except KeyboardInterrupt:
         logger.info("calfkit-router shutting down")
 

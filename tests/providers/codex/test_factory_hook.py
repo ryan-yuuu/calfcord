@@ -28,6 +28,31 @@ def _seed_credentials(tmp_path: Path) -> None:
     store.save(creds)
 
 
+@pytest.fixture(autouse=True)
+def _preloaded_default_resolver(monkeypatch, tmp_path):
+    """Hydrate the process-singleton PromptResolver with synthetic prompts.
+
+    The factory hook constructs a CodexSubscriptionModelClient which calls
+    ``get_default_resolver().resolve(model_name)`` synchronously. In real
+    deployments the runner prewarms the resolver before any model client
+    is built; tests must do the same. We bypass network entirely by
+    hydrating the singleton's private state with fixed prompts.
+    """
+    from calfkit_organization.providers.codex import prompts as _prompts
+    from calfkit_organization.providers.codex.prompt_cache import PromptCache
+    from calfkit_organization.providers.codex.prompts import PromptResolver
+
+    resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "_prompts_cache"))
+    resolver._models = {"gpt-5.2": "GPT-5.2 OFFICIAL PROMPT"}
+    resolver._fallback_prompt = "FALLBACK PROMPT"
+    resolver._loaded = True
+    monkeypatch.setattr(_prompts, "_default_resolver", resolver)
+    yield
+    # Defensive — restore to None so a later test that needs a fresh singleton
+    # picks up its own monkeypatched state rather than this one's.
+    monkeypatch.setattr(_prompts, "_default_resolver", None)
+
+
 class TestBuildCodexSubscriptionClient:
     def test_raises_when_no_credentials_cached(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

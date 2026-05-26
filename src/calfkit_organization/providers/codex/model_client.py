@@ -15,17 +15,23 @@ Subclasses :class:`calfkit.providers.OpenAIResponsesModelClient` to:
    ``chatgpt-account-id: <from JWT>``).
 
 3. Override :meth:`_map_messages` to apply the Codex impersonation
-   transformation: replace the agent's actual system prompt with a short
-   fixed instruction string, and prepend the real system prompt to the
-   first user message as an ``input_text`` part. The Codex backend
-   rejects long or structurally complex ``instructions`` blocks; this
-   matches what OpenHands ships and what the wire shape from the
-   official Codex CLI produces.
+   transformation. The agent's real system prompt is smuggled into a
+   synthetic leading user message; the ``instructions`` we send is the
+   verbatim official Codex CLI system prompt for the requested model,
+   fetched live from ``openai/codex`` (see :mod:`prompts`). The Codex
+   backend fingerprints ``instructions`` against the official strings,
+   so we resolve a per-model prompt at construction time rather than
+   substituting OpenHands' branded short string.
 
 Construction bypasses calfkit's ``OpenAIResponsesModelClient.__init__``
 because it builds its own ``OpenAIProvider`` without the ``http_client``
 hook we need. We call the underlying vendored pydantic-ai initializer
 directly with a provider configured to use our authlib client.
+
+The runner MUST call :func:`prompts.prewarm_codex_prompts` once at
+startup before constructing any :class:`CodexSubscriptionModelClient`;
+construction calls :meth:`PromptResolver.resolve` synchronously and
+will raise :class:`RuntimeError` if the resolver has not been loaded.
 """
 
 from __future__ import annotations
@@ -43,6 +49,10 @@ from calfkit.providers import OpenAIResponsesModelClient
 from openhands.sdk.llm.auth import CredentialStore, transform_for_subscription
 
 from calfkit_organization.providers.codex.jwt import extract_account_id
+from calfkit_organization.providers.codex.prompts import (
+    PromptResolver,
+    get_default_resolver,
+)
 from calfkit_organization.providers.codex.token_store import (
     credentials_to_authlib_token,
     load_credentials,
@@ -69,7 +79,13 @@ REFRESH_LEEWAY_SECONDS = 300
 class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
     """OpenAI Responses model client backed by a ChatGPT subscription."""
 
-    def __init__(self, *, model_name: str, store: CredentialStore):
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        store: CredentialStore,
+        resolver: PromptResolver | None = None,
+    ):
         creds = load_credentials(store)
         if creds is None:
             # The factory hook should have validated this already; defensive guard
@@ -79,6 +95,13 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
                 "Cannot construct CodexSubscriptionModelClient without saved credentials. "
                 "Run: uv run calfkit-auth codex login"
             )
+
+        # Resolve the verbatim Codex CLI system prompt for this model. If the
+        # runner forgot to call ``prewarm_codex_prompts()`` first, the default
+        # resolver's ``resolve()`` raises RuntimeError with a clear message —
+        # we let that propagate so the bug surfaces loudly at construction
+        # rather than silently sending an unfingerprinted instructions block.
+        self._codex_instructions: str = (resolver or get_default_resolver()).resolve(model_name)
 
         token = credentials_to_authlib_token(creds)
 
@@ -149,14 +172,18 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         ``instructions`` is the agent's system prompt joined into a single
         string (or an ``Omit`` sentinel). We:
 
-        * Discard the agent's instructions and substitute a short fixed string
-          (Codex backend rejects long/complex instructions; this matches what
-          OpenHands ships and what works on the wire).
-        * Prepend the agent's real system prompt to the first user message as
-          an ``input_text`` part so the model still receives it.
+        * Discard the agent's instructions and substitute the verbatim Codex
+          CLI system prompt for this model (resolved at construction time
+          from the live ``openai/codex`` source). The Codex backend
+          fingerprints this field — a mismatch fails the check.
+        * Prepend the agent's real system prompt to the first user message
+          as an ``input_text`` part so the model still receives it.
 
-        Both steps are delegated to OpenHands' :func:`transform_for_subscription`
-        which contains the precise wire-shape that the Codex backend accepts.
+        The second step is delegated to OpenHands'
+        :func:`transform_for_subscription`, which mutates ``openai_messages``
+        in place to inject the synthetic leading user message. Its return
+        value is discarded — the instructions we ship are ``self._codex_instructions``,
+        not OpenHands' branded short string.
         """
         instructions, openai_messages = await super()._map_messages(
             messages, model_settings, model_request_parameters
@@ -165,5 +192,7 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         # (truthy filter handles both). ``transform_for_subscription`` expects a
         # list of system-prompt strings.
         system_chunks: list[str] = [instructions] if isinstance(instructions, str) and instructions else []
-        new_instructions, transformed = transform_for_subscription(system_chunks, openai_messages)
-        return new_instructions, transformed
+        # Side effect only: mutates openai_messages to smuggle the agent's
+        # real system prompt into a synthetic leading user message.
+        transform_for_subscription(system_chunks, openai_messages)
+        return self._codex_instructions, openai_messages

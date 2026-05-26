@@ -16,6 +16,14 @@ Commands:
       decoded ChatGPT account id.
   calfkit-auth codex refresh
       Force a token refresh now (debugging convenience).
+  calfkit-auth codex refresh-prompts
+      Force a re-fetch of openai/codex prompts; falls back to the
+      on-disk cache when upstream is unreachable, hard-fails when both
+      network and cache are unavailable.
+  calfkit-auth codex prompt-status
+      Show cached Codex prompt files, ETags, and ages.
+  calfkit-auth codex clear-prompts
+      Delete cached Codex prompt files.
 
 All credential I/O is delegated to OpenHands SDK's
 :class:`~openhands.sdk.llm.auth.OpenAISubscriptionAuth`, pointed at our
@@ -29,7 +37,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from openhands.sdk.llm.auth import OpenAISubscriptionAuth
 
@@ -56,6 +64,12 @@ def _build_parser() -> argparse.ArgumentParser:
     codex_sub.add_parser("logout", help="Delete cached credentials.")
     codex_sub.add_parser("status", help="Show whether credentials are present and when they expire.")
     codex_sub.add_parser("refresh", help="Force a token refresh now.")
+    codex_sub.add_parser(
+        "refresh-prompts",
+        help="Force a re-fetch of openai/codex prompts (uses cache as fallback on network failure).",
+    )
+    codex_sub.add_parser("prompt-status", help="Show cached Codex prompt files, ETags, and ages.")
+    codex_sub.add_parser("clear-prompts", help="Delete cached Codex prompt files.")
 
     return parser
 
@@ -139,6 +153,71 @@ async def _cmd_refresh(_args: argparse.Namespace) -> int:
     return _cmd_status(_args)
 
 
+def _format_age(td: timedelta) -> str:
+    """Human-readable timedelta for status display: '2h', '15m', '3d', etc."""
+    seconds = int(td.total_seconds())
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+async def _cmd_refresh_prompts(_args: argparse.Namespace) -> int:
+    """Force a re-fetch of upstream Codex prompts.
+
+    Calls ``resolver.reset()`` then ``ensure_loaded()``, which performs
+    ETag-conditional GETs against the on-disk cache. Hard-fails (returns
+    ``1``) when both network and cache are unavailable.
+    """
+    from calfkit_organization.providers.codex.prompts import (
+        CodexPromptsUnavailableError,
+        get_default_resolver,
+    )
+
+    resolver = get_default_resolver()
+    resolver.reset()
+    try:
+        await resolver.ensure_loaded()
+    except CodexPromptsUnavailableError as exc:
+        print(f"Refresh failed: {exc}", file=sys.stderr)
+        return 1
+    print("Codex prompts refreshed.", file=sys.stderr)
+    return _cmd_prompt_status(_args)
+
+
+def _cmd_prompt_status(_args: argparse.Namespace) -> int:
+    """Print cached prompt files: name, size, ETag (truncated), age."""
+    from calfkit_organization.providers.codex.prompt_cache import PromptCache
+
+    cache = PromptCache()
+    entries = cache.files()
+    if not entries:
+        print(f"No Codex prompts cached. Cache dir: {cache.base_dir}")
+        print("Run: uv run calfkit-auth codex refresh-prompts")
+        return 1
+    print(f"Cache dir: {cache.base_dir}")
+    now = datetime.now(tz=timezone.utc)
+    for e in entries:
+        age = (now - e.fetched_at) if e.fetched_at else None
+        age_str = _format_age(age) if age else "unknown"
+        etag_short = (e.etag[:12] + "...") if e.etag else "<none>"
+        print(f"  {e.name:20s} {len(e.body):>8d}B  etag={etag_short}  age={age_str}")
+    return 0
+
+
+def _cmd_clear_prompts(_args: argparse.Namespace) -> int:
+    """Delete all cached prompt files."""
+    from calfkit_organization.providers.codex.prompt_cache import PromptCache
+
+    cache = PromptCache()
+    cache.clear()
+    print(f"Cleared cached Codex prompts at {cache.base_dir}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = _build_parser()
@@ -156,6 +235,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_status(args)
     if args.command == "refresh":
         return asyncio.run(_cmd_refresh(args))
+    if args.command == "refresh-prompts":
+        return asyncio.run(_cmd_refresh_prompts(args))
+    if args.command == "prompt-status":
+        return _cmd_prompt_status(args)
+    if args.command == "clear-prompts":
+        return _cmd_clear_prompts(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits
