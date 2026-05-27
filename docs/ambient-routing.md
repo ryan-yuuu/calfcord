@@ -218,6 +218,13 @@ thinking_effort: minimal
 history_turns: 10
 ```
 
+A committable template lives at `router.yml.example` at the repo
+root — copy it and edit:
+
+```bash
+cp router.yml.example router.yml
+```
+
 All four fields are optional — omit any to fall through to the matching
 env var, then the in-code default.
 

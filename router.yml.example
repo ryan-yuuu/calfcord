@@ -1,0 +1,54 @@
+# Calfcord router runtime config — example template.
+#
+# Optional file. When present at ``./router.yml`` (or the path pointed
+# at by ``$CALFKIT_ROUTER_CONFIG_PATH``), its fields override the
+# matching ``CALFKIT_ROUTER_*`` environment variables on a per-field
+# basis. Missing fields fall through to env vars, then to the in-code
+# defaults in ``src/calfkit_organization/router/definition.py``.
+#
+# To use: ``cp router.yml.example router.yml`` and edit. All four
+# fields below are optional — delete any line to fall through to the
+# env var / code default for that field.
+#
+# Schema is strict (``extra="forbid"``): unknown keys (typos like
+# ``provder:``) and reserved router-identity fields (``slash:``,
+# ``role:``, ``system_prompt:``, etc.) cause a boot error rather than
+# silently dropping. See ``docs/ambient-routing.md`` § "Router config
+# file (router.yml)" for the full precedence + behavior table.
+
+# LLM provider. One of:
+#   anthropic     — Claude family; reads ANTHROPIC_API_KEY at first call.
+#   openai        — OpenAI API credits; reads OPENAI_API_KEY.
+#   openai-codex  — ChatGPT Plus / Pro subscription via OAuth. Requires
+#                   ``uv run calfkit-auth codex login`` on the host first.
+# In-code default: openai
+provider: openai
+
+# Model name. Provider-specific — calfcord does NOT validate against
+# an allowlist, the SDK rejects unknown names at first call. Examples:
+#   anthropic: claude-haiku-4-5 / claude-sonnet-4-5
+#   openai: gpt-5-nano / gpt-5-mini
+#   openai-codex: gpt-5.4-mini / gpt-5.3-codex / gpt-5.4 / gpt-5.5
+# Pick a fast / cheap model — the router fires on every ambient message
+# in every subscribed channel.
+# In-code default: gpt-5-nano
+model: gpt-5-nano
+
+# Reasoning / thinking-budget tier. One of:
+#   none | minimal | low | medium | high | xhigh | max
+# The router task is small and bounded (one structured-output call per
+# message), so the default is ``none``. Bump to ``minimal`` if you see
+# the router struggling on continuity vs. topic-match edge cases — the
+# step from none → minimal is the highest-value increment for this task.
+# In-code default: none
+thinking_effort: none
+
+# Channel-history window (0..100). How many recent messages the bridge
+# projects into ``message_history`` for the router's continuity signal.
+# Smaller than the assistant default (30) because the router only needs
+# to recognize follow-ups vs. fresh topics — and the per-invocation cost
+# adds up since it fires on every ambient message in every channel.
+# Set to 0 to disable history entirely (router decides from the current
+# message alone).
+# In-code default: 10
+history_turns: 10
