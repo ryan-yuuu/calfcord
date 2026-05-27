@@ -503,103 +503,6 @@ class TestResolveAgentSpecs:
             await _resolve_agent_specs(None, agents_dir, state_dir)
 
 
-class TestRunWorker:
-    """``_run_worker`` is the shared shutdown/error-surfacing helper. It
-    must (a) re-raise any exception that escapes ``worker.run`` so the
-    process exits non-zero, and (b) handle clean returns and signal-driven
-    shutdown without hanging."""
-
-    async def test_worker_exception_is_reraised(self) -> None:
-        """If worker.run() raises, _run_worker must log and re-raise so
-        the process exits non-zero. The gather(return_exceptions=True)
-        on the drain path must not swallow the exception."""
-        worker = MagicMock()
-        worker.run = AsyncMock(side_effect=RuntimeError("kafka broker drop"))
-
-        with pytest.raises(RuntimeError, match="kafka broker drop"):
-            await _run_worker(worker, num_agents=2)
-
-    async def test_clean_worker_return_raises_runtime_error(self) -> None:
-        """A clean ``worker.run()`` return without a shutdown signal is
-        unexpected — ``worker.run`` is meant to be infinite. Treat as a
-        crash so supervisors configured for ``Restart=on-failure`` restart
-        us; without this, the process exits 0 and the supervisor leaves
-        us down."""
-        worker = MagicMock()
-        worker.run = AsyncMock(return_value=None)
-
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
-            await _run_worker(worker, num_agents=1)
-
-    async def test_clean_worker_return_logs_error(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """The synthetic RuntimeError must be logged at ERROR so operators
-        see it in the same band as a real crash, not buried at warning."""
-        worker = MagicMock()
-        worker.run = AsyncMock(return_value=None)
-
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await _run_worker(worker, num_agents=1)
-
-        assert any(
-            "returned unexpectedly" in r.message
-            for r in caplog.records
-            if r.levelno >= logging.ERROR
-        )
-
-    async def test_worker_exception_is_logged_with_exc_info(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """The error log line must carry exc_info so the traceback lands
-        in the log stream — silent exit was the C2 production bug."""
-        worker = MagicMock()
-        worker.run = AsyncMock(side_effect=RuntimeError("kafka broker drop"))
-
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await _run_worker(worker, num_agents=1)
-
-        crash_logs = [
-            r for r in caplog.records
-            if r.levelno >= logging.ERROR and "worker crashed" in r.message
-        ]
-        assert crash_logs, "expected an ERROR log naming the worker crash"
-        assert crash_logs[0].exc_info is not None
-
-    async def test_signal_path_logs_drain_count(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """When the stop signal fires first (e.g., Ctrl-C), the drain log
-        must name the agent count so operators don't think it hung."""
-        # Simulate the signal path by making worker.run hang forever and
-        # cancelling the _run_worker call externally — the cancellation
-        # is delivered to worker_task while stop_task is still pending,
-        # which mirrors what happens when asyncio.wait completes on a
-        # non-signal cancellation. To exercise the actual signal branch
-        # without touching real signals, run _run_worker as a task and
-        # cancel it; the stop_task path is the closest analogue we can
-        # exercise in-process. (Signal-handler installation is a process-
-        # level side effect we don't want to assert against in unit tests.)
-        worker = MagicMock()
-        # A run that hangs until cancelled.
-        running = asyncio.Event()
-        async def _hang() -> None:
-            running.set()
-            await asyncio.Event().wait()
-        worker.run = _hang
-
-        task = asyncio.create_task(_run_worker(worker, num_agents=3))
-        await running.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        # No explicit log assertion here — the cancellation path runs
-        # through the finally drain, which is what we wanted to cover.
-        # The drain log line is exercised by the real-signal path which
-        # we can't unit-test portably; this test guards against the
-        # cancel/drain path hanging or raising the wrong exception type.
-
-
 class TestPrewarmCodexIfNeeded:
     """``_prewarm_codex_if_needed`` is the runner's bridge between agent specs
     and the openai-codex prompt resolver. Must invoke prewarm exactly when at
@@ -837,28 +740,12 @@ class TestPublishDeparturesBestEffort:
         )
 
 
-class _HangingWorker:
-    """A worker.run() that blocks until externally cancelled."""
-
-    async def run(self) -> None:
-        await asyncio.Event().wait()
-
-
-class _CrashingWorker:
-    """A worker.run() that raises on first await."""
-
-    def __init__(self, exc: BaseException) -> None:
-        self._exc = exc
-
-    async def run(self) -> None:
-        raise self._exc
-
-
 class TestRunWorkerShutdownCallback:
-    """``_run_worker`` accepts an optional ``on_shutdown_signal`` callback.
-    It must fire on the signal-received branch only — never on the crash
-    branch (broker may be why we crashed), never when not provided, and
-    its own exceptions must not prevent the worker drain."""
+    """``_run_worker`` blocks on a SIGINT/SIGTERM stop event and runs an
+    optional ``on_shutdown_signal`` callback while the broker is still
+    alive. The caller (``_amain``) is responsible for ``register_handlers``
+    + ``broker.start``; this helper only owns the signal-wait + drain hook.
+    """
 
     @staticmethod
     def _disable_signal_handlers(
@@ -880,7 +767,7 @@ class TestRunWorkerShutdownCallback:
     async def test_callback_fires_on_signal(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When stop_task wins, on_shutdown_signal is awaited before draining."""
+        """SIGINT triggers on_shutdown_signal before _run_worker returns."""
         captured = self._disable_signal_handlers(monkeypatch)
         callback_fired = asyncio.Event()
 
@@ -888,13 +775,9 @@ class TestRunWorkerShutdownCallback:
             callback_fired.set()
 
         run_task = asyncio.create_task(
-            _run_worker(
-                _HangingWorker(),  # type: ignore[arg-type]
-                num_agents=1,
-                on_shutdown_signal=_on_shutdown,
-            ),
+            _run_worker(num_agents=1, on_shutdown_signal=_on_shutdown),
         )
-        # Give _run_worker a chance to register handlers + start tasks.
+        # Give _run_worker a chance to register handlers + start the wait.
         for _ in range(50):
             await asyncio.sleep(0)
             if signal.SIGINT in captured:
@@ -906,107 +789,49 @@ class TestRunWorkerShutdownCallback:
         await run_task
         assert callback_fired.is_set()
 
-    async def test_callback_does_not_fire_on_worker_crash(
+    async def test_callback_not_required(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When worker_task wins with an exception, on_shutdown_signal is NOT called."""
-        self._disable_signal_handlers(monkeypatch)
-        callback_fired = asyncio.Event()
-
-        async def _on_shutdown() -> None:
-            callback_fired.set()
-
-        with pytest.raises(RuntimeError, match="boom"):
-            await _run_worker(
-                _CrashingWorker(RuntimeError("boom")),  # type: ignore[arg-type]
-                num_agents=1,
-                on_shutdown_signal=_on_shutdown,
-            )
-        assert not callback_fired.is_set()
-
-    async def test_callback_does_not_fire_on_clean_return(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A clean worker.run() return is treated as a phantom shutdown (a
-        synthetic crash) so the callback path must be skipped — the broker
-        may still be wedged in a way we don't trust to publish."""
-        self._disable_signal_handlers(monkeypatch)
-        callback_fired = asyncio.Event()
-
-        async def _on_shutdown() -> None:
-            callback_fired.set()
-
-        worker = MagicMock()
-        worker.run = AsyncMock(return_value=None)
-
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
-            await _run_worker(
-                worker,
-                num_agents=1,
-                on_shutdown_signal=_on_shutdown,
-            )
-        assert not callback_fired.is_set()
-
-    async def test_callback_does_not_fire_when_not_provided(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Default None: existing behavior unchanged (no callback path
-        exercised, no surprises for pre-PR-2 call sites)."""
+        """Passing ``on_shutdown_signal=None`` is a no-op past the stop wait."""
         captured = self._disable_signal_handlers(monkeypatch)
 
-        run_task = asyncio.create_task(
-            _run_worker(_HangingWorker(), num_agents=1),  # type: ignore[arg-type]
-        )
+        run_task = asyncio.create_task(_run_worker(num_agents=1))
         for _ in range(50):
             await asyncio.sleep(0)
             if signal.SIGINT in captured:
                 break
+        assert signal.SIGINT in captured, "handler never registered"
+
         captured[signal.SIGINT]()
         # Must complete without raising — the absence of a callback is
         # not an error.
         await run_task
 
-    async def test_callback_exception_does_not_prevent_drain(
+    async def test_callback_exception_is_swallowed(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """If on_shutdown_signal raises, the worker still gets drained and
-        the failure is logged at ERROR so operators can see what happened."""
+        """An exception from ``on_shutdown_signal`` is logged at ERROR
+        and swallowed — a misbehaving callback must not block teardown."""
         captured = self._disable_signal_handlers(monkeypatch)
 
         async def _bad_callback() -> None:
             raise RuntimeError("callback boom")
 
-        # Build the worker so we can observe the drain (cancellation) after
-        # the callback raises.
-        cancelled = asyncio.Event()
-
-        class _ObservableWorker:
-            async def run(self) -> None:
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    cancelled.set()
-                    raise
-
         with caplog.at_level(logging.ERROR):
             run_task = asyncio.create_task(
-                _run_worker(
-                    _ObservableWorker(),  # type: ignore[arg-type]
-                    num_agents=1,
-                    on_shutdown_signal=_bad_callback,
-                ),
+                _run_worker(num_agents=1, on_shutdown_signal=_bad_callback),
             )
             for _ in range(50):
                 await asyncio.sleep(0)
                 if signal.SIGINT in captured:
                     break
+            assert signal.SIGINT in captured, "handler never registered"
             captured[signal.SIGINT]()
             # Must NOT raise — callback errors are swallowed.
             await run_task
 
-        assert cancelled.is_set(), "worker_task was not cancelled after callback"
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert any(
             "on_shutdown_signal callback raised" in r.message for r in errors

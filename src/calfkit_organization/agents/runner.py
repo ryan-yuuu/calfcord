@@ -344,90 +344,56 @@ def _build_node_or_bootstrap_error(
 
 
 async def _run_worker(
-    worker: Worker,
     *,
     num_agents: int,
     on_shutdown_signal: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
-    """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
+    """Block until SIGINT/SIGTERM, then run the shutdown callback.
 
-    Calfkit's :meth:`Worker.run` is a single awaitable regardless of node
-    count, so the same shutdown pattern works for both single-agent and
-    multi-agent workers. The drain log line names the node count so a
-    Ctrl-C in all-mode doesn't look hung while N consumer groups close.
+    Pre-condition: the caller has already invoked
+    :meth:`Worker.register_handlers` and ``broker.start()``. Subscribers
+    are consuming on background tasks owned by FastStream; this function
+    only keeps the event loop alive so those tasks (and the surrounding
+    ``Client.connect``/``DiscordPersonaSender`` async-context managers)
+    stay live until a shutdown signal arrives.
 
-    If ``worker.run`` itself raises during runtime (e.g., a Kafka broker
-    drop or an unhandled handler exception), the exception is logged and
-    re-raised so the process exits non-zero. Without this, the trailing
-    ``gather(..., return_exceptions=True)`` would silently consume the
-    exception and the process would exit 0 — supervisors configured for
-    ``Restart=on-failure`` would not restart, and operators would see a
-    "phantom shutdown" with no diagnostic in logs.
+    The drain log line names the agent count so a Ctrl-C in all-mode
+    doesn't look hung while N consumer groups close.
 
-    ``on_shutdown_signal`` is an optional async callback invoked on the
-    signal-received path only — not on the crash path. The broker is still
-    alive at this point, which makes it safe to fire last-gasp publishes
-    (e.g., AgentDepartureEvent). Crashes deliberately skip this: the broker
-    may be why we crashed, and attempting to publish on it could hang or
-    raise spuriously. The callback's own exceptions are logged and swallowed
-    so a misbehaving callback can't prevent the worker drain from completing.
+    ``on_shutdown_signal`` is an optional async callback invoked once the
+    signal has been received and *before* this function returns — i.e.
+    while the broker is still alive — so last-gasp publishes (e.g.
+    :class:`AgentDepartureEvent`) can fire successfully. The callback's
+    own exceptions are logged and swallowed so a misbehaving callback
+    cannot block teardown.
+
+    Runtime crashes in the broker or in handler tasks no longer surface
+    through this helper: they propagate through the publishes that
+    interact with the broker, or through FastStream's own task
+    supervision. We deliberately do not spawn a foreground
+    ``worker.run()`` task here — that would re-enter ``register_handlers``
+    and install a second FastStream signal-handler set that overlaps
+    with the one this function installs (the same reason the bridge
+    decomposes ``Worker.run`` manually in ``bridge/gateway.py``).
     """
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
-    worker_task = asyncio.create_task(worker.run())
-    stop_task = asyncio.create_task(stop.wait())
-    worker_exc: BaseException | None = None
-    received_signal = False
-    try:
-        await asyncio.wait(
-            {worker_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if worker_task.done() and not stop_task.done():
-            worker_exc = worker_task.exception()
-            if worker_exc is not None:
-                logger.error(
-                    "worker crashed during runtime; exiting non-zero",
-                    exc_info=worker_exc,
-                )
-            else:
-                # A clean return from ``worker.run()`` without a shutdown
-                # signal is unexpected. Treat as a crash so supervisors
-                # configured for ``Restart=on-failure`` actually restart —
-                # without this synthetic raise, the process exits 0 and
-                # the supervisor leaves us down (the failure mode the
-                # module docstring explicitly says we prevent).
-                worker_exc = RuntimeError(
-                    "worker.run() returned unexpectedly without a shutdown signal"
-                )
-                logger.error("%s; exiting non-zero", worker_exc)
-        else:
-            received_signal = True
-            logger.info("shutdown signal received, draining %d agent(s)", num_agents)
-    finally:
-        # If we received a shutdown signal (NOT a crash), invoke the callback
-        # while the broker is still alive. Crashes skip this — the broker may
-        # be why we crashed, and trying to publish on it could hang or raise
-        # spuriously.
-        if received_signal and on_shutdown_signal is not None:
-            try:
-                await on_shutdown_signal()
-            except Exception:
-                logger.exception(
-                    "on_shutdown_signal callback raised; continuing teardown",
-                )
-        for t in (worker_task, stop_task):
-            if not t.done():
-                t.cancel()
-        # Drain cancellations so finally/__aexit__ blocks run before
-        # the surrounding async-context managers tear down resources.
-        await asyncio.gather(worker_task, stop_task, return_exceptions=True)
+    logger.info(
+        "worker running with %d node(s); awaiting shutdown signal", num_agents,
+    )
+    await stop.wait()
+    logger.info("shutdown signal received, draining %d agent(s)", num_agents)
 
-    if worker_exc is not None:
-        raise worker_exc
+    if on_shutdown_signal is not None:
+        try:
+            await on_shutdown_signal()
+        except Exception:
+            logger.exception(
+                "on_shutdown_signal callback raised; continuing teardown",
+            )
 
 
 async def _publish_departures_best_effort(
@@ -527,22 +493,42 @@ async def _amain(args: argparse.Namespace) -> None:
                 nodes.append(node)
                 ref = AgentDefinitionRef(current=definition)
                 definition_refs.append(ref)
-                # Must run before Worker.run() starts FastStream — once
-                # FastStream is consuming, new subscribers on the same broker
-                # are not supported. Broker is connected the moment
+                # Must run before ``worker.register_handlers`` + ``broker.start``
+                # below — once FastStream is consuming, new subscribers on the
+                # same broker are not supported. Broker is connected the moment
                 # ``Client.connect`` enters, so registration here is valid.
                 register_control_sink(calfkit_client, ref)
 
             worker = Worker(calfkit_client, nodes)
+            worker.register_handlers()
+
+            # Start the broker BEFORE publishing initial state events.
+            # ``Client.connect`` opens the underlying transport but does NOT
+            # initialize FastStream's producer — only ``broker.start()`` does.
+            # Without this call, ``publish_state_event`` below raises
+            # ``IncorrectState: You can't use producer here, please connect
+            # broker first.`` on every agent boot. The guard mirrors
+            # ``bridge/gateway.py``'s ``if not broker.running`` because
+            # faststream's ``KafkaSubscriber.start`` is not idempotent.
+            #
+            # Decomposing ``Worker.run`` into ``register_handlers`` +
+            # ``broker.start`` (rather than calling ``worker.run()`` from
+            # ``_run_worker``) also avoids a second FastStream signal-handler
+            # set that would overlap with the one ``_run_worker`` installs —
+            # the same reason the bridge decomposes ``Worker.run`` manually.
+            if not calfkit_client.broker.running:
+                await calfkit_client.broker.start()
+
             logger.info(
                 "starting worker with %d agent(s): %s",
                 len(nodes),
                 ", ".join(n.node_id for n in nodes),
             )
 
-            # Announce initial state before worker.run() so the bridge sees the
-            # roster as soon as the broker delivers. Broker is connected via
-            # Client.connect; publishing does not require FastStream.run() yet.
+            # Announce initial state. Subscribers are now consuming, so any
+            # peer agent already running will see this and add us to its
+            # roster, and the bridge's state-consumer projects us into its
+            # registry for slash-command re-registration.
             for ref in definition_refs:
                 event = build_state_event(ref.current, cause="startup")
                 await publish_state_event(calfkit_client, event)
@@ -556,7 +542,6 @@ async def _amain(args: argparse.Namespace) -> None:
                 )
 
             await _run_worker(
-                worker,
                 num_agents=len(nodes),
                 on_shutdown_signal=_on_shutdown,
             )
