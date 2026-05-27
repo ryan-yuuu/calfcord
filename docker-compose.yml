@@ -116,6 +116,16 @@ services:
   # ``calfkit-agent <name>`` in a compose.override.yml. No
   # ``container_name`` — operators may want ``docker compose up
   # --scale agent=N`` and compose auto-numbers the replicas.
+  #
+  # Opt-in flag for Codex subscription agents:
+  #   CALFCORD_CODEX_LOGIN_ON_START=1 — the container entrypoint blocks
+  #   startup on a successful ``calfkit-auth codex login --device-code``
+  #   the first time it runs (or on any boot where credentials are
+  #   missing). URL + user code are printed to ``docker compose logs``;
+  #   operator opens the URL on any device, enters the code, and the
+  #   container resumes booting. Idempotent — skips when credentials
+  #   are already present (e.g. via a mounted host auth dir or a named
+  #   volume that persists across restarts). See docker/entrypoint.sh.
   agent:
     <<: *calfcord-base
     command: calfkit-agent
