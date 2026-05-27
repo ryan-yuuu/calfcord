@@ -112,18 +112,9 @@ ENV PATH=/app/.venv/bin:$PATH \
 # its AS-name.
 COPY --from=builder --chown=calfcord:calfcord /app /app
 
-# Entrypoint script. Gates startup on a successful Codex device-code
-# login when ``CALFCORD_CODEX_LOGIN_ON_START=1`` is set in the
-# container env; otherwise it's a transparent passthrough to the
-# command. See docker/entrypoint.sh for details.
-COPY --chown=calfcord:calfcord docker/entrypoint.sh /usr/local/bin/calfcord-entrypoint
-RUN chmod +x /usr/local/bin/calfcord-entrypoint
-
 USER calfcord
 
-# ENTRYPOINT + CMD split so compose ``command:`` overrides still work:
-# entrypoint wraps the command and either passes it through (default) or
-# blocks on Codex login first. Default CMD is the bridge so plain
-# ``docker run calfcord`` does something sensible without a flag.
-ENTRYPOINT ["/usr/local/bin/calfcord-entrypoint"]
+# Default to the bridge so ``docker run calfcord`` does something
+# sensible without a ``--command`` override. Compose sets each service's
+# ``command:`` explicitly.
 CMD ["calfkit-bridge"]

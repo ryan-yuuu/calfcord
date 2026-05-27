@@ -62,7 +62,7 @@ Field summary:
 - `display_name` — webhook persona name (1–80 chars, Discord rejects literal `Clyde`).
 - `description` — short summary (1–100 chars). Shown to peers in the A2A roster.
 - `avatar_url` — optional persona avatar.
-- `provider` — `anthropic` or `openai`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`.
+- `provider` — `anthropic`, `openai`, or `openai-codex`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`. The `openai-codex` provider routes requests through a ChatGPT Plus/Pro subscription rather than OpenAI API credits — it requires a one-time OAuth login on the host first (`uv run calfkit-auth codex login`). See [`docs/codex-auth.md`](./docs/codex-auth.md).
 - `model` — provider-specific model id. The provider-default fallback chain lives in `agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`).
 - `tools` — optional list of tool names from the [Tools](#tools) section below; resolved against `TOOL_REGISTRY` at agent build time.
 - `thinking_effort` — `none` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command. See [`docs/authoring-agents.md`](./docs/authoring-agents.md) for the per-provider mapping.
