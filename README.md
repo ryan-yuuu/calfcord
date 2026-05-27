@@ -95,7 +95,7 @@ Tools are location-transparent over Kafka. By default every tool runs in the sam
 uv run calfcord-package-tools shell grep --tag calfcord-shell:1.0
 ```
 
-Deploy that image on a separate host (with `CALF_HOST_URL` pointing at the shared broker), and agents elsewhere call the tool the same way — the broker routes the RPC. The parallel `calfcord-package-agents` builds an image that ships only the named agent definitions, useful for crash isolation per agent. Full walkthrough — including broker auth/TLS for cross-network deployments and `--dry-run` to inspect the generated Dockerfile — in [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
+Deploy that image on a separate host (with `CALF_HOST_URL` pointing at the shared broker), and agents elsewhere call the tool the same way — the broker routes the RPC. To deploy the SAME tool on two different hosts (e.g. `edit_file` on both a workstation and an EU VM), use `--rename src=dst` so the second host's tool subscribes to a different Kafka topic and agents can call either by name. The parallel `calfcord-package-agents` builds an image that ships only the named agent definitions, useful for crash isolation per agent. Full walkthrough — including the multi-host rename pattern, broker auth/TLS for cross-network deployments, and `--dry-run` to inspect the generated Dockerfile — in [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
 
 ## Agent-to-agent communication
 

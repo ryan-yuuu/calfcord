@@ -137,6 +137,85 @@ class TestRenderToolsDockerfile:
         assert first_line.startswith("# syntax=docker/dockerfile:")
 
 
+class TestRenderToolsDockerfileAliases:
+    """Tests for the ``aliases`` kwarg on ``render_tools_dockerfile``.
+
+    The alias map bakes into the runtime ``ENV`` block as
+    ``CALFCORD_TOOLS_ALIAS=src1=dst1,src2=dst2``; at boot the
+    discovery loader clones each source tool's ``ToolNodeDef`` under
+    the target name. The tests below pin the env-var shape, the
+    sort-for-determinism property, the no-aliases default, and the
+    header surfacing so an operator inspecting the image can see the
+    rename without decoding the ENV block.
+    """
+
+    def test_aliases_baked_into_env_block(self) -> None:
+        dockerfile = render_tools_dockerfile(
+            include_tools=["edit_file_eu"],
+            aliases={"edit_file": "edit_file_eu"},
+        )
+        # The alias env var lives in the ENV block. A future refactor
+        # that puts it in a separate ``ENV`` statement would also
+        # satisfy this assertion, which is fine — the contract is
+        # "this name=value pair appears somewhere in the file."
+        assert "CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu" in dockerfile
+
+    def test_aliases_sorted_for_determinism(self) -> None:
+        """Same input dict in different insertion orders must produce
+        byte-identical output so the build cache hits reliably across
+        invocations."""
+        a = render_tools_dockerfile(
+            include_tools=["edit_file_eu", "shell_eu"],
+            aliases={"edit_file": "edit_file_eu", "shell": "shell_eu"},
+        )
+        b = render_tools_dockerfile(
+            include_tools=["edit_file_eu", "shell_eu"],
+            aliases={"shell": "shell_eu", "edit_file": "edit_file_eu"},
+        )
+        assert a == b
+
+    def test_no_aliases_omits_env_var(self) -> None:
+        """Default behavior (no ``aliases`` kwarg or empty dict)
+        produces no ``CALFCORD_TOOLS_ALIAS`` line. A stray line with
+        an empty value would parse as an empty alias map at boot
+        (harmless but operator-noisy), so it's worth pinning."""
+        dockerfile = render_tools_dockerfile(include_tools=["shell"])
+        assert "CALFCORD_TOOLS_ALIAS" not in dockerfile
+        # Same for explicit None / empty dict.
+        assert (
+            "CALFCORD_TOOLS_ALIAS"
+            not in render_tools_dockerfile(include_tools=["shell"], aliases=None)
+        )
+        assert (
+            "CALFCORD_TOOLS_ALIAS"
+            not in render_tools_dockerfile(include_tools=["shell"], aliases={})
+        )
+
+    def test_header_mentions_aliases_when_present(self) -> None:
+        """The generated banner surfaces the rename map so a copy of
+        the Dockerfile pulled out of the image is self-describing
+        without re-parsing the ENV block."""
+        dockerfile = render_tools_dockerfile(
+            include_tools=["edit_file_eu"],
+            aliases={"edit_file": "edit_file_eu"},
+        )
+        # The header lives in the first ~6 lines of the file. Pin the
+        # rename appearance there so it's discoverable at a glance.
+        head = "\n".join(dockerfile.split("\n", 8)[:8])
+        assert "edit_file" in head and "edit_file_eu" in head
+        assert "Renames" in head or "→" in head
+
+    def test_aliases_do_not_break_syntax_directive_position(self) -> None:
+        """The ``# syntax=`` directive must still be on line 1 even
+        with the optional header alias line inserted below."""
+        dockerfile = render_tools_dockerfile(
+            include_tools=["edit_file_eu"],
+            aliases={"edit_file": "edit_file_eu"},
+        )
+        first_line = dockerfile.split("\n", 1)[0]
+        assert first_line.startswith("# syntax=docker/dockerfile:")
+
+
 class TestRenderAgentsDockerfile:
     def test_copies_only_selected_agents(self) -> None:
         dockerfile = render_agents_dockerfile(include_agents=["scribe", "conan"])

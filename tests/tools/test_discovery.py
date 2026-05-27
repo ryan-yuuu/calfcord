@@ -20,11 +20,12 @@ import importlib
 import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from calfkit.nodes.tool import ToolNodeDef
 
-from calfkit_organization.tools.discovery import discover_tools
+from calfkit_organization.tools.discovery import _resolve_alias_map, discover_tools
 
 
 def _write_package(root: Path, pkg_name: str, modules: dict[str, str]) -> Path:
@@ -561,6 +562,398 @@ def test_include_filter_does_not_short_circuit_import_errors(
     # NOT swallow import failures regardless of whether the offending
     # module would have been filtered out — broken code is always loud.
     monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha")
+    registry: dict[str, ToolNodeDef] = {}
+    with pytest.raises(ImportError, match="intentionally broken"):
+        discover_tools(pkg, registry)
+
+
+# ── CALFCORD_TOOLS_ALIAS expansion ────────────────────────────────────────
+#
+# Aliasing clones a discovered ToolNodeDef under a new schema name with
+# all four name-bound fields rewritten (``tool_schema.name``,
+# ``subscribe_topics``, ``publish_topic``, ``node_id``). Pairs with the
+# include filter to give per-host rename semantics for multi-host
+# deployments of the same tool. The tests below pin the parser
+# semantics, the additive registry behavior, the wire-level isolation
+# of clone vs. original, and the failure modes operators most often hit.
+
+
+class TestResolveAliasMap:
+    """Direct unit tests for ``_resolve_alias_map``.
+
+    The function runs at boot time before ``discover_tools`` has any
+    chance to log richer context, so its parse-time WARNINGs and
+    ValueErrors are the operator's only signal for env-var typos. Pin
+    each documented edge case so a future refactor that drops one of
+    them fails CI.
+    """
+
+    def test_unset_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFCORD_TOOLS_ALIAS", raising=False)
+        assert _resolve_alias_map() == {}
+
+    def test_empty_string_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "")
+        assert _resolve_alias_map() == {}
+
+    def test_whitespace_only_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "  ,  ")
+        assert _resolve_alias_map() == {}
+
+    def test_single_pair_parses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "edit_file=edit_file_eu")
+        assert _resolve_alias_map() == {"edit_file": "edit_file_eu"}
+
+    def test_multiple_pairs_parse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "a=b,c=d")
+        assert _resolve_alias_map() == {"a": "b", "c": "d"}
+
+    def test_whitespace_around_pairs_stripped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "  edit_file = edit_file_eu  ")
+        assert _resolve_alias_map() == {"edit_file": "edit_file_eu"}
+
+    def test_malformed_entry_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pair with no ``=`` is a config typo and would silently
+        produce dead config (``CALFCORD_TOOLS_ALIAS`` visible in
+        ``docker inspect`` but parsing to fewer entries than the
+        operator intended). Hard-fail at boot so the typo can't ship.
+        The error includes the full env-var value so the operator sees
+        every entry without grepping ``.env``."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "a=b,bogus,c=d")
+        with pytest.raises(ValueError, match="bogus") as exc_info:
+            _resolve_alias_map()
+        # Full env in the message so the operator sees ALL entries, not
+        # just the offending one.
+        assert "a=b,bogus,c=d" in str(exc_info.value)
+
+    def test_empty_side_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``a=`` and ``=b`` are config typos — dead config if accepted.
+        Hard-fail at parse time."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "a=,c=d")
+        with pytest.raises(ValueError, match="empty"):
+            _resolve_alias_map()
+
+    def test_self_alias_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``foo=foo`` has no legitimate use — every legitimate alias
+        renames a tool to a DIFFERENT name. Symmetric with the CLI's
+        ``--rename foo=foo`` rejection so build-time and boot-time
+        config validation behave identically."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "foo=foo")
+        with pytest.raises(ValueError, match=r"itself|distinct"):
+            _resolve_alias_map()
+
+    def test_invalid_dst_regex_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A DST that violates the tool-name regex (e.g. contains
+        spaces) would generate a malformed Kafka topic
+        ``tool.<dst>.input`` at boot — agent timeouts surface far from
+        the cause. Hard-fail at parse time so the bad name can't reach
+        the topic-generation code. Symmetric with the CLI's regex
+        check; previously the env-only path (operator hand-editing
+        ``.env`` post-build) bypassed this validation."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=has spaces")
+        with pytest.raises(ValueError, match="valid tool name"):
+            _resolve_alias_map()
+
+    def test_duplicate_source_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """v1 supports one alias per source. Two pairs with the same
+        ``src`` are ambiguous (which clone wins?) — hard fail."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "foo=a,foo=b")
+        with pytest.raises(ValueError, match="aliased multiple times") as exc_info:
+            _resolve_alias_map()
+        # Full env in the message — operator with a long alias list
+        # needs to see both offenders, not just the first.
+        assert "foo=a,foo=b" in str(exc_info.value)
+
+    def test_duplicate_target_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two pairs aliasing to the same target would collide at registry
+        time anyway; surface it at parse time for better attribution."""
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "a=x,b=x")
+        with pytest.raises(ValueError, match="used by multiple aliases") as exc_info:
+            _resolve_alias_map()
+        assert "a=x,b=x" in str(exc_info.value)
+
+
+def test_alias_adds_clone_to_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CALFCORD_TOOLS_ALIAS=alpha=alpha_eu`` registers a clone under
+    the new name while leaving the original in place. This is the
+    additive semantic — needed on the agent host so an agent declaring
+    BOTH ``alpha`` and ``alpha_eu`` resolves both via the registry."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_adds")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "alpha_eu", "beta", "gamma"}
+    # The clone's schema name matches the alias target.
+    assert registry["alpha_eu"].tool_schema.name == "alpha_eu"
+    # The original is untouched.
+    assert registry["alpha"].tool_schema.name == "alpha"
+
+
+def test_alias_plus_include_filter_yields_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pairing the alias with an include filter on the TARGET produces
+    true rename behavior — the original drops out, only the clone
+    survives. This is the deploy pattern for the EU tool host: it
+    subscribes only to ``tool.alpha_eu.input`` and doesn't race with
+    the local box on ``tool.alpha.input``."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha_eu")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_plus_include")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha_eu"}
+
+
+def test_alias_clone_has_distinct_topics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wire-level isolation contract: the clone's ``subscribe_topics``
+    and ``publish_topic`` must use the alias target name, not the
+    original. A regression that updates ``tool_schema.name`` but leaves
+    the topics pointing at the original would silently load-balance
+    agents' RPCs across both hosts."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_topics")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    original = registry["alpha"]
+    clone = registry["alpha_eu"]
+    assert original.subscribe_topics == ["tool.alpha.input"]
+    assert clone.subscribe_topics == ["tool.alpha_eu.input"]
+    assert original.publish_topic == "tool.alpha.output"
+    assert clone.publish_topic == "tool.alpha_eu.output"
+    # node_id moves too — operator log forensics use this field.
+    assert original.node_id == "tool_alpha"
+    assert clone.node_id == "tool_alpha_eu"
+
+
+def test_alias_clone_shares_underlying_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "rename, not duplicate" contract: the clone re-uses the
+    original's ``_tool`` (the pydantic_ai Tool carrying the function
+    schema + body). Different wire identity, same execution
+    machinery."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_shared_body")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert registry["alpha"]._tool is registry["alpha_eu"]._tool
+
+
+def test_alias_target_collision_with_existing_tool_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Aliasing ``alpha`` to ``beta`` where ``beta`` is already a real
+    tool would silently shadow the audited ``beta``. ValueError at
+    boot, message naming both origins so the operator can resolve
+    without grepping."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=beta")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_collision")
+
+    registry: dict[str, ToolNodeDef] = {}
+    with pytest.raises(ValueError, match="collides"):
+        discover_tools(pkg, registry)
+
+
+def test_alias_unknown_source_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo in the alias source means the clone never registers.
+    Under the dominant deploy pattern (alias + include filter on the
+    target), this would silently produce an empty registry — and the
+    downstream SystemExit("registry is empty") doesn't name the alias
+    typo as the cause. Hard-fail at boot with the offending source
+    AND the valid set so the operator's diagnosis is one step. The
+    earlier WARN-only behavior left operators chasing a five-step
+    chain of blame from "registry empty" back to "I typo'd one env
+    var"; the ValueError shortcuts that."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "definitely_not_a_tool=foo_eu")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_unknown_src")
+
+    registry: dict[str, ToolNodeDef] = {}
+    with pytest.raises(ValueError, match="not found in discovered tools") as exc_info:
+        discover_tools(pkg, registry)
+    msg = str(exc_info.value)
+    # Typo'd source must be named so the operator's diagnosis is one
+    # step. Valid sources must be listed so they can fix the typo
+    # without grepping the source tree.
+    assert "definitely_not_a_tool" in msg
+    assert "alpha" in msg and "beta" in msg and "gamma" in msg
+
+
+def test_alias_plus_include_on_source_drops_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MIRROR of ``test_alias_plus_include_filter_yields_rename``:
+    if the operator pairs the alias with an include filter on the
+    SOURCE (not the target), the original survives and the clone
+    drops out. This is the deploy pattern for a host that wants to
+    keep serving the original tool while *also* allowing aliases to
+    be added on other hosts.
+
+    Most importantly, this test defends against the most plausible
+    accidental regression in ``discover_tools``: a refactor that
+    applies the include filter BEFORE alias expansion would skip the
+    source tool entirely (filter excludes ``alpha_eu`` if checked
+    pre-expansion against the original name ``alpha``), producing an
+    EMPTY registry instead of just the original. The current code
+    applies the filter AFTER expansion inside the per-entry loop —
+    correct, but unpinned until now."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_include_src")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha"}
+    # The original survives; specifically, the original schema name
+    # (NOT the alias target) is what's registered.
+    assert registry["alpha"].tool_schema.name == "alpha"
+
+
+def test_alias_plus_include_listing_both_registers_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented AGENT-HOST deploy pattern: an agent host that
+    needs to declare BOTH ``alpha`` and ``alpha_eu`` in its
+    frontmatter has its alias env set AND includes BOTH names in the
+    filter. The discovery loader must register both with distinct
+    topics so factory tool resolution succeeds and the LLM's choice
+    of name routes to the right host. This pattern is described in
+    the discovery docstring (lines 122-126) but was unpinned by any
+    test; a regression here is "tool not found at agent boot" that
+    only operators see."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha,alpha_eu")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_include_both")
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha", "alpha_eu"}
+    assert registry["alpha"].tool_schema.name == "alpha"
+    assert registry["alpha_eu"].tool_schema.name == "alpha_eu"
+    # Both topics distinct — required for the broker to route to the
+    # right host based on which name the agent picked.
+    assert registry["alpha"].subscribe_topics[0] != registry["alpha_eu"].subscribe_topics[0]
+
+
+def test_alias_target_collides_with_prepopulated_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collision check has two code paths: collision-with-walked-
+    tool (covered by ``test_alias_target_collision_...``) and
+    collision-with-pre-populated-registry (here). The pre-populated
+    case has a different ``origins`` seed (``<pre-populated>``
+    sentinel) and a different message-construction branch. A
+    regression that mishandles the sentinel branch (e.g. a refactor
+    using the wrong dict for the origin lookup) would slip through
+    the existing test."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_prepop_collide")
+
+    # Pre-populate ``alpha_eu`` in the registry — the alias would try
+    # to register a clone under the same name, colliding with the
+    # pre-populated entry.
+    prepopulated_node = MagicMock(spec=ToolNodeDef)
+    registry: dict[str, ToolNodeDef] = {"alpha_eu": prepopulated_node}
+    with pytest.raises(ValueError, match="collides") as exc_info:
+        discover_tools(pkg, registry)
+    # The collision message must name both sides: the alias clone's
+    # origin AND the pre-populated sentinel so the operator can tell
+    # which side is the surprise.
+    msg = str(exc_info.value)
+    assert "alias of alpha" in msg
+    assert "<pre-populated>" in msg
+
+
+def test_alias_target_collision_names_alias_in_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tighter version of ``test_alias_target_collision_with_existing_
+    tool_raises`` — that test asserts the bare word ``collides`` which
+    would survive a regression that drops the ``(alias of X)``
+    attribution. The attribution is operator-forensic — without it,
+    the error tells the operator there IS a collision but not which
+    side is the alias. Pin it explicitly."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=beta")
+    monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_collision_attribution")
+
+    registry: dict[str, ToolNodeDef] = {}
+    with pytest.raises(ValueError) as exc_info:
+        discover_tools(pkg, registry)
+    msg = str(exc_info.value)
+    assert "collides" in msg
+    # The clone's origin is "<package>.alpha:alpha_tool (alias of alpha)".
+    # The original ``beta``'s origin is "<package>.beta:beta_tool". Both
+    # must appear so the operator can resolve the conflict.
+    assert "alias of alpha" in msg
+    assert "beta" in msg
+
+
+def test_alias_unknown_source_does_not_false_warn_under_rename_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unknown-source check uses ``discovered_originals``
+    (pre-filter set) rather than ``origins`` (post-filter registry).
+    The distinction matters for the dominant deploy pattern: alias
+    ``alpha=alpha_eu`` plus include filter ``alpha_eu`` — the
+    original ``alpha`` is discovered then filter-dropped. A naive
+    implementation checking against the post-filter registry would
+    falsely warn ("alpha not in discovered tools") for the very
+    pattern the alias system was built for. This test pins the
+    distinction so a refactor swapping the set source can't silently
+    re-introduce a false-positive boot warning."""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha_eu")
+    pkg = _three_tool_pkg(tmp_path, monkeypatch, "fake_pkg_alias_no_false_warn")
+
+    registry: dict[str, ToolNodeDef] = {}
+    # Must NOT raise. Specifically must not raise ValueError("sources
+    # not found in discovered tools"). ``alpha`` was discovered (then
+    # filtered) so the warn-set is empty.
+    discover_tools(pkg, registry)
+    assert set(registry) == {"alpha_eu"}
+
+
+def test_alias_does_not_short_circuit_import_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symmetric to the include-filter import-error test: an alias env
+    var must NOT swallow a broken module's ImportError. Broken code is
+    always loud regardless of whether the operator was hoping to
+    rename it."""
+    pkg_name = "fake_pkg_alias_and_broken"
+    _write_package(
+        tmp_path,
+        pkg_name,
+        {
+            "alpha": _tool_source("alpha"),
+            "broken": "raise ImportError('intentionally broken')\n",
+        },
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pkg = _import_fresh(pkg_name)
+
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
     registry: dict[str, ToolNodeDef] = {}
     with pytest.raises(ImportError, match="intentionally broken"):
         discover_tools(pkg, registry)

@@ -83,7 +83,91 @@ full `pyproject.toml` deps. The size win comes from OS-dep slimming and
 from skipping unused tool *code paths* at runtime, not from a smaller
 Python wheel set.
 
-## 3. Building a per-agent image
+## 3. Deploying the same tool on multiple hosts
+
+By default a tool's Kafka topic name is derived from its Python function
+name — `edit_file` always subscribes to `tool.edit_file.input`. If you
+deploy the `edit_file` worker on two hosts, both compete for messages
+on the same topic and the broker round-robins between them: the agent
+has no way to choose which host runs a given call.
+
+The `--rename SRC=DST` flag on `calfcord-package-tools` lets you expose
+the same Python tool body under a different schema name in the
+resulting image. The renamed tool subscribes to `tool.<DST>.input`
+instead, so two hosts can serve `edit_file` (one under its original
+name on a workstation, one renamed to `edit_file_eu` on a remote VM)
+and agents can call either by picking the appropriate name.
+
+### Build the renamed image
+
+```bash
+uv run calfcord-package-tools edit_file \
+  --rename edit_file=edit_file_eu \
+  --tag edit-file-eu:1.0
+```
+
+The positional name (`edit_file`) tells the build which Python tool
+body to include; `--rename` renames it in the resulting image. The
+generated Dockerfile bakes two env vars:
+
+- `CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu` — the discovery loader
+  clones the `edit_file` `ToolNodeDef` under the new name with all
+  four name-bound fields rewritten (`tool_schema.name`,
+  `subscribe_topics`, `publish_topic`, `node_id`).
+- `CALFCORD_TOOLS_INCLUDE=edit_file_eu` — the filter drops the
+  original so this host subscribes ONLY to `tool.edit_file_eu.input`.
+  Without this, the host would subscribe to BOTH topics and race
+  with the workstation on `tool.edit_file.input`.
+
+The CLI translates positional names through the alias map before
+baking `CALFCORD_TOOLS_INCLUDE`, so typing `edit_file` (the on-disk
+source name) produces the correct filter for the post-rename name —
+no operator math required.
+
+### Configure the agent host
+
+For an agent to call `edit_file_eu`, that name must exist in the
+agent host's `TOOL_REGISTRY`. Set the same alias env on the agent
+host:
+
+```env
+# .env on the agent host
+CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu
+```
+
+The agent host doesn't have an include filter, so both names land in
+its registry. An agent can now declare either or both in its
+frontmatter:
+
+```yaml
+---
+name: scribe
+...
+tools: [edit_file, edit_file_eu, shell]
+---
+```
+
+The LLM picks `edit_file` to operate on workstation files; it picks
+`edit_file_eu` for the EU VM. Routing happens at the broker — the
+agent's process publishes to `tool.<name>.input` and the matching
+worker (whichever host subscribed to that topic) services the call.
+
+### v1 limitations
+
+- **Tool descriptions match between original and clone.** The LLM
+  differentiates by name suffix and by whatever routing instructions
+  you write into the calling agent's system prompt
+  (e.g. "when the user asks about EU files, prefer `edit_file_eu`").
+  An operator-controllable description override is a clean follow-on
+  if real usage shows this needs more signal.
+- **One alias per source, one source per target.** The parser
+  enforces this; multi-region from a single image isn't supported
+  yet.
+- **No transitive chains.** `edit_file=tmp,tmp=edit_file_eu` does not
+  chase the chain — only `tmp` would be registered as a clone of
+  `edit_file`, not `edit_file_eu`.
+
+## 4. Building a per-agent image
 
 ```bash
 uv run calfcord-package-agents scribe --tag my-scribe:1.0
@@ -100,7 +184,7 @@ every agent in one process without trouble. If you do split, list each
 agent's image as its own compose service with `restart: unless-stopped`
 so the supervisor recovers them independently.
 
-## 4. Worked example: remote shell tool
+## 5. Worked example: remote shell tool
 
 Two hosts: **laptop** runs broker + bridge + router + agent; **builder**
 (a remote dev box) runs only the shell tool against its own project
@@ -109,11 +193,11 @@ directory.
 **Network prereq.** Builder needs to reach the broker. For trusted
 hosts, run **Tailscale** or **WireGuard** between them — broker stays
 unauthenticated, the overlay is the perimeter. For public-internet
-exposure, use SASL/SCRAM + TLS (see § 5). This walkthrough assumes
+exposure, use SASL/SCRAM + TLS (see § 6). This walkthrough assumes
 Tailscale with hostnames `laptop` and `builder`.
 
 **Laptop side.** Bring up the broker plus everything EXCEPT the
-all-in-one tools (the remote box owns `shell`; see § 9 for excluding
+all-in-one tools (the remote box owns `shell`; see § 10 for excluding
 it from the local tools process if you keep one):
 
 ```bash
@@ -146,9 +230,9 @@ hosted (see `src/calfkit_organization/tools/runner.py`).
 **Verify.** In Discord: `` @scribe please run `pwd && uname -a` via shell ``.
 The reply should contain builder's hostname and `/workspace` — proving
 the call landed on the remote box. If you see laptop's hostname, you
-have a duplicate `shell` consumer; see § 9.
+have a duplicate `shell` consumer; see § 10.
 
-## 5. Broker authentication
+## 6. Broker authentication
 
 The default Redpanda runs with `--mode=dev-container` (see
 `docker-compose.yml`) — **no authentication, no TLS**. Fine on
@@ -185,7 +269,7 @@ For most ops teams on shared infra, the overlay path is the lazier-but-
 secure default; SASL is the option when overlay networking isn't
 available.
 
-## 6. Workspace mount semantics
+## 7. Workspace mount semantics
 
 Per-tool images consume the same `CALFCORD_WORKSPACE_DIR` env var as
 the all-in-one image. Bind-mount the project root into that path:
@@ -213,7 +297,7 @@ Caveats:
 - **Symlinks follow.** A symlink inside the workspace that points to
   `$HOME/.ssh` will be dereferenced inside the container.
 
-## 7. Failure modes
+## 8. Failure modes
 
 **Remote tool host down.** Behavior depends on which tool the agent
 invoked:
@@ -245,7 +329,7 @@ consumer-group semantics: each partition delivers to exactly one
 consumer in the group. With calfcord's single-partition default,
 exactly one consumer receives each call — effectively random per call.
 To intentionally scale horizontally, bump the partition count; to pin
-a tool to one host, see § 9.
+a tool to one host, see § 10.
 
 **Empty registry.** A per-tool image where `CALFCORD_TOOLS_INCLUDE`
 filters down to nothing fails fast in `runner.py` with `TOOL_REGISTRY
@@ -254,7 +338,7 @@ a "known tools: …" error if its `tools:` list references a name not in
 its agent-side registry — that's an agent-side check, not a tool-side
 one.
 
-## 8. What changes when you split
+## 9. What changes when you split
 
 Almost nothing, by design.
 
@@ -273,7 +357,7 @@ Almost nothing, by design.
   `agent_tool` decorator, the `"error: "` discriminator, the
   `RuntimeError` boundary) are unchanged.
 
-## 9. Combining with all-in-one
+## 10. Combining with all-in-one
 
 You can run `calfcord:latest` on host A AND a per-tool image like
 `my-shell:1.0` on host B at the same time. Kafka load-balances calls to

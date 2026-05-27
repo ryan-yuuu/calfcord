@@ -97,3 +97,308 @@ class TestArgparseSurface:
     def test_no_names_required(self) -> None:
         code, _, _ = _run(["--tag", "x:1"])
         assert code == 2  # argparse missing positional
+
+
+class TestRenameFlag:
+    """Tests for ``--rename SRC=DST``.
+
+    Validation runs against the live ``TOOL_REGISTRY``, so these
+    tests use real tool names (``edit_file``, ``shell``) rather than
+    fixture names. The CLI's dry-run mode lets us assert on the
+    generated Dockerfile without invoking docker.
+    """
+
+    def test_rename_dry_run_bakes_env(self) -> None:
+        """Happy path: ``--rename edit_file=edit_file_eu`` plus positional
+        ``edit_file`` bakes both the alias env AND the post-rename
+        include name into the image. The positional-name translation
+        through the alias map is the load-bearing piece — without it,
+        the filter would drop the clone and keep the original."""
+        code, stdout, _ = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=edit_file_eu",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 0
+        assert "CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu" in stdout
+        # Crucially the include filter references the POST-rename name,
+        # otherwise discovery would drop the alias clone at boot.
+        assert "CALFCORD_TOOLS_INCLUDE=edit_file_eu" in stdout
+
+    def test_multiple_rename_flags(self) -> None:
+        code, stdout, _ = _run(
+            [
+                "edit_file",
+                "shell",
+                "--rename",
+                "edit_file=edit_file_eu",
+                "--rename",
+                "shell=shell_eu",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 0
+        # Sorted by src for determinism — pin the order so the build
+        # cache hits across invocations with different flag ordering.
+        assert "CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu,shell=shell_eu" in stdout
+        # Both include names get translated.
+        assert "edit_file_eu" in stdout
+        assert "shell_eu" in stdout
+
+    def test_rename_unknown_source_exits_2(self) -> None:
+        code, _, stderr = _run(
+            [
+                "shell",
+                "--rename",
+                "nonexistent_tool=foo",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "nonexistent_tool" in stderr
+        # Known list surfaces so the operator can fix the typo.
+        assert "shell" in stderr
+
+    def test_rename_target_collides_with_existing_tool_exits_2(self) -> None:
+        """Renaming ``edit_file`` to ``shell`` (a real audited tool) would
+        silently shadow ``shell``. Refuse at build time."""
+        code, _, stderr = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=shell",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "shell" in stderr
+        assert "collides" in stderr or "shadow" in stderr
+
+    def test_rename_duplicate_target_exits_2(self) -> None:
+        code, _, stderr = _run(
+            [
+                "edit_file",
+                "shell",
+                "--rename",
+                "edit_file=foo",
+                "--rename",
+                "shell=foo",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "foo" in stderr
+        assert "multiple" in stderr
+
+    def test_rename_duplicate_source_exits_2(self) -> None:
+        code, _, stderr = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=a",
+                "--rename",
+                "edit_file=b",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "edit_file" in stderr
+        assert "multiple" in stderr
+
+    def test_rename_source_equals_target_exits_2(self) -> None:
+        code, _, stderr = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=edit_file",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "itself" in stderr or "distinct" in stderr
+
+    def test_rename_malformed_no_equals_exits_2(self) -> None:
+        code, _, stderr = _run(
+            ["edit_file", "--rename", "edit_file", "--tag", "x:1", "--dry-run"]
+        )
+        assert code == 2
+        assert "SRC=DST" in stderr
+
+    def test_rename_empty_side_exits_2(self) -> None:
+        code, _, stderr = _run(
+            ["edit_file", "--rename", "edit_file=", "--tag", "x:1", "--dry-run"]
+        )
+        assert code == 2
+        assert "empty" in stderr
+
+    def test_rename_target_invalid_regex_exits_2(self) -> None:
+        """The tool-name regex is Anthropic's: ``^[a-zA-Z0-9_-]{1,128}$``.
+        Spaces fail. Catches typos like ``--rename foo='edit file_eu'``
+        from a hand-edited shell command."""
+        code, _, stderr = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=has spaces",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        assert "valid tool name" in stderr
+
+    def test_rename_omitted_produces_no_alias_env(self) -> None:
+        """Default behavior: no ``--rename`` flag → no
+        ``CALFCORD_TOOLS_ALIAS`` line in the output. Defends against a
+        regression that always bakes an empty alias env."""
+        code, stdout, _ = _run(["shell", "--tag", "x:1", "--dry-run"])
+        assert code == 0
+        assert "CALFCORD_TOOLS_ALIAS" not in stdout
+
+    def test_rename_positional_mix_translates_only_renamed(self) -> None:
+        """The most common operator pattern: host two tools, rename
+        ONE of them. ``edit_file shell --rename edit_file=edit_file_eu``
+        should bake INCLUDE=``edit_file_eu,shell`` (alphabetical CSV
+        with only the renamed name translated; the un-renamed
+        ``shell`` passes through unchanged). The load-bearing line
+        ``[aliases.get(n, n) for n in include_tools]`` would survive a
+        regression that mistakenly maps non-renamed positionals
+        through some default, but this test pins the contract that
+        ONLY the renamed name gets translated."""
+        code, stdout, _ = _run(
+            [
+                "edit_file",
+                "shell",
+                "--rename",
+                "edit_file=edit_file_eu",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 0
+        # The CSV is sorted alphabetically — ``edit_file_eu`` comes
+        # before ``shell``. Pin the exact order so the build cache
+        # hits across invocations.
+        assert "CALFCORD_TOOLS_INCLUDE=edit_file_eu,shell" in stdout
+        # The alias only mentions the renamed tool; the un-renamed
+        # ``shell`` does NOT appear in the alias env.
+        assert "CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu" in stdout
+        assert "shell=" not in stdout.split("CALFCORD_TOOLS_ALIAS=")[1].split("\n")[0]
+
+    def test_rename_unused_alias_dead_config_exits_2(self) -> None:
+        """``--rename edit_file=edit_file_eu`` WITHOUT ``edit_file`` in
+        the positional list would bake a dead alias env into the
+        image: ``CALFCORD_TOOLS_ALIAS`` is set but the include filter
+        (the positional names) doesn't reference the post-rename
+        name, so discovery would add the clone then drop it via the
+        filter. Refuse at build time so operators don't ship images
+        with rename env doing nothing."""
+        code, _, stderr = _run(
+            [
+                "shell",  # positional list does NOT include edit_file
+                "--rename",
+                "edit_file=edit_file_eu",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 2
+        # The error must name the unused alias source explicitly so
+        # the operator's diagnosis is one step.
+        assert "edit_file" in stderr
+        # "dead config" framing in the message — pins the operator-
+        # comprehensible explanation that the diagnosis hinges on.
+        assert "dead config" in stderr or "no effect" in stderr
+
+
+class TestEnvStripping:
+    """The CLI strips ``CALFCORD_TOOLS_ALIAS`` and
+    ``CALFCORD_TOOLS_INCLUDE`` from its own environment BEFORE
+    importing ``calfkit_organization.tools``. Otherwise the operator's
+    shell env would poison the registry the CLI validates against —
+    e.g. ``--rename anything=foo`` would silently pass because the
+    operator's env already cloned ``foo``, and the resulting image
+    would fail on a fresh host where the env isn't set.
+
+    These tests exercise the strip-then-validate sequence by setting
+    the env var and confirming the CLI behaves as if it weren't set.
+    """
+
+    def test_cli_strips_alias_env_before_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the operator has ``CALFCORD_TOOLS_ALIAS`` set in their
+        shell when running ``calfcord-package-tools``, the CLI must
+        ignore it. Verify by setting the env to something that WOULD
+        change validation behavior if it leaked through — an alias
+        targeting a name that doesn't exist in the canonical registry.
+        With stripping working correctly, ``--rename edit_file=foo``
+        succeeds (foo is unique); without stripping, the env would
+        pre-populate foo and the CLI would erroneously reject the
+        --rename as a collision."""
+        # An env-only alias would, if not stripped, pre-populate
+        # ``leaked_target`` in TOOL_REGISTRY before the CLI runs.
+        monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "edit_file=leaked_target")
+        # Now ask the CLI to alias edit_file to the SAME target the
+        # leaked env was using. If stripping works, this should
+        # succeed (leaked_target doesn't really exist in the
+        # registry). If stripping fails, the CLI sees the leaked
+        # registry and rejects as collision.
+        code, stdout, _ = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=leaked_target",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 0
+        assert "CALFCORD_TOOLS_ALIAS=edit_file=leaked_target" in stdout
+
+    def test_cli_strips_include_env_before_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Symmetric to the alias-env strip: a leaked
+        ``CALFCORD_TOOLS_INCLUDE`` would narrow the TOOL_REGISTRY the
+        CLI imports, making the validation reject perfectly valid
+        ``--rename`` sources as "not a known tool." Build-time CLI
+        must validate against the FULL registry regardless of
+        operator shell state."""
+        # Set the env to a NARROW filter that excludes edit_file.
+        monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "shell")
+        # If the env leaked through, edit_file wouldn't be in the
+        # imported registry and --rename edit_file=foo would fail
+        # with "not a known tool." Stripping makes this succeed.
+        code, _, _ = _run(
+            [
+                "edit_file",
+                "--rename",
+                "edit_file=edit_file_eu",
+                "--tag",
+                "x:1",
+                "--dry-run",
+            ]
+        )
+        assert code == 0
