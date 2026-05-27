@@ -64,7 +64,7 @@ Field summary:
 - `avatar_url` — optional persona avatar.
 - `provider` — `anthropic`, `openai`, or `openai-codex`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`. The `openai-codex` provider routes requests through a ChatGPT Plus/Pro subscription rather than OpenAI API credits — it requires a one-time OAuth login on the host first (`uv run calfkit-auth codex login`). See [`docs/codex-auth.md`](./docs/codex-auth.md).
 - `model` — provider-specific model id. The provider-default fallback chain lives in `agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`).
-- `tools` — optional list of tool names from the [Tools](#tools) section below; resolved against `TOOL_REGISTRY` at agent build time.
+- `tools` — list of tool names from the [Tools](#tools) section below; resolved against `TOOL_REGISTRY` at agent build time. **Omitting `tools:` entirely grants the agent every registered builtin tool** (convenient default for general-purpose assistants). To restrict, write an explicit list (`tools: [read_file, grep]`); to opt out of all tools (text-only agent), write `tools: []`. Tools live in the `calfkit-tools` container with the workspace bind-mounted — `shell`/`write_file`/`edit_file` grant code execution on the repo, so narrow the list explicitly for agents that don't need them.
 - `thinking_effort` — `none` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command. See [`docs/authoring-agents.md`](./docs/authoring-agents.md) for the per-provider mapping.
 
 For a deeper walkthrough of the agent file format (every field, channel-subscription mechanics, debugging tips), see [`docs/authoring-agents.md`](./docs/authoring-agents.md).

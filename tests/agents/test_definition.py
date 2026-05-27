@@ -67,8 +67,18 @@ class TestAgentDefinitionValidators:
         with pytest.raises(ValidationError, match="system_prompt"):
             _make_definition(system_prompt=bad_body)
 
-    def test_tools_default_empty(self) -> None:
+    def test_tools_default_none_means_all(self) -> None:
+        """Omitted ``tools:`` in frontmatter → field is ``None``, which the
+        loader (and factory's tool resolver) expand to "every registered
+        tool". An explicit empty list ``tools: []`` is the way to opt out
+        of all tools — see :attr:`AgentDefinition.tools` for the semantics."""
         d = _make_definition()
+        assert d.tools is None
+
+    def test_tools_explicit_empty_stays_empty(self) -> None:
+        """Explicit ``tools: []`` is preserved as ``()`` (not normalized to
+        ``None``) so the opt-out-of-all-tools semantic survives parsing."""
+        d = _make_definition(tools=[])
         assert d.tools == ()
 
     def test_tools_coerced_to_tuple(self) -> None:

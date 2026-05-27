@@ -49,7 +49,12 @@ class PhonebookEntry(BaseModel):
     display_name: str
     avatar_url: str | None = None
     description: str
-    tools: tuple[str, ...] = ()
+    tools: tuple[str, ...] | None = None
+    """Mirrors :attr:`AgentDefinition.tools`. ``None`` means "all
+    registered tools" (the same default-resolution semantic the loader
+    expands at parse time). In practice loader-built specs carry a
+    concrete tuple here; the ``None`` branch supports code-built
+    definitions that bypass the loader (tests, the router build path)."""
     history_turns: int = Field(default=30, ge=0, le=100)
     """Mirrors :attr:`AgentDefinition.history_turns`. Carried so the A2A
     private_chat tool, which has no registry access, can use the target

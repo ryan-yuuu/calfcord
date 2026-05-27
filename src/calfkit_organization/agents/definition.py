@@ -97,7 +97,28 @@ class AgentDefinition(BaseModel):
     avatar_url: str | None = None
     provider: Provider | None = None
     model: str | None = None
-    tools: tuple[str, ...] = ()
+    tools: tuple[str, ...] | None = None
+    """Tools available to this agent's LLM, resolved against
+    :data:`calfkit_organization.tools.TOOL_REGISTRY`.
+
+    Semantics:
+        - ``tools:`` omitted from frontmatter (default ``None``) — agent
+          gets every registered builtin tool. Convenient default for
+          general-purpose assistant agents.
+        - ``tools: []`` in frontmatter — agent gets NO tools (text-only).
+          Explicit opt-out for read-only or routing-style agents.
+        - ``tools: [a, b]`` — agent gets exactly those tools.
+
+    Security note: the "all by default" behaviour means a new
+    ``agents/<name>.md`` ships with ``shell`` / ``write_file`` /
+    ``edit_file`` access to the workspace bind-mounted into the
+    ``calfkit-tools`` container unless the operator narrows the list
+    explicitly. If you need a restricted-tools agent, add the
+    ``tools:`` line. See :doc:`docs/authoring-agents` for the security
+    model.
+
+    Router agents must omit ``tools:`` entirely (or set ``tools: []``);
+    the validator rejects routers that declare non-empty tools."""
     thinking_effort: ThinkingEffort | None = None
     role: AgentRole = "assistant"
     """Agent role. Defaults to ``"assistant"`` — ordinary user-defined

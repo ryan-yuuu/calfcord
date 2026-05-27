@@ -170,6 +170,12 @@ class BridgeIngress:
 
         unknown: list[tuple[str, str]] = []
         for spec in registry.all():
+            # ``spec.tools is None`` means "all registered tools" — the
+            # loader's default-resolution sentinel for assistants whose
+            # frontmatter omits the ``tools:`` line. Nothing to validate
+            # (every name comes from TOOL_REGISTRY by construction).
+            if spec.tools is None:
+                continue
             for tool_name in spec.tools:
                 if tool_name not in TOOL_REGISTRY:
                     unknown.append((spec.agent_id, tool_name))

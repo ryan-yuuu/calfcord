@@ -74,3 +74,27 @@ class TestLoadAgentsDir:
         (tmp_path / "broken.md").write_text("---\nname: mismatch\n---\nbody\n")
         with pytest.raises(ValueError):
             load_agents_dir(tmp_path)
+
+
+class TestToolsDefaultExpansion:
+    """The loader normalizes ``tools=None`` (frontmatter omitted) to every
+    registered tool, so downstream consumers see a concrete tuple. Explicit
+    ``tools: []`` and explicit lists are preserved unchanged."""
+
+    def test_omitted_tools_expands_to_all_registered(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path, "scheduler")  # no tools: line
+        defs = load_agents_dir(tmp_path)
+        from calfkit_organization.tools import TOOL_REGISTRY
+
+        assert defs[0].tools is not None
+        assert set(defs[0].tools) == set(TOOL_REGISTRY)
+
+    def test_explicit_empty_list_stays_empty(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path, "minimal", tools="[]")
+        defs = load_agents_dir(tmp_path)
+        assert defs[0].tools == ()
+
+    def test_explicit_list_passes_through(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path, "researcher", tools="[read_file, grep, glob]")
+        defs = load_agents_dir(tmp_path)
+        assert defs[0].tools == ("read_file", "grep", "glob")

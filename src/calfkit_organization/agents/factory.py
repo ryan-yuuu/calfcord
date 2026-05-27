@@ -474,11 +474,25 @@ class AgentFactory:
     def _resolve_tools(self, definition: AgentDefinition) -> list[ToolNodeDef]:
         """Resolve ``definition.tools`` names against the tool registry.
 
+        Semantics (mirrors :attr:`AgentDefinition.tools`):
+            - ``None``: tools-by-default — every registered tool. This is
+              the in-memory representation of the "no ``tools:`` line in
+              frontmatter" case before the loader normalizes it. The
+              loader normalizes to a concrete tuple, so a ``None`` reaching
+              this method usually means a code-built definition bypassed
+              the loader (e.g. a test or the router build path, which
+              doesn't go through this method).
+            - empty tuple ``()``: zero tools (explicit opt-out).
+            - non-empty tuple: exactly those tools, with unknown-name
+              validation.
+
         Raises:
             ValueError: if any declared name is missing from the registry.
                 Lists every unknown name in one message so a multi-typo
                 ``.md`` surfaces all of them in a single boot.
         """
+        if definition.tools is None:
+            return list(self._tool_registry.values())
         if not definition.tools:
             return []
         resolved: list[ToolNodeDef] = []

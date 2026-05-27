@@ -529,7 +529,8 @@ class TestToolsWiring:
     to the calfkit ``Agent``. Unknown names raise at build time."""
 
     def test_empty_tools_passes_none_to_agent(self) -> None:
-        """Empty tuple → ``Agent(tools=None)`` (calfkit's no-tools sentinel)."""
+        """Empty tuple → ``Agent(tools=None)`` (calfkit's no-tools sentinel).
+        ``tools=()`` is the explicit "I want no tools" frontmatter case."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
@@ -543,6 +544,27 @@ class TestToolsWiring:
             MagicMock(),
         )
         assert worker._nodes[0].tools == []
+
+    def test_tools_none_expands_to_every_registered_tool(self) -> None:
+        """``definition.tools is None`` means "frontmatter omitted ``tools:``
+        line" — the factory expands it to every entry in the tool registry.
+        The loader normalizes this for .md-loaded specs, but code-built
+        definitions (tests, the router build path) hit this branch directly."""
+        _, model_factory = _model_factory_spy()
+        fake_a = _fake_tool_node("alpha")
+        fake_b = _fake_tool_node("beta")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"alpha": fake_a, "beta": fake_b},
+        )
+        worker = factory.build(
+            _definition(tools=None),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert set(worker._nodes[0].tools) == {fake_a, fake_b}
 
     def test_known_tool_name_is_wired_through_registry(self) -> None:
         """A name listed in ``tools:`` resolves to the registry's ToolNodeDef

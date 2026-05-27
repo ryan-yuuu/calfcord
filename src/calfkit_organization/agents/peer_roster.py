@@ -183,6 +183,10 @@ def build_temp_instructions(
     if channel:
         return f"Other agents in this organization:\n{roster}\n\n{_MENTION_BLOCK}"
 
-    if _PRIVATE_CHAT_TOOL_NAME not in target.tools:
+    # ``target.tools is None`` means "all registered tools" — the loader
+    # normalizes this for .md-loaded agents, but a code-built definition
+    # may still carry None here. Treat None as having private_chat
+    # available since the loader expansion would include it.
+    if target.tools is not None and _PRIVATE_CHAT_TOOL_NAME not in target.tools:
         return None
     return f"Peer agents you can reach via the private_chat tool:\n{roster}"
