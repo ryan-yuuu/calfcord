@@ -111,4 +111,4 @@ class TestDefaultModelClientFactory:
     def test_default_model_for_openai_codex(self) -> None:
         from calfkit_organization.agents.factory import _PROVIDER_DEFAULT_MODELS
 
-        assert _PROVIDER_DEFAULT_MODELS["openai-codex"] == "gpt-5.2-codex"
+        assert _PROVIDER_DEFAULT_MODELS["openai-codex"] == "gpt-5.3-codex"

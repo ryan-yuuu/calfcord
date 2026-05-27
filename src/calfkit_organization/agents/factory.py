@@ -129,7 +129,7 @@ upstream fix."""
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "claude-sonnet-4-5",
     "openai": "gpt-5-mini",
-    "openai-codex": "gpt-5.2-codex",
+    "openai-codex": "gpt-5.3-codex",
 }
 """Default model name per provider when neither ``definition.model`` nor
 ``CALFKIT_AGENT_DEFAULT_MODEL`` is set. Each provider's model namespace is

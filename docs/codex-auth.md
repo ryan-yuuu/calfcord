@@ -1,6 +1,6 @@
 # Codex subscription auth
 
-The `openai-codex` provider lets calfcord agents call OpenAI's Codex models (`gpt-5.2-codex`, `gpt-5.3-codex`, etc.) through the same OAuth flow the official `codex` CLI uses, so requests are billed against an active **ChatGPT Plus or Pro subscription** rather than against OpenAI API credits.
+The `openai-codex` provider lets calfcord agents call OpenAI's Codex models (`gpt-5.5`, `gpt-5.3-codex`, etc.) through the same OAuth flow the official `codex` CLI uses, so requests are billed against an active **ChatGPT Plus or Pro subscription** rather than against OpenAI API credits.
 
 This page covers the one-time setup required before an agent with `provider: openai-codex` can boot.
 
@@ -60,22 +60,24 @@ slash: /codex
 display_name: Codex
 description: Demonstration agent backed by ChatGPT subscription.
 provider: openai-codex
-model: gpt-5.2-codex
+model: gpt-5.3-codex
 thinking_effort: medium
 ---
 
 You are a helpful coding assistant.
 ```
 
-Supported model names are whatever upstream `openai/codex` lists in [`codex-rs/models-manager/models.json`](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json). Currently:
+Supported model names are whatever upstream `openai/codex` lists in [`codex-rs/models-manager/models.json`](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json). At the time of writing:
 
-| Model | Resolves to |
+| Model | Notes |
 |---|---|
-| `gpt-5.2-codex` | longest-prefix match → `gpt-5.2` system prompt |
-| `gpt-5.2` | exact match |
-| `gpt-5.3-codex` | exact match |
-| `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` | falls back to bundled `prompt.md` |
-| Anything else | falls back to bundled `prompt.md`; if the model doesn't exist server-side, Codex returns a 4xx |
+| `gpt-5.5` | Frontier model for complex coding, research, and real-world work |
+| `gpt-5.4` | Strong everyday-coding model |
+| `gpt-5.4-mini` | Small, fast, and cost-efficient — good for routers and simple tasks |
+| `gpt-5.3-codex` | Coding-optimized (calfcord's default for `provider: openai-codex`) |
+| `gpt-5.2` | Optimized for professional work and long-running agents |
+
+Anything not in upstream's `models.json` is sent verbatim. The Codex CLI prompt resolver uses longest-prefix matching against the slug list to pick the right `base_instructions` to send (so e.g. a legacy `gpt-5.2-codex` request still fingerprints against `gpt-5.2`'s prompt), but the model name itself is forwarded as-is — if the Codex backend doesn't recognize it, the request returns a 4xx.
 
 No allowlist is enforced calfcord-side — we trust upstream and forward the model name as-is.
 
