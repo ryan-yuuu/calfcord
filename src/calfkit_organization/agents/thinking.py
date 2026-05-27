@@ -105,7 +105,10 @@ def build_model_settings(
             return {}
         return {"anthropic_thinking": {"type": "enabled", "budget_tokens": budget}}
 
-    if provider == "openai":
+    if provider in ("openai", "openai-codex"):
+        # ``openai-codex`` is the ChatGPT-subscription backend; it speaks the
+        # same OpenAI Responses API as ``openai`` and accepts the same
+        # ``reasoning_effort`` setting, so the effort ramp is identical.
         value = _OPENAI_REASONING_EFFORT.get(effort)
         if value is None:
             logger.warning(
@@ -115,4 +118,6 @@ def build_model_settings(
             return {}
         return {"openai_reasoning_effort": value}
 
-    raise ValueError(f"unknown provider {provider!r}; expected 'anthropic' or 'openai'")
+    raise ValueError(
+        f"unknown provider {provider!r}; expected 'anthropic', 'openai', or 'openai-codex'"
+    )

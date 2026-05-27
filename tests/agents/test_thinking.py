@@ -65,6 +65,30 @@ class TestOpenAIMapping:
         assert result == {"openai_reasoning_effort": value}
 
 
+class TestOpenAICodexMapping:
+    """The ``openai-codex`` provider routes through the same OpenAI Responses
+    API as ``openai``, so it accepts the same ``reasoning_effort`` setting and
+    uses the same operator → backend ramp. This test pins that equivalence so
+    a future Codex-specific override (e.g. saturating earlier because of
+    subscription-tier rate limits) is a deliberate change, not a silent drift.
+    """
+
+    @pytest.mark.parametrize(
+        ("effort", "value"),
+        [
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("max", "high"),
+        ],
+    )
+    def test_codex_reasoning_effort_matches_openai(self, effort: str, value: str) -> None:
+        result = build_model_settings("openai-codex", effort)  # type: ignore[arg-type]
+        assert result == {"openai_reasoning_effort": value}
+
+
 class TestUnknownProvider:
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown provider"):
