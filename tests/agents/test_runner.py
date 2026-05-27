@@ -671,14 +671,13 @@ class TestPublishDeparturesBestEffort:
         assert topics == {"agent.state"}
 
         agent_ids = sorted(
-            json.loads(call["payload"])["agent_id"]
-            for call in client._connection.calls
+            call["payload"]["agent_id"] for call in client._connection.calls
         )
         assert agent_ids == ["bridge", "echo", "scribe"]
 
         # Each payload carries the departure discriminator on the wire so
         # the bridge dispatches it correctly.
-        kinds = {json.loads(call["payload"])["kind"] for call in client._connection.calls}
+        kinds = {call["payload"]["kind"] for call in client._connection.calls}
         assert kinds == {"departure"}
 
     async def test_timeout_is_swallowed(

@@ -91,7 +91,7 @@ async def test_set_thinking_effort_matching_id_applies_and_announces(
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "agent.state"
-    parsed = AgentStateEvent.model_validate_json(call["payload"])
+    parsed = AgentStateEvent.model_validate(call["payload"])
     assert parsed.cause == "command_applied"
     assert parsed.thinking_effort == "high"
     assert parsed.agent_id == "scribe"
@@ -149,7 +149,7 @@ async def test_discovery_ping_publishes_state_event(tmp_path: Path) -> None:
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "agent.state"
-    parsed = AgentStateEvent.model_validate_json(call["payload"])
+    parsed = AgentStateEvent.model_validate(call["payload"])
     assert parsed.cause == "discovery_response"
     assert parsed.thinking_effort == "medium"
 

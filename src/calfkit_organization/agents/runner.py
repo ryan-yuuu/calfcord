@@ -64,6 +64,7 @@ import os
 import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from calfkit.client import Client
 from calfkit.worker import Worker
@@ -73,15 +74,25 @@ from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.agents.factory import AgentFactory, resolve_provider
 from calfkit_organization.agents.loader import load_agents_dir
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
-from calfkit_organization.control_plane.builders import build_state_event
-from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
-from calfkit_organization.control_plane.publish import (
-    publish_departure,
-    publish_state_event,
-)
-from calfkit_organization.control_plane.sink import register_control_sink
+# NOTE: ``calfkit_organization.control_plane.*`` modules are NOT imported
+# at top level. ``control_plane.schema`` imports
+# ``calfkit_organization.agents.definition``, which triggers
+# ``agents/__init__.py`` -- which itself imports ``bootstrap_env_var``
+# from this very module. If a control-plane import here ran during
+# ``agents/__init__.py``'s eager load, ``control_plane.builders`` would
+# re-enter ``control_plane.schema`` mid-initialization and raise
+# ``ImportError: cannot import name 'AgentStateEvent'``. Bridge code
+# avoids this by accident (it loads ``agents.definition`` before
+# ``control_plane.publish``, fully completing ``agents/__init__.py``
+# first); the agent CLI path and test isolation both hit the cycle. We
+# defer all control-plane imports to the function bodies that need
+# them. ``TYPE_CHECKING`` covers the one type annotation that wants
+# the symbol at parse time.
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.settings import DiscordSettings
+
+if TYPE_CHECKING:
+    from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +424,9 @@ async def _publish_departures_best_effort(
     Parallel via ``asyncio.gather`` so total shutdown delay is capped at
     ``timeout`` seconds regardless of agent count.
     """
+    # Deferred import: see the NOTE on control_plane imports near the top.
+    from calfkit_organization.control_plane.publish import publish_departure
+
     async def _one(aid: str) -> None:
         try:
             await asyncio.wait_for(publish_departure(client, aid), timeout=timeout)
@@ -472,6 +486,12 @@ async def _prewarm_codex_if_needed(
 
 async def _amain(args: argparse.Namespace) -> None:
     """Build and run the agent(s). Pure-ish: callers configure logging+env."""
+    # Deferred imports: see the NOTE on control_plane imports near the top.
+    from calfkit_organization.control_plane.builders import build_state_event
+    from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
+    from calfkit_organization.control_plane.publish import publish_state_event
+    from calfkit_organization.control_plane.sink import register_control_sink
+
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
     state_dir = Path(os.getenv(_STATE_DIR_ENV, _STATE_DIR_DEFAULT))
 

@@ -8,7 +8,6 @@ expected pydantic type.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC
 from typing import Any
 
@@ -60,7 +59,7 @@ async def test_publish_control_command_targets_agent_topic() -> None:
     # multi-partition control topics.
     assert call["key"] == b"scribe"
 
-    parsed = AgentControlEnvelope.model_validate_json(call["payload"])
+    parsed = AgentControlEnvelope.model_validate(call["payload"])
     assert isinstance(parsed.command, SetThinkingEffortOp)
     assert parsed.command.agent_id == "scribe"
     assert parsed.command.value == "high"
@@ -79,7 +78,7 @@ async def test_publish_discovery_ping_targets_broadcast_topic() -> None:
     # own consumer group) reads every partition.
     assert call["key"] is None
 
-    parsed = AgentControlEnvelope.model_validate_json(call["payload"])
+    parsed = AgentControlEnvelope.model_validate(call["payload"])
     assert isinstance(parsed.command, DiscoveryPingOp)
     assert parsed.command.request_id
 
@@ -109,7 +108,7 @@ async def test_publish_state_event_targets_state_topic() -> None:
     # departure event share a partition and stay ordered for the bridge.
     assert call["key"] == b"scribe"
 
-    parsed = AgentStateEvent.model_validate_json(call["payload"])
+    parsed = AgentStateEvent.model_validate(call["payload"])
     assert parsed == event
 
 
@@ -125,9 +124,9 @@ async def test_publish_departure_targets_state_topic_with_departure_kind() -> No
     assert call["key"] == b"scribe"
 
     # Verify ``kind="departure"`` is on the wire (discriminator field).
-    raw = json.loads(call["payload"])
+    raw = call["payload"]
     assert raw["kind"] == "departure"
 
-    parsed = AgentDepartureEvent.model_validate_json(call["payload"])
+    parsed = AgentDepartureEvent.model_validate(call["payload"])
     assert parsed.agent_id == "scribe"
     assert parsed.reason == "shutdown"

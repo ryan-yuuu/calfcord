@@ -236,7 +236,7 @@ class TestControlCommandPublish:
         call = calfkit_client._connection.calls[0]
         assert call["topic"] == control_topic_for("scribe")
 
-        envelope = AgentControlEnvelope.model_validate_json(call["payload"])
+        envelope = AgentControlEnvelope.model_validate(call["payload"])
         assert isinstance(envelope.command, SetThinkingEffortOp)
         assert envelope.command.agent_id == "scribe"
         assert envelope.command.value == "high"
@@ -312,7 +312,7 @@ class TestReplyText:
         assert "high" in msg
         assert "fire-and-forget" in msg.lower()
         # The reply echoes the same request_id the envelope carries.
-        envelope = AgentControlEnvelope.model_validate_json(
+        envelope = AgentControlEnvelope.model_validate(
             calfkit_client._connection.calls[0]["payload"]
         )
         assert isinstance(envelope.command, SetThinkingEffortOp)

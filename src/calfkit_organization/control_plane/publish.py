@@ -65,7 +65,7 @@ async def publish_control_command(
     """
     envelope = AgentControlEnvelope(command=command)
     await client._connection.publish(
-        envelope.model_dump_json(),
+        envelope.model_dump(mode="json"),
         topic=control_topic_for(agent_id),
         key=_agent_key(agent_id),
     )
@@ -85,7 +85,7 @@ async def publish_discovery_ping(client: Client) -> None:
         ),
     )
     await client._connection.publish(
-        envelope.model_dump_json(),
+        envelope.model_dump(mode="json"),
         topic=BRIDGE_DISCOVERY_TOPIC,
     )
 
@@ -100,7 +100,7 @@ async def publish_state_event(client: Client, event: AgentStateEvent) -> None:
     the agent's departure event, leaving the bridge with a stale entry.
     """
     await client._connection.publish(
-        event.model_dump_json(),
+        event.model_dump(mode="json"),
         topic=AGENT_STATE_TOPIC,
         key=_agent_key(event.agent_id),
     )
@@ -122,7 +122,7 @@ async def publish_departure(client: Client, agent_id: str) -> None:
         departed_at=datetime.now(UTC),
     )
     await client._connection.publish(
-        event.model_dump_json(),
+        event.model_dump(mode="json"),
         topic=AGENT_STATE_TOPIC,
         key=_agent_key(agent_id),
     )
