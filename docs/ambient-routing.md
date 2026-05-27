@@ -172,15 +172,28 @@ Bridge ingress branches on `wire.kind`:
 
 ## Configuration
 
+The router exposes four runtime knobs (`provider`, `model`,
+`thinking_effort`, `history_turns`). They can be set in either of two
+ways:
+
+* `router.yml` at the project root (file-based, recommended for
+  long-lived deployments — versionable, easy to diff).
+* `CALFKIT_ROUTER_*` environment variables (runtime overrides — handy
+  for staging a swap without editing files).
+
+When both are set on the same field, the file wins. Missing fields
+fall through to env vars, then to the in-code defaults.
+
 ### Required env vars
 
 Router-specific:
 
 ```
-CALFKIT_ROUTER_PROVIDER=openai            # anthropic | openai
+CALFKIT_ROUTER_PROVIDER=openai            # anthropic | openai | openai-codex
 CALFKIT_ROUTER_MODEL=gpt-5-nano           # fast/cheap recommended
-CALFKIT_ROUTER_THINKING_EFFORT=none       # none | low | medium | high | xhigh | max
+CALFKIT_ROUTER_THINKING_EFFORT=none       # none | minimal | low | medium | high | xhigh | max
 CALFKIT_ROUTER_HISTORY_TURNS=10           # 0..100; channel history window for routing decisions
+CALFKIT_ROUTER_CONFIG_PATH=router.yml     # override the YAML config path (default ./router.yml)
 ```
 
 Defaults: `openai` / `gpt-5-nano` / `none` / `10`. The router runs once
@@ -190,6 +203,55 @@ because the router only needs enough context to recognize follow-ups vs.
 fresh topics, not to carry the conversation. Invalid values (non-integer
 or outside 0..100) fall back to the default with a WARN log rather than
 crashing the router build.
+
+### Router config file (`router.yml`)
+
+Optional YAML file at the project root (or wherever
+`CALFKIT_ROUTER_CONFIG_PATH` points). When present, its fields take
+precedence over env vars on a per-field basis:
+
+```yaml
+# router.yml
+provider: openai-codex
+model: gpt-5.3-codex
+thinking_effort: minimal
+history_turns: 10
+```
+
+All four fields are optional — omit any to fall through to the matching
+env var, then the in-code default.
+
+Loader behavior at boot:
+
+| Scenario                                          | Behavior                                                     |
+|---------------------------------------------------|--------------------------------------------------------------|
+| Default path `./router.yml`, file missing         | Silent fallback to env + defaults (backward compat).         |
+| `CALFKIT_ROUTER_CONFIG_PATH` set, file missing    | **Boot error** — operator pointed at a path explicitly.       |
+| File present, empty / whitespace-only             | Boot error — almost always a half-finished edit.             |
+| File present, malformed YAML                      | Boot error with file path and parse-error location.          |
+| File present, unknown key (e.g. typo `provder:`)  | Boot error from pydantic `extra="forbid"`.                   |
+| File present, reserved key (`slash`, `role`, etc.)| Same — the router's identity is not operator-tunable.        |
+
+**What's NOT in the schema** by design: `name`, `slash`, `display_name`,
+`description`, `avatar_url`, `role`, `publish_topic`, `tools`, and
+`system_prompt`. These are router-singleton invariants (`agent_id =
+"_router"`, reserved slash, `role="router"`, etc.) — the registry
+depends on them being fixed. Operators who need to change the routing
+prompt should edit `src/calfkit_organization/router/prompt.py` and
+re-deploy.
+
+**Container deploys:** the docker-compose `router:` service does NOT
+bind-mount `router.yml` by default — Docker would silently create a
+directory at the host path if the file is absent, leaving a stray
+`router.yml/` at repo root for deploys that don't use the feature.
+To opt in, add this to your `docker-compose.override.yml`:
+
+```yaml
+services:
+  router:
+    volumes:
+      - ./router.yml:/app/router.yml:ro
+```
 
 Shared with the assistant runner (also required by `calfkit-router`):
 

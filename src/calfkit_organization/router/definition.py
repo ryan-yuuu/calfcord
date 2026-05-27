@@ -25,6 +25,7 @@ import logging
 import os
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider, ThinkingEffort
+from calfkit_organization.router.config import RouterConfig, load_router_config
 from calfkit_organization.router.prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -92,15 +93,26 @@ Overridable via ``CALFKIT_ROUTER_HISTORY_TURNS``."""
 def build_router_definition() -> AgentDefinition:
     """Construct the singleton :class:`AgentDefinition` for the router.
 
-    Reads provider/model/thinking_effort from environment variables so
-    operators can swap LLMs without editing source. Defaults are tuned
-    for fast/cheap classification — the router runs on every ambient
-    message in every channel, so a 1ms latency adds up.
+    Configuration precedence (highest wins):
+        1. ``router.yml`` field (see
+           :mod:`calfkit_organization.router.config`).
+        2. ``CALFKIT_ROUTER_*`` environment variable.
+        3. In-code default (the ``_DEFAULT_*`` constants below).
+
+    The YAML file is optional — when absent, the loader returns ``None``
+    and this function falls back to the env-var + code-default path
+    that earlier versions used exclusively.
+
+    Defaults are tuned for fast/cheap classification — the router runs
+    on every ambient message in every channel, so a 1ms latency adds up.
 
     Environment variables:
         - ``CALFKIT_ROUTER_PROVIDER`` (default ``"openai"``)
         - ``CALFKIT_ROUTER_MODEL`` (default ``"gpt-5-nano"``)
         - ``CALFKIT_ROUTER_THINKING_EFFORT`` (default ``"none"``)
+        - ``CALFKIT_ROUTER_HISTORY_TURNS`` (default ``10``)
+        - ``CALFKIT_ROUTER_CONFIG_PATH`` (default ``./router.yml``) —
+          path to the optional YAML config file.
 
     The returned definition satisfies the router invariants enforced by
     :class:`AgentDefinition`'s validators: ``role="router"``, empty
@@ -110,15 +122,31 @@ def build_router_definition() -> AgentDefinition:
     Returns:
         A frozen :class:`AgentDefinition` ready to be appended to the
         registry alongside user-defined agents. ``source_path`` is
-        ``None`` (no on-disk ``.md``).
+        ``None`` (no on-disk ``.md`` — the router is constructed in
+        code; the optional ``router.yml`` provides config overrides
+        only, not a persona definition).
     """
-    provider_raw = os.getenv(_PROVIDER_ENV, _DEFAULT_PROVIDER)
-    # We let pydantic raise on an invalid Provider tag rather than
-    # second-guessing here — same surface area as user-defined
-    # ``.md`` parsing.
-    model = os.getenv(_MODEL_ENV, _DEFAULT_MODEL)
-    thinking_effort_raw = os.getenv(_THINKING_EFFORT_ENV, _DEFAULT_THINKING_EFFORT)
-    history_turns = _read_history_turns_env()
+    config = load_router_config()
+
+    # We let pydantic raise on an invalid Provider / ThinkingEffort tag
+    # rather than second-guessing here — same surface area as user-
+    # defined ``.md`` parsing.
+    provider_raw = (
+        (config.provider if config else None)
+        or os.getenv(_PROVIDER_ENV)
+        or _DEFAULT_PROVIDER
+    )
+    model = (
+        (config.model if config else None)
+        or os.getenv(_MODEL_ENV)
+        or _DEFAULT_MODEL
+    )
+    thinking_effort_raw = (
+        (config.thinking_effort if config else None)
+        or os.getenv(_THINKING_EFFORT_ENV)
+        or _DEFAULT_THINKING_EFFORT
+    )
+    history_turns = _resolve_history_turns(config)
 
     return AgentDefinition(
         agent_id=ROUTER_AGENT_ID,
@@ -136,6 +164,19 @@ def build_router_definition() -> AgentDefinition:
         system_prompt=SYSTEM_PROMPT,
         source_path=None,
     )
+
+
+def _resolve_history_turns(config: RouterConfig | None) -> int:
+    """Pick history_turns from config > env > default.
+
+    Splits out from the inline resolver pattern used for the other
+    fields because the env-var tier has its own validation +
+    fallback-with-warn behavior (see :func:`_read_history_turns_env`)
+    that we want to keep intact when the config doesn't pin the value.
+    """
+    if config is not None and config.history_turns is not None:
+        return config.history_turns
+    return _read_history_turns_env()
 
 
 def _read_history_turns_env() -> int:

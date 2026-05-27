@@ -1,18 +1,42 @@
 """Unit tests for :func:`build_router_definition`.
 
-The router definition is constructed in code (not parsed from disk),
-with provider/model/thinking_effort driven by environment variables.
-These tests verify the env-driven defaults, the field invariants the
-registry depends on, and the schema-level router constraints (no tools,
-publish_topic set).
+The router definition is constructed in code with three configuration
+tiers (highest wins): ``router.yml`` field > env var > in-code default.
+These tests verify the env-tier defaults, the field invariants the
+registry depends on, the schema-level router constraints (no tools,
+publish_topic set), and the precedence chain.
+
+Every test runs from a ``tmp_path`` CWD so the default ``./router.yml``
+lookup deterministically finds nothing unless the test plants a file
+itself — a developer with a stray router.yml in their actual working
+directory won't trip the env-tier suite.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.router.config import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG_PATH,
+)
 from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pin every test's CWD to ``tmp_path`` and clear the path override.
+
+    The router config loader looks for ``./router.yml`` at CWD, so a
+    developer who has a stray ``router.yml`` in their real working
+    directory would otherwise see flaky pass/fail. Pinning each test's
+    CWD to a clean tmp dir makes the default-path behavior deterministic.
+    """
+    monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
 
 
 class TestDefaults:
@@ -173,3 +197,107 @@ class TestFieldInvariants:
         # Sanity: the hardcoded prompt mentions the dispatch tool
         # (the tool name pydantic-ai's ToolOutput pattern uses).
         assert "dispatch" in d.system_prompt
+
+
+class TestYamlConfigPrecedence:
+    """``router.yml`` field > env var > code default.
+
+    Mirrors :func:`resolve_provider`'s file-beats-env chain. The YAML
+    file is the operator's authored source-of-truth; env vars stay as
+    a runtime override hook for ops staging a swap without editing the
+    file.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_router_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "CALFKIT_ROUTER_PROVIDER",
+            "CALFKIT_ROUTER_MODEL",
+            "CALFKIT_ROUTER_THINKING_EFFORT",
+            "CALFKIT_ROUTER_HISTORY_TURNS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_file_supplies_all_fields(self, tmp_path: Path) -> None:
+        """With no env vars set, file values flow straight into the
+        AgentDefinition."""
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text(
+            "provider: openai-codex\n"
+            "model: gpt-5.3-codex\n"
+            "thinking_effort: medium\n"
+            "history_turns: 25\n"
+        )
+        d = build_router_definition()
+        assert d.provider == "openai-codex"
+        assert d.model == "gpt-5.3-codex"
+        assert d.thinking_effort == "medium"
+        assert d.history_turns == 25
+
+    def test_file_wins_over_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The file is the authored source-of-truth; env is a runtime
+        override layer that should NOT shadow an explicit file value."""
+        monkeypatch.setenv("CALFKIT_ROUTER_PROVIDER", "anthropic")
+        monkeypatch.setenv("CALFKIT_ROUTER_MODEL", "claude-haiku-4-5")
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text(
+            "provider: openai\nmodel: gpt-5-mini\n"
+        )
+        d = build_router_definition()
+        assert d.provider == "openai"
+        assert d.model == "gpt-5-mini"
+
+    def test_env_fills_gaps_when_file_partial(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fields the file omits fall through to env vars (then defaults).
+        The 3-tier chain is per-field, not all-or-nothing."""
+        monkeypatch.setenv("CALFKIT_ROUTER_MODEL", "claude-haiku-4-5")
+        monkeypatch.setenv("CALFKIT_ROUTER_THINKING_EFFORT", "high")
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text("provider: anthropic\n")
+        d = build_router_definition()
+        assert d.provider == "anthropic"  # from file
+        assert d.model == "claude-haiku-4-5"  # from env
+        assert d.thinking_effort == "high"  # from env
+
+    def test_defaults_fill_gaps_when_neither_file_nor_env_set(
+        self, tmp_path: Path
+    ) -> None:
+        """Fields absent from both file and env land on the in-code
+        defaults — same path the env-only suite already covers, here
+        verified with a partial file present."""
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text("thinking_effort: low\n")
+        d = build_router_definition()
+        assert d.thinking_effort == "low"  # from file
+        assert d.provider == "openai"  # code default
+        assert d.model == "gpt-5-nano"  # code default
+        assert d.history_turns == 10  # code default
+
+    def test_history_turns_file_value_wins_over_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """history_turns has its own resolver because the env tier has
+        validate-and-warn semantics; the file tier should still win."""
+        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "5")
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text("history_turns: 50\n")
+        d = build_router_definition()
+        assert d.history_turns == 50
+
+    def test_history_turns_file_zero_is_respected(self, tmp_path: Path) -> None:
+        """``history_turns: 0`` is a valid "disable history" signal;
+        the resolver must distinguish 0 from "not set" so a falsy-check
+        bug doesn't fall through to the default."""
+        (tmp_path / DEFAULT_CONFIG_PATH).write_text("history_turns: 0\n")
+        d = build_router_definition()
+        assert d.history_turns == 0
+
+    def test_explicit_path_missing_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A typo'd ``CALFKIT_ROUTER_CONFIG_PATH`` propagates the
+        ``FileNotFoundError`` out of build_router_definition so the
+        runner converts it to a clean CLI exit rather than silently
+        booting with defaults."""
+        monkeypatch.setenv(CONFIG_PATH_ENV, str(tmp_path / "missing.yml"))
+        with pytest.raises(FileNotFoundError):
+            build_router_definition()
