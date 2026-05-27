@@ -2,7 +2,7 @@
 avatar_url: https://api.dicebear.com/9.x/glass/png?seed=codex
 description: Demonstration agent backed by ChatGPT subscription (Codex models)
 display_name: Codex
-model: gpt-5.2-codex
+model: gpt-5.3-codex
 name: codex_demo
 provider: openai-codex
 slash: /codex
