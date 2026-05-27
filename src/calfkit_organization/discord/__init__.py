@@ -15,13 +15,13 @@ Public surface:
     MessageHandler        — type alias for an async message handler callable.
 """
 
+from calfkit_organization.discord.avatar import dicebear_avatar_url
 from calfkit_organization.discord.messages import IncomingMessage, SentMessage
 from calfkit_organization.discord.persona import (
     DiscordPersonaSender,
     Persona,
     ReplyContext,
     ReplyStyle,
-    dicebear_avatar_url,
 )
 from calfkit_organization.discord.receiver import DiscordReceiver, MessageHandler
 from calfkit_organization.discord.sender import DiscordSender

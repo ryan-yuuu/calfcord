@@ -13,7 +13,6 @@ from calfkit_organization.agents.definition import AgentDefinition, parse_agent_
 def _make_definition(**overrides) -> AgentDefinition:
     defaults = dict(
         agent_id="scheduler",
-        slash="/scheduler",
         display_name="Aksel (Scheduler)",
         description="Calendar mechanics.",
         system_prompt="Test scheduler.",
@@ -25,13 +24,11 @@ class TestAgentDefinitionValidators:
     def test_valid_construction(self) -> None:
         d = _make_definition()
         assert d.agent_id == "scheduler"
-        assert d.slash == "/scheduler"
 
     def test_construct_via_name_alias(self) -> None:
         """YAML uses ``name:``; Pydantic alias should accept that key as well."""
         d = AgentDefinition(
             name="echo",
-            slash="/echo",
             display_name="Echo",
             description="Echoes.",
             system_prompt="Echo body.",
@@ -43,10 +40,16 @@ class TestAgentDefinitionValidators:
         with pytest.raises(ValidationError, match="name"):
             _make_definition(agent_id=bad_id)
 
-    @pytest.mark.parametrize("bad_slash", ["scheduler", "/Scheduler", "/x" * 20, "/", "/sched.uler"])
-    def test_invalid_slash_rejected(self, bad_slash: str) -> None:
-        with pytest.raises(ValidationError, match="slash"):
-            _make_definition(slash=bad_slash)
+    def test_stale_slash_frontmatter_rejected(self) -> None:
+        """The ``slash`` field was removed; stale ``slash:`` frontmatter must fail loudly.
+
+        ``extra="forbid"`` is the load-time guard that catches operators
+        who haven't yet stripped ``slash: /foo`` from their ``.md`` files
+        after the field was dropped — silent acceptance would let the
+        stale value rot in source without warning.
+        """
+        with pytest.raises(ValidationError):
+            _make_definition(slash="/scheduler")
 
     def test_display_name_clyde_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Clyde"):
@@ -152,7 +155,6 @@ class TestParseAgentMd:
     def _write_md(self, path: Path, body: str = "You are a scheduler.", **frontmatter_extra) -> None:
         fields = {
             "name": path.stem,
-            "slash": f"/{path.stem}",
             "display_name": path.stem.title(),
             "description": f"Test {path.stem}.",
         }
@@ -170,7 +172,6 @@ class TestParseAgentMd:
         self._write_md(path)
         d = parse_agent_md(path)
         assert d.agent_id == "scheduler"
-        assert d.slash == "/scheduler"
         assert d.system_prompt == "You are a scheduler."
 
     def test_stamps_source_path(self, tmp_path: Path) -> None:
@@ -204,7 +205,6 @@ class TestParseAgentMd:
         path.write_text(
             "---\n"
             "name: scheduler\n"
-            "slash: /scheduler\n"
             # missing display_name + description
             "---\n"
             "Body.\n"
@@ -217,7 +217,6 @@ class TestParseAgentMd:
         path.write_text(
             "---\n"
             "name: scheduler\n"
-            "slash: /scheduler\n"
             "display_name: Scheduler\n"
             "description: Test.\n"
             "---\n"
@@ -228,3 +227,28 @@ class TestParseAgentMd:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             parse_agent_md(tmp_path / "nope.md")
+
+    def test_avatar_url_omitted_defaults_to_dicebear(self, tmp_path: Path) -> None:
+        """Omitting ``avatar_url`` should yield the per-agent DiceBear default
+        so every assistant gets a stable persona avatar without operators
+        having to host images."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path)
+        d = parse_agent_md(path)
+        assert d.avatar_url == "https://api.dicebear.com/9.x/glass/png?seed=scheduler"
+
+    def test_avatar_url_null_defaults_to_dicebear(self, tmp_path: Path) -> None:
+        """Explicit ``avatar_url: null`` is treated the same as omission —
+        YAML's null parses to Python None, and the loader fills both
+        paths with the DiceBear default."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, avatar_url="null")
+        d = parse_agent_md(path)
+        assert d.avatar_url == "https://api.dicebear.com/9.x/glass/png?seed=scheduler"
+
+    def test_avatar_url_explicit_value_preserved(self, tmp_path: Path) -> None:
+        """An explicit URL in frontmatter wins over the DiceBear default."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, avatar_url="https://example.com/custom.png")
+        d = parse_agent_md(path)
+        assert d.avatar_url == "https://example.com/custom.png"

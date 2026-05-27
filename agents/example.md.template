@@ -20,19 +20,17 @@
 # survives in live agent files.
 
 # ----------------------------------------------------------------------------
-# Identity (all four required; immutable after first deploy — the slash
+# Identity (all three required; immutable after first deploy — the slash
 # command and channel routing both index by these).
 # ----------------------------------------------------------------------------
 
 # Internal identifier. Must match the filename stem (so `name: scribe`
 # means the file is `agents/scribe.md`). Format: [a-z0-9_-]{1,32}.
+# The Discord slash command is always `/<name>` — there is no separate
+# slash field. The bridge currently uses @<name> text-prefix invocation
+# by default and only registers /thinking-effort; per-agent invocation
+# slashes are wired in code but disabled.
 name: example
-
-# Discord slash command. Must start with `/`. The bridge currently uses
-# @<name> text-prefix invocation by default and only registers
-# /thinking-effort; per-agent invocation slashes (this field's value)
-# are wired in code but disabled.
-slash: /example
 
 # What Discord users see as the bot's name on this agent's webhook
 # replies. 1-80 chars. "Clyde" is rejected by Discord webhooks.
@@ -45,9 +43,11 @@ description: An example agent demonstrating the .md frontmatter schema.
 # Appearance (optional)
 # ----------------------------------------------------------------------------
 
-# Avatar URL for the persona webhook reply. `null` or omitted means
-# Discord's default avatar.
-avatar_url: https://api.dicebear.com/9.x/glass/png?seed=example
+# Avatar URL for the persona webhook reply. Omit (or set to `null`) to
+# get the per-agent DiceBear default
+# (https://api.dicebear.com/9.x/glass/png?seed=<name>). Set to any
+# public image URL to override.
+# avatar_url: https://example.com/my-avatar.png
 
 # ----------------------------------------------------------------------------
 # LLM (optional — see CALFKIT_AGENT_DEFAULT_PROVIDER / _DEFAULT_MODEL

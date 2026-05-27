@@ -8,10 +8,8 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
 
     ---
     name: scheduler
-    slash: /scheduler
     display_name: "Aksel (Scheduler)"
     description: "Calendar mechanics; book and prep meetings"
-    avatar_url: null
     provider: anthropic
     model: claude-sonnet-4-5
     tools: [calendar, email]
@@ -20,9 +18,16 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
 
     You are Aksel, the Scheduler. ...
 
+When ``avatar_url`` is omitted, :func:`parse_agent_md` fills it with a
+DiceBear "glass" URL seeded by the agent's name so every assistant gets
+a stable, recognizable persona avatar without operators having to host
+images. Set ``avatar_url`` explicitly in the frontmatter to override.
+
 The YAML key is ``name`` (Claude Code parity). Internally the field is
 ``agent_id`` via a Pydantic alias so existing ``spec.agent_id`` access
-patterns are preserved across the codebase.
+patterns are preserved across the codebase. The Discord slash command for
+each agent is always ``/<name>``; there is no separate ``slash``
+frontmatter field.
 
 ``thinking_effort`` is the one frontmatter field that is operator-tunable
 at runtime — the ``/thinking-effort`` Discord slash command rewrites it
@@ -41,6 +46,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
+from calfkit_organization.discord.avatar import dicebear_avatar_url
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.
@@ -82,19 +88,27 @@ class AgentDefinition(BaseModel):
 
     Validators mirror the constraints Discord imposes on slash commands and
     webhook usernames so misconfiguration fails at load time rather than at
-    first invocation.
+    first invocation. The Discord slash command name is always derived as
+    ``/<agent_id>`` — the ``agent_id`` validator already enforces the
+    Discord-compatible ``[a-z0-9_-]{1,32}`` shape.
     """
 
     # ``extra="forbid"`` surfaces frontmatter typos (``provder: openai``,
     # ``thiking_effort: high``) at parse time rather than silently dropping
     # them — important now that a slash command can rewrite the same file.
+    # It also catches stale ``slash:`` lines left behind from the removal
+    # of the dedicated slash field.
     model_config = ConfigDict(frozen=True, populate_by_name=True, extra="forbid")
 
     agent_id: str = Field(..., alias="name")
-    slash: str
     display_name: str
     description: str
     avatar_url: str | None = None
+    """Webhook persona avatar URL. ``None`` here means "use the Discord
+    webhook's default avatar"; for .md-loaded agents,
+    :func:`parse_agent_md` substitutes the per-agent DiceBear default
+    when the frontmatter omits or nulls the field, so live assistant
+    definitions read from disk always carry a concrete URL."""
     provider: Provider | None = None
     model: str | None = None
     tools: tuple[str, ...] | None = None
@@ -174,15 +188,6 @@ class AgentDefinition(BaseModel):
     def _validate_agent_id(cls, v: str) -> str:
         if not AGENT_ID_PATTERN.fullmatch(v):
             raise ValueError(f"name must match [a-z0-9_-]{{1,32}}, got {v!r}")
-        return v
-
-    @field_validator("slash")
-    @classmethod
-    def _validate_slash(cls, v: str) -> str:
-        if not v.startswith("/"):
-            raise ValueError(f"slash must start with '/', got {v!r}")
-        if not AGENT_ID_PATTERN.fullmatch(v[1:]):
-            raise ValueError(f"slash name (after '/') must match [a-z0-9_-]{{1,32}}, got {v!r}")
         return v
 
     @field_validator("display_name")
@@ -293,4 +298,11 @@ def parse_agent_md(path: Path) -> AgentDefinition:
     # ``os.chdir``s — the bridge daemon doesn't today, but a future
     # plugin or signal handler could.
     metadata["source_path"] = path.resolve()
+    # Fill the per-agent DiceBear default when the .md omits avatar_url
+    # (or sets it to ``null``). Done here at the load boundary rather
+    # than as an AgentDefinition validator so code-built definitions —
+    # the router, test fixtures, state-event projections — keep their
+    # explicit ``None`` semantics.
+    if metadata.get("avatar_url") is None:
+        metadata["avatar_url"] = dicebear_avatar_url(declared_name)
     return AgentDefinition(**metadata)

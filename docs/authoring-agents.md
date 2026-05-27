@@ -41,11 +41,10 @@ tool:
 
 ```yaml
 ---
-name: example-bot                       # filename stem; [a-z0-9_-]{1,32}
-slash: /example-bot                     # Discord slash (must start with /)
+name: example-bot                       # filename stem; [a-z0-9_-]{1,32}; also the slash command (/example-bot)
 display_name: Example                   # webhook username; 1-80 chars; not "Clyde"
 description: A demo agent.              # slash-picker blurb; 1-100 chars
-avatar_url: null                        # optional; null = Discord default
+# avatar_url: ...                       # optional; omit for DiceBear default seeded by name
 provider: anthropic                     # "anthropic" | "openai"
 model: claude-sonnet-4-5                # provider-specific model name
 tools: [private_chat]                   # resolved against TOOL_REGISTRY
@@ -77,14 +76,14 @@ than silently falling back to defaults.
 
 ### 3.1 Identity (required)
 
-These four fields define what Discord and other agents see. They are
+These three fields define what Discord and other agents see. They are
 immutable in practice — the bridge's command tree, the persona
-webhook, and the phonebook all index by them.
+webhook, and the phonebook all index by them. The Discord slash
+command is always `/<name>`; there is no separate `slash` field.
 
 | Field          | Type   | Constraint                                                                 |
 | -------------- | ------ | -------------------------------------------------------------------------- |
-| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem.                          |
-| `slash`        | string | Starts with `/`; remainder matches `[a-z0-9_-]{1,32}`.                     |
+| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem. Also the slash command.  |
 | `display_name` | string | 1-80 characters. The literal `"Clyde"` is rejected by Discord's webhooks. |
 | `description`  | string | 1-100 characters (Discord's slash-command description cap).                |
 
@@ -423,7 +422,7 @@ print(spec.model_dump())
 "
 ```
 
-Catches every validator failure (slash format, display_name, etc.)
+Catches every validator failure (display_name, name format, etc.)
 without needing Kafka or Discord.
 
 ## 8. A2A patterns

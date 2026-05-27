@@ -34,8 +34,17 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 import discord
 
+from calfkit_organization.discord.avatar import dicebear_avatar_url
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.settings import DiscordSettings
+
+__all__ = [
+    "DiscordPersonaSender",
+    "Persona",
+    "ReplyContext",
+    "ReplyStyle",
+    "dicebear_avatar_url",
+]
 
 if TYPE_CHECKING:
     from calfkit_organization.bridge.wire import WireMessage
@@ -57,17 +66,6 @@ _EMBED_SNIPPET_MAX_LEN = 60
 _BUTTON_LABEL_MAX_LEN = 80
 
 ReplyStyle = Literal["embed", "button"]
-
-
-def dicebear_avatar_url(seed: str) -> str:
-    """Return a deterministic DiceBear "glass" avatar URL for ``seed``.
-
-    DiceBear's "glass" style (https://www.dicebear.com) renders abstract
-    frosted-gradient blobs; same seed → same image, no auth required.
-    Used as the default persona avatar source for calfkit agents so each
-    agent gets a stable, recognizable identity without us hosting images.
-    """
-    return f"https://api.dicebear.com/9.x/glass/png?seed={seed}"
 
 
 @dataclass(frozen=True, slots=True)
