@@ -94,8 +94,14 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # The Discord gateway: loads the agent registry, normalizes inbound
-  # events, and posts agent replies back as persona webhooks.
+  # The Discord gateway: normalizes inbound Discord events and posts
+  # agent replies back as persona webhooks.
+  #
+  # No ``agents/*.md`` mount: after the control-plane split the bridge
+  # bootstraps its registry with only the locally-built router and
+  # projects the rest from ``agent.state`` events. Mounting the
+  # definitions here would be a misleading signal that the bridge
+  # consults disk — it does not.
   bridge:
     <<: *calfcord-base
     container_name: calfcord-bridge
@@ -104,14 +110,6 @@ services:
       # Override .env so this service always dials the in-network
       # broker regardless of what the host-side .env says.
       CALF_HOST_URL: redpanda:9092
-    volumes:
-      # Agent definitions are loaded at boot. Read-only because the
-      # bridge process has no reason to mutate them; note that this
-      # does NOT prevent the tools container from editing agents/*.md
-      # via its /workspace mount — that constraint is the README's
-      # "Security model" section. This mount is plain defense in
-      # depth on the bridge process itself.
-      - ./agents:/app/agents:ro
 
   # One or more LLM-backed agent nodes. Defaults to "all agents in one
   # Worker"; for crash isolation per agent, override ``command:`` to
@@ -124,7 +122,12 @@ services:
     environment:
       CALF_HOST_URL: redpanda:9092
     volumes:
-      - ./agents:/app/agents:ro
+      # Read-write: the agent's control-plane sink rewrites its own
+      # frontmatter via md_writer.update_thinking_effort when the
+      # bridge publishes a SetThinkingEffortOp. The agent process is
+      # the sole writer of agents/<id>.md; the bridge and router have
+      # no mount here for that reason.
+      - ./agents:/app/agents
       # Per-agent runtime state (channel subscriptions, .json files
       # under state/agents/). Read-write so the agent service can
       # persist updates.
@@ -142,15 +145,18 @@ services:
   # docs/ambient-routing.md for the design. Single instance — the
   # router holds no per-channel state and a second instance would
   # only contend for partitions.
+  #
+  # No ``agents/*.md`` mount: the router definition is constructed in
+  # code via build_router_definition(), and the per-invocation peer
+  # roster arrives in ``deps`` from the bridge (which projects from
+  # ``agent.state``). The router never touches the agent definitions
+  # directory.
   router:
     <<: *calfcord-base
     container_name: calfcord-router
     command: calfkit-router
     environment:
       CALF_HOST_URL: redpanda:9092
-    volumes:
-      # Router reads agents/*.md at boot for the peer roster.
-      - ./agents:/app/agents:ro
 
   # The A2A + builtin-tool runner. This is the service that runs the
   # shell / fs / grep / glob / web tools — it has the trusted shared
@@ -162,6 +168,7 @@ services:
     environment:
       CALF_HOST_URL: redpanda:9092
       CALFCORD_WORKSPACE_DIR: /workspace
+      CALFKIT_A2A_CHANNEL_NAME: private-a2a
     volumes:
       # Trusted shared workspace: the entire project root, read-write.
       # Agents can read/edit any file in the checkout (agents/*.md,
