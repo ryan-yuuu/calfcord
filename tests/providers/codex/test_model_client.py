@@ -10,16 +10,16 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import httpx
 import pytest
-from authlib.integrations.httpx_client import AsyncOAuth2Client
 from openhands.sdk.llm.auth import CredentialStore, OAuthCredentials
 
 from calfkit_organization.providers.codex.model_client import (
     CODEX_BASE_URL,
     OPENAI_BETA,
     ORIGINATOR,
-    REFRESH_LEEWAY_SECONDS,
     CodexSubscriptionModelClient,
+    _CodexBearerAuth,
 )
 
 
@@ -122,7 +122,12 @@ class TestConstruction:
         # The setting is keyed as openai_send_reasoning_ids on OpenAIResponsesModelSettings
         assert client.model_settings.get("openai_send_reasoning_ids") is False
 
-    def test_underlying_provider_uses_authlib_client(self, tmp_path: Path) -> None:
+    def test_underlying_provider_uses_codex_bearer_auth(self, tmp_path: Path) -> None:
+        """The OpenAI SDK's httpx client must have our _CodexBearerAuth attached
+        as its auth — this is the hook that rotates the OAuth bearer on every
+        outgoing request. Without it the api_key placeholder leaks onto the
+        wire and the Codex backend returns 401 ``Could not parse your
+        authentication token``."""
         store = _seed(tmp_path, account_id="x")
         client = CodexSubscriptionModelClient(
             model_name="gpt-5.2-codex",
@@ -130,26 +135,13 @@ class TestConstruction:
             resolver=_loaded_resolver(tmp_path),
         )
 
-        # Reach into pydantic-ai's provider to assert we wired the authlib transport.
-        # Accessing _client / _http_client is fragile but is the only way to verify
-        # the auth-rotation hook is actually attached without spinning up the network.
+        # Reach into pydantic-ai's provider to assert we wired the OAuth-aware
+        # transport. Accessing _client is fragile but is the only way to verify
+        # the auth hook is actually attached without spinning up the network.
         provider = client._provider  # type: ignore[attr-defined]
         underlying = provider.client._client  # AsyncOpenAI._client is the httpx instance
-        assert isinstance(underlying, AsyncOAuth2Client)
-
-    def test_authlib_client_uses_long_refresh_leeway(self, tmp_path: Path) -> None:
-        """Verify we widened authlib's default 60s to give long-running services
-        plenty of buffer before token expiry."""
-        store = _seed(tmp_path, account_id="x")
-        client = CodexSubscriptionModelClient(
-            model_name="gpt-5.2-codex",
-            store=store,
-            resolver=_loaded_resolver(tmp_path),
-        )
-
-        provider = client._provider  # type: ignore[attr-defined]
-        underlying: AsyncOAuth2Client = provider.client._client
-        assert underlying.leeway == REFRESH_LEEWAY_SECONDS
+        assert isinstance(underlying, httpx.AsyncClient)
+        assert isinstance(underlying.auth, _CodexBearerAuth)
 
     def test_base_url_points_at_codex_backend(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
@@ -250,6 +242,53 @@ class TestImpersonationTransformation:
             ModelRequestParameters(),
         )
         assert new_instructions == "SPECIFIC GPT-5.2"
+
+
+class TestCodexBearerAuth:
+    """``_CodexBearerAuth`` is the per-request hook that overrides whatever
+    Authorization header the OpenAI SDK sets (which would be the placeholder
+    api_key) with the current OAuth access token. If this stops working the
+    Codex backend rejects requests with 401 ``Could not parse your
+    authentication token``."""
+
+    @pytest.mark.asyncio
+    async def test_auth_flow_overrides_authorization_header(self, tmp_path: Path) -> None:
+        store = _seed(tmp_path, account_id="x")
+        # Stored credentials are fresh (1h expiry), so refresh_if_needed is
+        # a no-op and the cached access_token gets injected as-is.
+        cached_access_token = store.get(vendor="openai").access_token  # type: ignore[union-attr]
+
+        auth = _CodexBearerAuth(store)
+        request = httpx.Request(
+            "POST",
+            "https://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer placeholder-from-openai-sdk"},
+        )
+
+        # async_auth_flow is an async generator that yields the (possibly
+        # mutated) request; the framework would then await the response.
+        gen = auth.async_auth_flow(request)
+        yielded = await gen.__anext__()
+        try:
+            await gen.__anext__()
+        except StopAsyncIteration:
+            pass
+
+        assert yielded.headers["Authorization"] == f"Bearer {cached_access_token}"
+
+    @pytest.mark.asyncio
+    async def test_auth_flow_raises_when_credentials_gone(self, tmp_path: Path) -> None:
+        """If the credential file is deleted mid-session (e.g. operator ran
+        ``calfkit-auth codex logout`` while the agent was running), the next
+        request must surface a clear actionable error rather than sending
+        an empty Bearer that the server would parse as malformed."""
+        # Build the auth against an empty store — no credentials cached.
+        empty_store = CredentialStore(credentials_dir=tmp_path / "empty")
+        auth = _CodexBearerAuth(empty_store)
+        request = httpx.Request("POST", "https://example.invalid/")
+        gen = auth.async_auth_flow(request)
+        with pytest.raises(RuntimeError, match="calfkit-auth codex login"):
+            await gen.__anext__()
 
 
 # --- Helpers -----------------------------------------------------------------
