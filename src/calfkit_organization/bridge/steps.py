@@ -100,6 +100,22 @@ consumer guards against this by checking
 marks the correlation completed even when no thread was ever created
 (so retries of pure-text replies are also suppressed).
 
+**Co-tenant peer envelopes — deferred seeding.** Every agent that
+subscribes to the inbound channel topic flows through calfkit's
+``handler()`` (``calfkit/nodes/base.py:268-278``). When a peer's
+gates filter the envelope, the handler still returns
+``Response(body=envelope_unchanged, headers=self._emitter_headers())``,
+and FastStream's ``@publisher`` decorator mirrors that to
+``agent.steps`` with the **peer's** emitter headers. If the steps
+consumer eagerly created a :class:`StepsEntry` on first-arrival, the
+peer's no-delta envelope would claim the entry under the peer's
+persona before the real emitter's content-bearing hop arrived — and
+the transcript would post under the wrong agent. The consumer
+therefore defers entry creation until it has rendered content
+(``_render_delta`` produced a non-empty list) or the hop is terminal.
+Gated-out peer envelopes carry the inbound envelope unchanged, so
+their delta is empty and they cannot claim the entry.
+
 **Failure semantics.** Every Discord operation is wrapped in a
 try/except that catches the common Discord error subclasses
 (``NotFound``, ``Forbidden``, ``DiscordException`` — broader than
@@ -516,16 +532,47 @@ def build_steps_consumer(
 
         is_terminal = bool(result.output_parts)
 
+        # Resolve the cursor without seeding yet. Co-tenant agents on the
+        # same ambient channel topic all publish to ``agent.steps``: peers
+        # whose gates filter the inbound envelope still flow through
+        # calfkit's handler (base.py:268-278), which returns the unchanged
+        # envelope with the *peer's* emitter headers. FastStream then
+        # mirrors that to ``agent.steps``. If we seeded on first-arrival,
+        # the peer would claim the entry under its persona before the real
+        # emitter's content-bearing hop arrived — and the transcript
+        # would post under the wrong agent. Defer seeding until we
+        # actually have rendered content, so a no-delta peer envelope
+        # cannot poison the persona for the real emitter.
         entry = steps_state.get(correlation_id)
+        cursor: int
+        pending_for_seed = None
         if entry is None:
-            entry = _seed_entry(result, correlation_id)
-            if entry is None:
-                # Seeding refused (no wire, thread-source, unknown
-                # registry). Still mark terminal hops completed so a
-                # retry of this correlation doesn't try to seed again.
+            pending_for_seed = pending_wires.get(correlation_id)
+            if pending_for_seed is None:
+                logger.debug(
+                    "steps: no pending wire for correlation_id=%s; skipping hop",
+                    correlation_id,
+                )
                 if is_terminal:
                     steps_state.pop_and_mark_completed(correlation_id)
                 return
+            wire = pending_for_seed.wire
+            if (
+                wire.source_channel_id is not None
+                and wire.source_channel_id != wire.channel_id
+            ):
+                logger.debug(
+                    "steps: wire originated in a thread "
+                    "(channel=%d source=%d); step transcripts disabled "
+                    "for this correlation",
+                    wire.channel_id, wire.source_channel_id,
+                )
+                if is_terminal:
+                    steps_state.pop_and_mark_completed(correlation_id)
+                return
+            cursor = pending_for_seed.initial_message_history_length
+        else:
+            cursor = entry.history_cursor
 
         history = result.message_history
         # On terminal hop, drop the trailing ModelResponse from the
@@ -534,9 +581,9 @@ def build_steps_consumer(
         # in the thread. Tool returns and any earlier intermediate
         # text in this same delta still render.
         new_messages = (
-            history[entry.history_cursor:-1]
+            history[cursor:-1]
             if is_terminal and history
-            else history[entry.history_cursor:]
+            else history[cursor:]
         )
 
         try:
@@ -552,11 +599,44 @@ def build_steps_consumer(
             )
             rendered = []
 
-        # Advance the cursor regardless of render outcome — un-rendered
-        # parts and exceptions should not be re-walked on the next hop.
-        entry.history_cursor = len(history)
+        # Seed only when the delta itself is non-empty (so there is
+        # progress to track) OR this is the terminal hop (which must
+        # mark completion). Gated-out peer envelopes pass the inbound
+        # envelope unchanged, so their ``new_messages`` is empty and
+        # they cannot claim the entry. Note we key on ``new_messages``
+        # rather than ``rendered`` so that whitespace-only text and
+        # rendering exceptions (where ``new_messages`` is non-empty
+        # but ``rendered`` is empty) still seed the entry — otherwise
+        # the next hop would re-walk and re-trip the same bad message.
+        if entry is None and (new_messages or is_terminal):
+            assert pending_for_seed is not None  # set above when entry is None
+            spec = registry.by_id(result.emitter_node_id or "")
+            if spec is None:
+                logger.warning(
+                    "steps: unknown emitter=%s correlation_id=%s",
+                    result.emitter_node_id, correlation_id,
+                )
+                if is_terminal:
+                    steps_state.pop_and_mark_completed(correlation_id)
+                return
+            entry = StepsEntry(
+                parent_channel_id=pending_for_seed.wire.channel_id,
+                parent_message_id=pending_for_seed.wire.message_id,
+                persona=Persona(
+                    name=spec.display_name, avatar_url=spec.avatar_url,
+                ),
+                history_cursor=cursor,
+            )
+            steps_state.put(correlation_id, entry)
 
-        if rendered:
+        # Advance the cursor on the live entry (if one exists). For
+        # peer-only no-delta envelopes the entry is still None here;
+        # nothing to advance, and the next hop will recompute the cursor
+        # from the pending wire's initial_message_history_length anyway.
+        if entry is not None:
+            entry.history_cursor = len(history)
+
+        if entry is not None and rendered:
             await _ensure_thread_and_post(
                 entry, result.emitter_node_id, rendered,
             )
@@ -569,67 +649,6 @@ def build_steps_consumer(
                 await _lock_thread(
                     popped.thread_id, popped.parent_channel_id,
                 )
-
-    def _seed_entry(
-        result: NodeResult[str], correlation_id: str,
-    ) -> StepsEntry | None:
-        """Construct a fresh StepsEntry from the pending wire, or None.
-
-        Returns None (and logs) when:
-        * no pending wire (bridge restart or LRU eviction);
-        * the wire originated inside a Discord thread (cannot create a
-          thread off a thread);
-        * the emitter is not in the registry.
-        """
-        pending = pending_wires.get(correlation_id)
-        if pending is None:
-            logger.debug(
-                "steps: no pending wire for correlation_id=%s; skipping hop",
-                correlation_id,
-            )
-            return None
-
-        wire = pending.wire
-        # source_channel_id is the actual landing channel; channel_id is
-        # the parent (the normalizer flattens for Kafka routing). When
-        # they differ, the wire came from inside an existing thread, and
-        # Discord forbids creating a thread off a thread message.
-        if (
-            wire.source_channel_id is not None
-            and wire.source_channel_id != wire.channel_id
-        ):
-            logger.debug(
-                "steps: wire originated in a thread "
-                "(channel=%d source=%d); step transcripts disabled for this "
-                "correlation",
-                wire.channel_id, wire.source_channel_id,
-            )
-            return None
-
-        spec = registry.by_id(result.emitter_node_id or "")
-        if spec is None:
-            logger.warning(
-                "steps: unknown emitter=%s correlation_id=%s",
-                result.emitter_node_id, correlation_id,
-            )
-            return None
-
-        entry = StepsEntry(
-            parent_channel_id=wire.channel_id,
-            parent_message_id=wire.message_id,
-            persona=Persona(
-                name=spec.display_name, avatar_url=spec.avatar_url,
-            ),
-            # Seed past the projected channel-history prefix that
-            # ingress passed into invoke_node. Without this, the
-            # first-hop walk from cursor=0 would project every prior
-            # agent reply (returned as ModelResponse(TextPart(...)) by
-            # project_history) into the new transcript thread as fresh
-            # "steps."
-            history_cursor=pending.initial_message_history_length,
-        )
-        steps_state.put(correlation_id, entry)
-        return entry
 
     async def _ensure_thread_and_post(
         entry: StepsEntry,

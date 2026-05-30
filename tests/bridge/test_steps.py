@@ -357,11 +357,14 @@ class TestRenderDelta:
         )
         # Nothing renderable — no posts, no thread.
         persona_sender.send.assert_not_called()
-        # Cursor still advances so a later hop doesn't re-walk it.
+        # Entry IS seeded because the delta itself is non-empty (the
+        # ModelRequest carrying system+user prompts); only the *render*
+        # is empty. Tracking the cursor here means a later hop's tool
+        # call doesn't re-walk these prompts.
         entry = steps_state.get(_CORRELATION_ID)
         assert entry is not None
         assert entry.history_cursor == len(history)
-        assert entry.thread_id is None  # no thread until something renderable
+        assert entry.thread_id is None
 
     async def test_oversize_tool_args_truncated(
         self,
@@ -875,6 +878,72 @@ class TestThreadOriginatedWire:
             "wire originated in a thread" in r.message
             for r in caplog.records
         )
+
+
+class TestCoTenantPeerEnvelopes:
+    """Co-tenant agents that subscribe to the same channel topic all
+    publish to ``agent.steps`` — peers whose gates filter the envelope
+    still flow through calfkit's handler and FastStream mirrors the
+    unchanged envelope with the peer's emitter headers. The transcript
+    must use the real emitter's persona, not the first peer's."""
+
+    async def test_peer_no_delta_envelope_does_not_claim_persona(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        # Two-agent registry: "conan" is the peer; "codex" is the real
+        # emitter of the actual run.
+        registry = AgentRegistry([
+            AgentDefinition(
+                agent_id="conan",
+                display_name="Conan",
+                description="Detective.",
+                avatar_url="https://example.com/conan.png",
+                system_prompt="A.",
+            ),
+            AgentDefinition(
+                agent_id="codex",
+                display_name="Codex",
+                description="Coder.",
+                avatar_url="https://example.com/codex.png",
+                system_prompt="B.",
+            ),
+        ])
+        consumer = build_steps_consumer(
+            persona_sender, registry, pending_wires, steps_state,
+        )
+
+        # Peer hop first — gates filtered Conan, so the envelope is
+        # mirrored unchanged with conan's emitter headers. Empty
+        # message_history mimics the gate-filtered no-modifications path.
+        await consumer.handler(
+            envelope=_envelope(message_history=[]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="conan"),
+            broker=broker,
+        )
+        # Nothing posted, no entry seeded — peer cannot claim it.
+        persona_sender.send.assert_not_called()
+        assert steps_state.get(_CORRELATION_ID) is None
+
+        # Real emitter's first hop with rendered content.
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="from codex")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="codex"),
+            broker=broker,
+        )
+        # Persona is Codex's, not Conan's.
+        personas = [
+            c.kwargs["persona"].name
+            for c in persona_sender.send.call_args_list
+        ]
+        assert all(name == "Codex" for name in personas)
 
 
 class TestOutboxRetryDedup:
