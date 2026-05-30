@@ -356,6 +356,7 @@ class BridgeIngress:
                 PendingEntry(
                     wire=wire,
                     message_history=tuple(message_history),
+                    initial_message_history_length=len(message_history),
                     temp_instructions=temp_instructions,
                     model_settings=model_settings,
                 ),

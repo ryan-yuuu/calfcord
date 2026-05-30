@@ -93,6 +93,24 @@ class PendingEntry:
     """Snapshot of ``message_history`` passed to the original ``invoke_node``.
     Tuple (not list) for shallow immutability; combined with the
     frozen dataclass, callers cannot accidentally mutate the snapshot."""
+    initial_message_history_length: int = 0
+    """``len(message_history)`` at the moment the invocation was published.
+
+    The steps consumer
+    (:func:`calfkit_organization.bridge.steps.build_steps_consumer`)
+    reads this to seed :attr:`StepsEntry.history_cursor` so the
+    transcript thread only renders messages produced *during this turn*,
+    not the projected channel-history prefix that
+    :func:`~calfkit_organization.bridge.history.project_history` seeded
+    into ``state.message_history``. Without this field, the consumer's
+    first-hop walk from cursor=0 would project every prior agent reply
+    (returned as ``ModelResponse(TextPart(...))`` by ``project_history``)
+    as fresh "steps" into the new transcript thread.
+
+    The default ``0`` is correct for callsites that don't pass a
+    ``message_history`` to ``invoke_node`` (e.g. an A2A invocation
+    starting from scratch); they would also have nothing to skip.
+    """
     temp_instructions: str | None = None
     """Snapshot of ``temp_instructions`` from the original invocation.
     Forwarded verbatim on retries so the agent's tool affordances
@@ -230,6 +248,7 @@ def make_pending_entry(
     wire: WireMessage,
     *,
     message_history: tuple[ModelMessage, ...] = (),
+    initial_message_history_length: int | None = None,
     temp_instructions: str | None = None,
     model_settings: dict[str, Any] | None = None,
 ) -> PendingEntry:
@@ -238,10 +257,18 @@ def make_pending_entry(
     accepts only keyword arguments for the snapshot fields, which
     documents the intent at the callsite (the wire is positional;
     everything else is optional snapshot context).
+
+    When ``initial_message_history_length`` is omitted it defaults to
+    ``len(message_history)`` — the common case where the caller passes
+    the history they intend the agent to start with, and the
+    steps-consumer cursor should skip all of it.
     """
+    if initial_message_history_length is None:
+        initial_message_history_length = len(message_history)
     return PendingEntry(
         wire=wire,
         message_history=message_history,
+        initial_message_history_length=initial_message_history_length,
         temp_instructions=temp_instructions,
         model_settings=model_settings,
     )

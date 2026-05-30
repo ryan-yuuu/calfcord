@@ -54,6 +54,8 @@ from calfkit_organization.bridge.outbox import build_outbox_consumer
 from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.slash import SlashCommandManager
+from calfkit_organization.bridge.steps import build_steps_consumer
+from calfkit_organization.bridge.steps_state import StepsState
 from calfkit_organization.bridge.synthesized import build_synthesized_consumer
 
 # NOTE: ``calfkit_organization.control_plane.state_consumer`` imports
@@ -402,6 +404,20 @@ def main() -> None:
                 # shares the bridge's calfkit Client + broker (and the
                 # same consumer-group-per-node-id contract).
                 synthesized_node = build_synthesized_consumer(ingress)
+                # The steps consumer subscribes to ``agent.steps`` (which
+                # every assistant agent's ``publish_topic`` mirrors every
+                # hop to) and projects intermediate text / tool calls /
+                # tool results into a Discord transcript thread off the
+                # user's parent message. Reuses ``persona_sender`` for
+                # both webhook posts (in-thread) and the thread create /
+                # lock REST calls (via ``persona_sender.client``).
+                steps_state = StepsState()
+                steps_node = build_steps_consumer(
+                    persona_sender=persona_sender,
+                    registry=registry,
+                    pending_wires=pending_wires,
+                    steps_state=steps_state,
+                )
 
                 # Register the consumer's handler on the broker *before*
                 # broker.start() so its consumer group joins ahead of the
@@ -416,7 +432,7 @@ def main() -> None:
                 # FastStream serve loop whose signal handling overlaps with
                 # the loop we install below. broker.start() activates every
                 # registered subscriber on its own, which is what we need.
-                worker = Worker(calfkit_client, [consumer_node, synthesized_node])
+                worker = Worker(calfkit_client, [consumer_node, synthesized_node, steps_node])
                 worker.register_handlers()
 
                 # Register the state-event projection subscriber on the

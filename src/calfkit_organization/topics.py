@@ -74,3 +74,39 @@ ROUTING_DECISIONS_TOPIC = "routing.decisions"
 Producer: built-in router agent (see
 :func:`calfkit_organization.router.definition.build_router_definition`).
 Consumer: :mod:`calfkit_organization.router.fanout`."""
+
+AGENT_STEPS_TOPIC = "agent.steps"
+"""Shared topic that every assistant agent mirrors its handler hops to.
+
+FastStream's ``@publisher`` decorator (see
+:meth:`calfkit.worker.Worker.register_handlers`) re-publishes every
+``Response`` returned from a node's handler onto its ``publish_topic``.
+Wiring this topic as the assistant agent's ``publish_topic`` makes
+every intermediate ``Call`` / ``TailCall`` / ``ReturnCall`` envelope
+visible on a single feed.
+
+Producer: every assistant :class:`~calfkit.nodes.Agent` built by
+:meth:`calfkit_organization.agents.factory.AgentFactory.build_node`.
+Consumer: the bridge's steps consumer
+(:func:`calfkit_organization.bridge.steps.build_steps_consumer`),
+which projects the message-history delta on each hop into a Discord
+transcript thread.
+
+**Operator note — single partition required.** This topic MUST be
+configured with a single partition (or all of one agent's hops must
+hash to the same partition by some other means). FastStream's
+``@publisher`` decorator wraps the calfkit handler's plain
+``faststream.Response`` return without carrying a Kafka key, so on a
+multi-partition topic the hops for one ``correlation_id`` can
+round-robin partitions and arrive at the consumer out of order. The
+consumer's history-cursor advance is monotonic, so an out-of-order
+late hop would silently swallow its delta; an intermediate hop
+arriving after a terminal hop would seed a second (unlocked)
+transcript thread. The bridge's direct
+:meth:`~calfkit.Client.publish` calls do stamp the correlation_id as
+the partition key (see ``calfkit/nodes/base.py``); the gap is only
+the publisher-decorator mirror path that ``publish_topic`` activates.
+
+Recommended Kafka config:
+
+    kafka-topics.sh --create --topic agent.steps --partitions 1 ..."""

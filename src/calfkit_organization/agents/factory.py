@@ -93,7 +93,7 @@ from calfkit_organization.agents.routing import ROUTER_OUTPUT_TOOL_NAME, Routing
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.discord.persona import DiscordPersonaSender
-from calfkit_organization.topics import AMBIENT_INGRESS_TOPIC
+from calfkit_organization.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
 
 # NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
 # Tool modules transitively import bridge code, and bridge imports agents.factory
@@ -364,10 +364,22 @@ class AgentFactory:
             [t.tool_schema.name for t in tools] if tools else [],
         )
 
+        # ``publish_topic=AGENT_STEPS_TOPIC`` makes FastStream mirror every
+        # handler hop (``Call`` / ``TailCall`` / ``ReturnCall``) to a shared
+        # audit feed the bridge's steps consumer subscribes to. The action-
+        # specific publish (``ReturnCall`` → frame.callback_topic, ``Call`` →
+        # tool topic) still happens through ``BaseNodeDef._publish_action``;
+        # the publish_topic is an additional mirror, not a replacement.
+        # The frontmatter-side ``publish_topic`` field stays assistant-
+        # prohibited (``AgentDefinition._validate_router_constraints``)
+        # because the injection here is a factory-level concern, not an
+        # operator-tunable. See ``topics.AGENT_STEPS_TOPIC`` for the
+        # single-partition operator requirement on this topic.
         agent = Agent(
             node_id=definition.agent_id,
             system_prompt=definition.system_prompt,
             subscribe_topics=subscribe_topics,
+            publish_topic=AGENT_STEPS_TOPIC,
             model_client=self._model_client_factory(provider, model_name),
             model_settings=model_settings,
             tools=tools or None,
