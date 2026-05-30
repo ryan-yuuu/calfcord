@@ -40,6 +40,7 @@ from calfkit.client import Client
 from discord import app_commands
 
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
+from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT
 from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.registry import AgentRegistry
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 _THINKING_EFFORT_VALUES: tuple[ThinkingEffort, ...] = get_args(ThinkingEffort)
 _THINKING_EFFORT_COMMAND_NAME = "thinking-effort"
+_CLEAR_COMMAND_NAME = "clear"
 
 
 class SlashCommandManager:
@@ -103,6 +105,40 @@ class SlashCommandManager:
         :mod:`calfkit_organization.agents.thinking` for the full story.
         """
         self._tree.add_command(self._build_thinking_effort_command())
+
+    def register_clear(self) -> None:
+        """Register the ``/clear`` operator slash on the command tree.
+
+        Owner-gated. Posts a sentinel marker message
+        (:data:`~calfkit_organization.bridge.history.CLEAR_MARKER_TEXT`)
+        into the invoking channel; the bridge's
+        :class:`~calfkit_organization.bridge.history.ChannelHistoryFetcher`
+        truncates fetched history at the most recent marker, so every
+        agent subscribed to that channel stops seeing messages above the
+        line on subsequent invocations. Non-destructive — no Discord
+        messages are deleted, and the boundary lives in the channel
+        itself, so it survives bridge restarts.
+
+        Per-channel/thread scope: the marker exists only in the channel
+        it was posted in and the fetcher keys history on the source
+        channel, so ``/clear`` in a thread clears that thread and
+        ``/clear`` in a parent channel does not clear its threads.
+
+        The command takes no parameters and has no agent-roster choice
+        list, so (unlike ``/thinking-effort``) it needs no debounced
+        re-sync — it is registered once and built inline here.
+        """
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await self._on_clear(interaction)
+
+        self._tree.add_command(
+            app_commands.Command(
+                name=_CLEAR_COMMAND_NAME,
+                description="Clear agent context in this channel from this point onward",
+                callback=callback,
+            )
+        )
 
     def _build_thinking_effort_command(self) -> app_commands.Command:
         # The built-in router is excluded from the choice list — its
@@ -213,6 +249,94 @@ class SlashCommandManager:
             f"Sent `effort={effort}` to `{agent_id}` (fire-and-forget, "
             f"request_id={request_id}). Bridge applies override on next "
             f"slash/mention; agent rewrites its `.md` asynchronously."
+        )
+
+    async def _on_clear(self, interaction: discord.Interaction) -> None:
+        """Handle a ``/clear`` invocation: post the per-channel context marker.
+
+        Owner-gated. On success the bot posts
+        :data:`~calfkit_organization.bridge.history.CLEAR_MARKER_TEXT`
+        into the channel as a plain (non-webhook) message; the history
+        fetcher recognizes and truncates at it on the next invocation.
+        Nothing is published to Kafka and no agent is involved — the
+        boundary is purely the marker message in the channel.
+        """
+        channel = interaction.channel
+        channel_id = getattr(channel, "id", None)
+        logger.info(
+            "clear slash invoked channel_id=%s user_id=%s",
+            channel_id,
+            interaction.user.id,
+        )
+
+        async def reply(text: str) -> None:
+            # Like :meth:`_on_thinking_effort`'s reply helper, but catch the
+            # broader ``DiscordException`` so a failed ack can never escape
+            # into the command dispatcher: this covers Discord's own
+            # rejection (``HTTPException`` — expired token, rate limit) AND
+            # an already-acknowledged interaction (``InteractionResponded``,
+            # a ``ClientException``). The ack is best-effort with nothing
+            # actionable left to do, so log and swallow.
+            try:
+                await interaction.response.send_message(text, ephemeral=True)
+            except discord.DiscordException:
+                logger.exception(
+                    "failed to send clear reply interaction_id=%s",
+                    interaction.id,
+                )
+
+        if self._owner_user_id is not None and interaction.user.id != self._owner_user_id:
+            await reply("Only the configured owner can clear agent context.")
+            return
+
+        if channel is None:
+            # A guild slash always carries a messageable channel; this
+            # guards the rare uncached-channel case rather than letting an
+            # AttributeError escape into the command dispatcher.
+            await reply(
+                "Couldn't find a channel to clear here. Run /clear from a "
+                "text channel or thread."
+            )
+            return
+
+        # Post the marker as a plain bot message (NOT an ephemeral/followup
+        # post) so it lands in channel history with the bot's own user id
+        # and no webhook_id — exactly what is_clear_marker authenticates.
+        try:
+            await channel.send(CLEAR_MARKER_TEXT)
+        except discord.HTTPException:
+            # Discord rejected the post — most often ``Forbidden`` (a
+            # subclass), i.e. the bot lacks Send Messages here.
+            logger.exception(
+                "failed to post clear marker channel_id=%s interaction_id=%s",
+                channel_id,
+                interaction.id,
+            )
+            await reply(
+                "Couldn't post the clear marker (Discord rejected it), so "
+                "context was NOT cleared. Check that I can send messages "
+                "here and try again."
+            )
+            return
+        except Exception:
+            # Anything non-Discord (connector death, an unexpected channel
+            # type) must still surface a truthful result rather than escape
+            # into the command dispatcher as a generic "did not respond".
+            logger.exception(
+                "unexpected error posting clear marker channel_id=%s interaction_id=%s",
+                channel_id,
+                interaction.id,
+            )
+            await reply(
+                "Couldn't post the clear marker (unexpected error), so "
+                "context was NOT cleared. Check the bridge logs and try again."
+            )
+            return
+
+        logger.info("clear marker posted channel_id=%s", channel_id)
+        await reply(
+            "Context cleared. Agents won't see messages above the marker on "
+            "their next turn in this channel."
         )
 
     def schedule_resync(self, agent_id: str) -> None:

@@ -125,6 +125,51 @@ fetcher enforces this so a caller asking for more (e.g. via an
 operator-edited frontmatter) doesn't surprise-fail at the Discord
 layer — we cap silently and return up to 100 records."""
 
+CLEAR_MARKER_TEXT = "🧹 Context cleared — agents won't see messages above this line."
+"""Sentinel content the ``/clear`` operator slash posts into a channel to
+mark a conversation boundary.
+
+:func:`is_clear_marker` recognizes it (by bot authorship AND exact content
+match) and :meth:`ChannelHistoryFetcher._do_fetch` truncates fetched
+history at the most recent marker, so agents stop seeing messages above
+the line. Defined here — where the recognizer lives — and imported by the
+slash poster (:meth:`SlashCommandManager._on_clear`) so the two literals
+never drift. Non-destructive: the marker is an ordinary channel message,
+so the boundary survives bridge restarts and is scoped to the
+channel/thread it was posted in (the fetcher reads only that channel's
+history)."""
+
+
+def is_clear_marker(msg: Any, bot_user_id: int | None) -> bool:
+    """Return ``True`` iff ``msg`` is a bot-posted ``/clear`` boundary marker.
+
+    Recognition checks the same conditions as the gateway's bot-authored-message
+    predicate (:meth:`DiscordIngressGateway._on_message`): the message must be the
+    bot's own **non-webhook** post (``webhook_id is None`` and
+    ``author.id == bot_user_id``) AND its content must exactly equal
+    :data:`CLEAR_MARKER_TEXT`. Authorship is the load-bearing half — a
+    regular user cannot post under the bot's user id, and agent personas
+    post via webhooks (a distinct author id), so the marker cannot be
+    spoofed by a user typing the sentinel text.
+
+    ``bot_user_id`` is ``None`` only before the gateway is ready (the
+    fetcher is constructed in ``_on_ready``, so this is defensive); a
+    ``None`` id means authorship cannot be authenticated and the message
+    is treated as ordinary. The content check is evaluated early so
+    non-marker messages short-circuit before any attribute access on
+    ``author``.
+
+    Pure and registry-free so it is unit-testable in isolation and can be
+    reused by other history readers (e.g. the A2A thread reader) without
+    pulling in fetcher state.
+    """
+    return (
+        bot_user_id is not None
+        and msg.content == CLEAR_MARKER_TEXT
+        and getattr(msg, "webhook_id", None) is None
+        and msg.author.id == bot_user_id
+    )
+
 
 class HistoryRecord(BaseModel):
     """JSON-serializable snapshot of one Discord message.
@@ -403,6 +448,10 @@ class ChannelHistoryFetcher:
         ``fetch`` contract ("never raises into invocation path")
         holds even if a future ``discord.py`` release returns
         unexpected ``Message`` shapes.
+
+        Records are also truncated at the most recent ``/clear`` marker
+        (see :func:`is_clear_marker` and the inline comment at the scan
+        site for the rationale).
         """
         channel = await self._resolve_channel(source_channel_id)
         if channel is None:
@@ -435,12 +484,29 @@ class ChannelHistoryFetcher:
             return []
 
         # discord.py returns newest-first; reverse for chronological order.
-        # Wrap projection in a defensive sweep: if a future ``discord.py``
-        # version returns a ``Message`` shape missing an attribute we
-        # read in :meth:`_to_record`, we'd otherwise raise into the
-        # invocation path (violating the "never raises" contract).
+        # Then drop everything up to and including the most recent ``/clear``
+        # marker (see :func:`is_clear_marker`) so a prior operator ``/clear``
+        # bounds the history every downstream consumer sees — the marker
+        # itself is excluded too. Scanning the raw ``discord.Message`` list
+        # (rather than carrying a flag on :class:`HistoryRecord`) keeps the
+        # marker concept local to the fetcher and the record schema
+        # unchanged; the bot-author identity bits the recognizer needs
+        # (``author.id`` / ``webhook_id``) live only on the message, not the
+        # projected record. The scan + projection share one defensive
+        # ``Exception`` sweep: if a future ``discord.py`` returns a
+        # ``Message`` shape missing an attribute we read, we degrade to
+        # empty history rather than raise into the invocation path
+        # (the "never raises" contract).
+        bot_user = self._client.user
+        bot_user_id = bot_user.id if bot_user is not None else None
         try:
-            return [self._to_record(m) for m in reversed(messages)]
+            ordered = list(reversed(messages))
+            cut = -1
+            for i in range(len(ordered) - 1, -1, -1):
+                if is_clear_marker(ordered[i], bot_user_id):
+                    cut = i
+                    break
+            return [self._to_record(m) for m in ordered[cut + 1:]]
         except Exception:
             logger.exception(
                 "channel_id=%d: failed to project messages into HistoryRecords; "

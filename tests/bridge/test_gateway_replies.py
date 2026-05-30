@@ -25,7 +25,7 @@ import pytest
 from pydantic import SecretStr
 
 from calfkit_organization.bridge.gateway import DiscordIngressGateway
-from calfkit_organization.bridge.history import ChannelHistoryFetcher
+from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT, ChannelHistoryFetcher
 from calfkit_organization.discord.settings import DiscordSettings
 
 
@@ -284,6 +284,54 @@ class TestOnMessageIngressFailureWiring:
         # Sanity: no Python type names or implementation references.
         assert "RuntimeError" not in text
         assert "ingress" not in text.lower() or "operator" in text.lower()
+
+
+class TestOnMessageFiltersClearMarker:
+    """The ``/clear`` marker is the bot's own non-webhook message, so the
+    gateway self-message filter in ``_on_message`` must drop it. Without
+    this, the bridge would re-ingest its own marker and fan it out to
+    agents on every ``/clear`` — a token-burning loop. The marker depends
+    on this seam; these tests pin that dependency."""
+
+    def _ready_gateway(self) -> DiscordIngressGateway:
+        gateway = _gateway()
+        gateway._bot_user_id = 555
+        gateway._message_normalizer = MagicMock()
+        gateway._message_normalizer.normalize = MagicMock(return_value=MagicMock())
+        gateway._ingress.handle = AsyncMock()
+        return gateway
+
+    @staticmethod
+    def _message(*, author_id: int, webhook_id: int | None) -> MagicMock:
+        message = MagicMock(spec=discord.Message)
+        message.id = 1
+        message.guild = MagicMock()
+        message.guild.id = 5678  # matches settings.guild_id
+        message.author = MagicMock()
+        message.author.id = author_id
+        message.webhook_id = webhook_id
+        message.content = CLEAR_MARKER_TEXT
+        return message
+
+    async def test_own_non_webhook_marker_is_not_ingested(self) -> None:
+        gateway = self._ready_gateway()
+        message = self._message(author_id=555, webhook_id=None)  # the bot itself
+
+        await gateway._on_message(message)
+
+        gateway._message_normalizer.normalize.assert_not_called()
+        gateway._ingress.handle.assert_not_awaited()
+
+    async def test_webhook_message_with_bot_id_passes_through(self) -> None:
+        """A webhook post (e.g. an agent persona) is NOT self-filtered —
+        which is exactly why ``/clear`` posts the marker as a plain
+        (non-webhook) message so this seam can drop it."""
+        gateway = self._ready_gateway()
+        message = self._message(author_id=555, webhook_id=777)
+
+        await gateway._on_message(message)
+
+        gateway._message_normalizer.normalize.assert_called_once()
 
 
 class TestOnReadyInjectsFetcher:

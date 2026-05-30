@@ -32,8 +32,10 @@ from pydantic import ValidationError
 
 from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.history import (
+    CLEAR_MARKER_TEXT,
     ChannelHistoryFetcher,
     HistoryRecord,
+    is_clear_marker,
     project_history,
 )
 from calfkit_organization.bridge.registry import AgentRegistry
@@ -317,6 +319,7 @@ def _fake_discord_message(
     content: str = "hi",
     author_display_name: str = "ryan",
     author_name: str | None = None,
+    author_id: int = 1,
     webhook_id: int | None = None,
     created_at: datetime | None = None,
 ) -> Any:
@@ -324,6 +327,7 @@ def _fake_discord_message(
     author = SimpleNamespace(
         display_name=author_display_name,
         name=author_name or author_display_name,
+        id=author_id,
     )
     return SimpleNamespace(
         id=message_id,
@@ -1064,3 +1068,185 @@ class TestBypassCache:
             bypass_cache=False,
         )
         assert client.get_channel.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# /clear marker — recognition + truncation
+# ---------------------------------------------------------------------------
+
+
+_BOT_ID = 555
+
+
+class TestIsClearMarker:
+    """Unit tests for the pure :func:`is_clear_marker` predicate.
+
+    Authorship is the load-bearing check: only the bot's own non-webhook
+    post counts, so a user typing the sentinel text — or an agent persona
+    webhook posting it — is NOT a marker.
+    """
+
+    def test_recognizes_bot_authored_marker(self) -> None:
+        msg = _fake_discord_message(
+            message_id=1,
+            content=CLEAR_MARKER_TEXT,
+            author_id=_BOT_ID,
+            webhook_id=None,
+        )
+        assert is_clear_marker(msg, _BOT_ID) is True
+
+    def test_rejects_wrong_content(self) -> None:
+        msg = _fake_discord_message(
+            message_id=1, content="not the marker", author_id=_BOT_ID, webhook_id=None
+        )
+        assert is_clear_marker(msg, _BOT_ID) is False
+
+    def test_rejects_user_typed_sentinel(self) -> None:
+        """A human typing the exact sentinel text is not a marker."""
+        msg = _fake_discord_message(
+            message_id=1,
+            content=CLEAR_MARKER_TEXT,
+            author_id=_BOT_ID + 1,  # not the bot
+            webhook_id=None,
+        )
+        assert is_clear_marker(msg, _BOT_ID) is False
+
+    def test_rejects_webhook_authored_sentinel(self) -> None:
+        """Even with the bot's id, a webhook post (persona) is not a marker."""
+        msg = _fake_discord_message(
+            message_id=1,
+            content=CLEAR_MARKER_TEXT,
+            author_id=_BOT_ID,
+            webhook_id=999,
+        )
+        assert is_clear_marker(msg, _BOT_ID) is False
+
+    def test_rejects_when_bot_user_id_unknown(self) -> None:
+        """Pre-ready (no known bot id): authorship can't be authenticated."""
+        msg = _fake_discord_message(
+            message_id=1,
+            content=CLEAR_MARKER_TEXT,
+            author_id=_BOT_ID,
+            webhook_id=None,
+        )
+        assert is_clear_marker(msg, None) is False
+
+
+class TestClearMarkerTruncation:
+    """``ChannelHistoryFetcher.fetch`` drops history at the latest marker."""
+
+    def _fetcher(self, messages: list[Any]) -> ChannelHistoryFetcher:
+        client = MagicMock()
+        client.user = SimpleNamespace(id=_BOT_ID)
+        client.get_channel.return_value = _FakeChannel(messages=messages)
+        return ChannelHistoryFetcher(client, _registry_with_scribe())
+
+    @pytest.mark.asyncio
+    async def test_truncates_at_marker(self) -> None:
+        # Discord newest-first: 4, 3, marker(2), 1 → keep only 3 and 4.
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(message_id=4, content="after2"),
+                _fake_discord_message(message_id=3, content="after1"),
+                _fake_discord_message(
+                    message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
+                ),
+                _fake_discord_message(message_id=1, content="before"),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10
+        )
+        assert [r.message_id for r in records] == [3, 4]
+        assert all(r.content != CLEAR_MARKER_TEXT for r in records)
+
+    @pytest.mark.asyncio
+    async def test_no_marker_returns_all(self) -> None:
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(message_id=2, content="b"),
+                _fake_discord_message(message_id=1, content="a"),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10
+        )
+        assert [r.message_id for r in records] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_uses_most_recent_of_multiple_markers(self) -> None:
+        # newest-first: 5, marker(4), 3, marker(2), 1 → keep only 5.
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(message_id=5, content="keep"),
+                _fake_discord_message(
+                    message_id=4, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
+                ),
+                _fake_discord_message(message_id=3, content="between"),
+                _fake_discord_message(
+                    message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
+                ),
+                _fake_discord_message(message_id=1, content="old"),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10
+        )
+        assert [r.message_id for r in records] == [5]
+
+    @pytest.mark.asyncio
+    async def test_marker_is_newest_yields_empty(self) -> None:
+        # newest-first: marker(3), 2, 1 → everything dropped.
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(
+                    message_id=3, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
+                ),
+                _fake_discord_message(message_id=2, content="b"),
+                _fake_discord_message(message_id=1, content="a"),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10
+        )
+        assert records == []
+
+    @pytest.mark.asyncio
+    async def test_marker_outside_limit_window_is_not_seen(self) -> None:
+        """A marker older than the most recent ``limit`` messages falls
+        outside the fetched window, so no truncation happens — and that's
+        correct: every message in the window is already newer than the
+        marker (post-clear), so the un-truncated window IS the answer."""
+        # newest-first; with limit=2 the fetcher only sees [5, 4]; the
+        # marker at message 1 is never fetched.
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(message_id=5, content="newest"),
+                _fake_discord_message(message_id=4, content="next"),
+                _fake_discord_message(message_id=3, content="mid"),
+                _fake_discord_message(
+                    message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
+                ),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=2
+        )
+        assert [r.message_id for r in records] == [4, 5]
+
+    @pytest.mark.asyncio
+    async def test_user_typed_sentinel_is_not_a_boundary(self) -> None:
+        """A non-bot author posting the sentinel must NOT truncate history."""
+        fetcher = self._fetcher(
+            [
+                _fake_discord_message(message_id=2, content="after"),
+                _fake_discord_message(
+                    message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID + 1
+                ),
+            ]
+        )
+        records = await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10
+        )
+        # Both kept; the spoofed sentinel is just another user message.
+        assert [r.message_id for r in records] == [1, 2]

@@ -405,6 +405,44 @@ A2A `private_chat` is **stateless** — peer-to-peer invocations do
 not carry channel history. The caller is responsible for putting any
 needed context into the message content.
 
+### Clearing context (`/clear`)
+
+`/clear` is an owner-gated operator slash that resets conversation
+context for **every** agent in the channel it is run in. It is
+**non-destructive** — no Discord messages are deleted.
+
+How it works: the bot posts a sentinel marker message
+(`CLEAR_MARKER_TEXT` in `bridge/history.py`) into the channel. On every
+subsequent invocation the history fetcher truncates the fetched records
+at the **most recent** marker, dropping the marker and everything above
+it. The boundary therefore lives in the channel itself, which means it
+**survives bridge restarts** (unlike the in-process fetch cache) with no
+extra state store.
+
+- **Recognition.** A marker is only honored if it is the bot's own
+  **non-webhook** message *and* its content exactly equals the sentinel
+  (see `is_clear_marker`). A user typing the sentinel text, or an agent
+  persona webhook posting it, is **not** a boundary — authorship cannot
+  be forged.
+- **Scope.** Per channel/thread. The marker exists only where it was
+  posted and the fetcher keys on the source channel, so `/clear` in a
+  thread clears that thread, and `/clear` in a parent channel does not
+  clear its threads.
+- **Authorization.** Restricted to `DiscordSettings.owner_user_id`
+  (same as `/thinking-effort`). When `owner_user_id` is unset, the
+  slash is open to anyone.
+- **Window interaction.** Truncation composes with `history_turns`: the
+  floor trims the old end, the per-agent count cap trims the new end. If
+  the marker scrolls beyond the fetch window, every message in the
+  window is already newer than it (post-clear), so the result is still
+  correct without finding the marker.
+- **Going-forward only.** A message already in flight when `/clear`
+  runs may still see pre-clear context for that one turn. Deleting the
+  marker message un-clears the channel (the marker *is* the boundary).
+
+A2A `private_chat` history is a separate, stateless reader and does
+**not** honor the marker.
+
 ### Outbox retry behavior
 
 When the outbox consumer fails to post an agent's reply to Discord

@@ -24,12 +24,15 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import frontmatter
 import pytest
 
+from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT
 from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.slash import (
+    _CLEAR_COMMAND_NAME,
     _THINKING_EFFORT_COMMAND_NAME,
     SlashCommandManager,
 )
@@ -90,6 +93,19 @@ def _interaction(*, user_id: int = _OWNER_USER_ID) -> Any:
     response = SimpleNamespace(send_message=AsyncMock())
     user = SimpleNamespace(id=user_id, name="alice", display_name="alice")
     return SimpleNamespace(id=42, user=user, response=response)
+
+
+def _clear_interaction(*, user_id: int = _OWNER_USER_ID, channel: Any = None) -> Any:
+    """A fake interaction for /clear — like ``_interaction`` plus a ``channel``."""
+    response = SimpleNamespace(send_message=AsyncMock())
+    user = SimpleNamespace(id=user_id, name="alice", display_name="alice")
+    return SimpleNamespace(id=42, user=user, response=response, channel=channel)
+
+
+def _httpexception(status: int = 500) -> discord.HTTPException:
+    """Build a discord.HTTPException with the given HTTP status."""
+    response = SimpleNamespace(status=status, reason="x")
+    return discord.HTTPException(response, "synthetic")  # type: ignore[arg-type]
 
 
 class _FakeConnection:
@@ -476,3 +492,98 @@ class TestScheduleResync:
         assert sync_count == 2
         assert remove_calls.call_count == 2
         assert add_calls.call_count == 2
+
+
+class TestClear:
+    """The /clear operator slash: owner-gated, posts the per-channel marker."""
+
+    async def test_non_owner_rejected_no_marker(
+        self, manager: SlashCommandManager
+    ) -> None:
+        channel = SimpleNamespace(id=12345, send=AsyncMock())
+        interaction = _clear_interaction(user_id=_OWNER_USER_ID + 1, channel=channel)
+        await manager._on_clear(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        msg, kwargs = interaction.response.send_message.call_args
+        assert "owner" in msg[0].lower()
+        assert kwargs.get("ephemeral") is True
+        channel.send.assert_not_awaited()
+
+    async def test_owner_posts_marker_and_confirms(
+        self, manager: SlashCommandManager
+    ) -> None:
+        channel = SimpleNamespace(id=12345, send=AsyncMock())
+        interaction = _clear_interaction(channel=channel)
+        await manager._on_clear(interaction)
+
+        channel.send.assert_awaited_once_with(CLEAR_MARKER_TEXT)
+        # Exactly one interaction response — no double-reply on the
+        # success path (the failure branch must not also fire).
+        interaction.response.send_message.assert_awaited_once()
+        msg, kwargs = interaction.response.send_message.call_args
+        assert "cleared" in msg[0].lower()
+        assert kwargs.get("ephemeral") is True
+
+    async def test_owner_unset_permits_any_caller(self, agents_dir: Path) -> None:
+        """When ``owner_user_id`` is None, /clear is open to anyone."""
+        manager, _ = _make_manager(agents_dir, owner_user_id=None)
+        channel = SimpleNamespace(id=12345, send=AsyncMock())
+        interaction = _clear_interaction(user_id=123456, channel=channel)
+        await manager._on_clear(interaction)
+
+        channel.send.assert_awaited_once_with(CLEAR_MARKER_TEXT)
+
+    async def test_marker_send_failure_reports_not_cleared(
+        self, manager: SlashCommandManager
+    ) -> None:
+        channel = SimpleNamespace(
+            id=12345, send=AsyncMock(side_effect=_httpexception())
+        )
+        interaction = _clear_interaction(channel=channel)
+        await manager._on_clear(interaction)
+
+        channel.send.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once()
+        msg, kwargs = interaction.response.send_message.call_args
+        assert "not cleared" in msg[0].lower()
+        assert kwargs.get("ephemeral") is True
+
+    async def test_marker_send_unexpected_error_reports_not_cleared(
+        self, manager: SlashCommandManager
+    ) -> None:
+        """A non-HTTPException from channel.send (e.g. a connector error)
+        must still surface 'not cleared' rather than escape into the
+        command dispatcher as a generic 'did not respond'."""
+        channel = SimpleNamespace(
+            id=12345, send=AsyncMock(side_effect=RuntimeError("connector died"))
+        )
+        interaction = _clear_interaction(channel=channel)
+        await manager._on_clear(interaction)
+
+        channel.send.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once()
+        msg, kwargs = interaction.response.send_message.call_args
+        assert "not cleared" in msg[0].lower()
+        assert kwargs.get("ephemeral") is True
+
+    async def test_no_channel_replies_ephemeral_no_send(
+        self, manager: SlashCommandManager
+    ) -> None:
+        interaction = _clear_interaction(channel=None)
+        await manager._on_clear(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        _msg, kwargs = interaction.response.send_message.call_args
+        assert "channel" in _msg[0].lower()
+        assert kwargs.get("ephemeral") is True
+
+    def test_register_adds_clear_command_to_tree(
+        self, manager: SlashCommandManager
+    ) -> None:
+        manager.register_clear()
+        cmd = manager._tree.get_command(_CLEAR_COMMAND_NAME)
+        assert cmd is not None
+        assert cmd.name == _CLEAR_COMMAND_NAME
+        # Unlike /thinking-effort, /clear takes no parameters.
+        assert cmd._params == {}

@@ -115,6 +115,12 @@ class DiscordIngressGateway:
         # The /thinking-effort operator slash is always registered so the
         # tree is non-empty and stale per-agent slashes get pruned on sync.
         self._slash.register_thinking_effort()
+        # The /clear operator slash lets the owner drop a per-channel
+        # context boundary: it posts a marker message that the history
+        # fetcher truncates at, so agents stop seeing messages above the
+        # line. Registered unconditionally alongside /thinking-effort and
+        # pushed to Discord by the same _on_ready sync().
+        self._slash.register_clear()
 
         # Bounded LRU of Discord message ids we've already invoked an agent
         # for. discord.py can redeliver MESSAGE_CREATE on gateway reconnect;
