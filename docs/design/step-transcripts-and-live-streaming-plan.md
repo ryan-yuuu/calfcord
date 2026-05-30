@@ -107,14 +107,15 @@ a distributed store (see §6 alternatives).
 
 ```
 agent ──Kafka──> calfkit-bridge (one process, one event loop)
-  agent.steps (per hop) ─▶ STEPS consumer (steps.py)
+  agent.steps (per hop) ─▶ STEPS consumer (steps.py)   [pure live-UI, NO DB]
         • keep cursor/peer-gating/monotonicity (unchanged invariants)
         • post/edit ONE transient progress msg "⚙ running… N steps" (debounced)
-        • on TERMINAL: cancel debounce → final awaited edit "✓ N steps" OR delete
-          (per D-1) → serialize message_history[initial_len:-1] → write transcripts row
-  discord.outbox (terminal) ─▶ OUTBOX consumer (outbox.py)
-        • post final reply (link reply button) + the steps toggle (if steps exist)
-        • capture sent.id at the single success point → UPSERT final_message_id
+        • on TERMINAL: cancel debounce → DELETE the progress message
+  discord.outbox (terminal) ─▶ OUTBOX consumer (outbox.py)   [SOLE DB writer]
+        • post final reply; if the turn used tools, attach the steps toggle to it
+        • write the COMPLETE row in ONE INSERT: delta_json =
+          dump_json(message_history[initial_len:-1]), final_message_id = sent.id,
+          conversation_key/agent_id/created_at — all known here, after a successful post
   gateway _on_ready ─▶ client.add_view(StepsToggleView())   ← one registered instance
         click → defer(message_update) → read transcripts by interaction.message.id
               → render (_render_delta, truncated) → edit_original_response (flip label)
@@ -128,17 +129,24 @@ agent ──Kafka──> calfkit-bridge (one process, one event loop)
 
 ```sql
 CREATE TABLE transcripts (
-  correlation_id    TEXT PRIMARY KEY,
-  conversation_key  TEXT NOT NULL,   -- = wire.source_channel_id (replay read scope)
-  agent_id          TEXT NOT NULL,   -- captured at POST time, not seed time (see §7.3)
-  final_message_id  TEXT,            -- replay join key + toggle host id (set by outbox)
-  delta_json        TEXT NOT NULL,   -- ModelMessagesTypeAdapter.dump_json(history[initial_len:-1])
+  correlation_id    TEXT PRIMARY KEY,  -- idempotency key for outbox retries
+  conversation_key  TEXT NOT NULL,     -- = wire.source_channel_id (replay read scope)
+  agent_id          TEXT NOT NULL,     -- the outbox-resolved real emitter
+  final_message_id  TEXT NOT NULL,     -- the posted reply; replay join key + toggle host id
+  delta_json        TEXT NOT NULL,     -- ModelMessagesTypeAdapter.dump_json(history[initial_len:-1])
   created_at        INTEGER NOT NULL
 );
-CREATE INDEX ix_transcripts_final ON transcripts(final_message_id);
+CREATE UNIQUE INDEX ix_transcripts_final ON transcripts(final_message_id);
 -- NOTE: deliberately NO conversation_key index used for replay (join-only; see §4).
 ```
 
+- **Single writer = the outbox**, on the terminal hop, *after* a successful reply
+  post — so every column (incl. `final_message_id`) is known at write time and the
+  whole row is one `INSERT OR REPLACE` (idempotent on `correlation_id` for retries).
+  No two-writer race, no nullable columns, no UPSERT-merge. This is what lets the
+  steps consumer stay pure live-UI with no DB access, and it resolves review Majors 3
+  (peer phantom rows — the outbox already resolves the real emitter) and 7
+  (final_message_id only on success — we write only after a successful post).
 - IDs as TEXT (snowflake precision).
 - **Engine: SQLite** — correct shape for this workload (embedded, ACID, single-file,
   zero-ops; point lookups by `correlation_id`/`final_message_id`, the replay
@@ -148,7 +156,7 @@ CREATE INDEX ix_transcripts_final ON transcripts(final_message_id);
   (the decisive property — *not* raw throughput; write volume is ~one row per agent
   turn, and the Discord network edits dominate latency). Pragmas: `journal_mode=WAL`,
   `synchronous=NORMAL`, `busy_timeout=5000`, `temp_store=MEMORY`, `mmap_size` set.
-  Single writer (steps consumer) ⇒ no write contention.
+  Single writer (the outbox consumer) ⇒ no write contention.
 - **Alternatives considered & rejected:** **DuckDB** — OLAP/columnar, tuned for
   analytical scans, wrong shape for frequent small point reads/writes. **LMDB/RocksDB**
   — faster pure-KV but we'd hand-maintain a `final_message_id` secondary index and lose
@@ -180,31 +188,32 @@ CREATE INDEX ix_transcripts_final ON transcripts(final_message_id);
   webhook via `Webhook.partial`/`from_url` (that yields `_WebhookState` and breaks
   interactable components).
 
-### 7.3 `bridge/steps.py` (re-sink, not rewrite)
+### 7.3 `bridge/steps.py` (re-sink to a transient progress message — NO DB)
 - **Keep unchanged invariants:** `_consume` cursor, peer-mirror gating + monotonic
   cursor (`steps.py:573,588`), `is_terminal`, `_render_delta`,
   `STEP_CONTENT_MAX_CHARS`.
-- **Per hop:** under the resolved emitter at **post time** (`steps.py:591-602`),
-  post/edit the transient progress message (debounced ~1s trailing). Capture
-  `agent_id` here, not at seed time, so a gated-out peer can't create a phantom row
-  under the wrong identity.
-- **Terminal hop:** cancel the pending debounce timer; do one **awaited,
-  un-debounced** final edit/delete (per D-1); serialize
-  `message_history[initial_len:-1]` and `INSERT OR REPLACE` the `transcripts` row;
-  then pop/mark-completed. The debounce task handle lives on the entry and is
-  cancelled here.
+- **Per hop:** post/edit ONE transient progress message (debounced ~1s trailing)
+  showing the live step count `⚙ running… N steps`, under the per-hop resolved emitter
+  persona. The count is derived from the rendered delta — **no DB write**.
+- **Terminal hop:** cancel the pending debounce timer and **delete** the progress
+  message (the outbox's reply + toggle supersede it); then pop/mark-completed. The
+  debounce task handle lives on the entry and is cancelled here.
 - **Retire** `_create_thread`, `_archive_thread`, thread routing, `THREAD_*`,
-  `StepsEntry.thread_id`. `StepsState` shrinks to {cursor, completed-guard, debounce
-  handle} or is replaced by recomputing the count from the cumulative slice; final
-  call in Phase 2.
+  `StepsEntry.thread_id`. `StepsState` keeps {progress_message_id, debounce handle,
+  completed-guard, cursor}; final call in Phase 2.
 
-### 7.4 `bridge/outbox.py`
-Capture `sent.id` at the **single success point** in `_post_reply` (the value
-returned by `_send_with_one_retry_on_outage`, ~`outbox.py:192`) and UPSERT
-`final_message_id`. For the chunked-fallback path, UPSERT the **first** chunk's id.
-Turns that drop / stay retry-pending get no `final_message_id` ⇒ no replay splice
-(documented degradation). Attach the steps toggle to the reply **only if** a
-transcript exists for the correlation.
+### 7.4 `bridge/outbox.py` (the sole transcript writer)
+- Post the reply as today. Inspect `message_history[initial_len:-1]` (the turn's
+  delta, `initial_len` from `PendingEntry`): if it contains any `ToolCallPart` or
+  non-empty interim `TextPart`, the turn **used tools** → attach the steps toggle to
+  the reply and write a transcript row; otherwise (pure text) do neither.
+- **Write the complete row in one `INSERT OR REPLACE`** keyed by `correlation_id`:
+  `delta_json = ModelMessagesTypeAdapter.dump_json(history[initial_len:-1])`,
+  `final_message_id = sent.id`, `conversation_key = wire.source_channel_id`,
+  `agent_id = emitter`, `created_at = now`. Done at the **single success point** (the
+  `sent` returned by `_send_with_one_retry_on_outage`, ~`outbox.py:192`); for the
+  chunked-fallback path use the **first** chunk's id. Turns that drop / stay
+  retry-pending write no row ⇒ no replay splice (documented degradation).
 
 ### 7.5 `bridge/gateway.py` — toggle UI
 - `StepsToggleView(discord.ui.View, timeout=None)`, one button, static
