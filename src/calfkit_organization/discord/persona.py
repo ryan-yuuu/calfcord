@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -142,10 +143,7 @@ class ReplyContext:
 
 def _jump_url(reply_to: ReplyContext) -> str:
     """Discord deep-link to a specific message in a guild channel."""
-    return (
-        f"https://discord.com/channels/"
-        f"{reply_to.guild_id}/{reply_to.channel_id}/{reply_to.message_id}"
-    )
+    return f"https://discord.com/channels/{reply_to.guild_id}/{reply_to.channel_id}/{reply_to.message_id}"
 
 
 def _truncate(text: str, max_len: int) -> str:
@@ -256,9 +254,7 @@ class DiscordPersonaSender:
         underscore-prefixed attribute.
         """
         if self._client is None:
-            raise RuntimeError(
-                "DiscordPersonaSender not started; call start() or use as an async context manager."
-            )
+            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
         return self._client
 
     async def __aenter__(self) -> Self:
@@ -300,6 +296,7 @@ class DiscordPersonaSender:
         *,
         thread_id: int | None = None,
         reply_to: ReplyContext | None = None,
+        extra_buttons: Sequence[discord.ui.Button[Any]] | None = None,
     ) -> SentMessage:
         """Send a message rendered under ``persona``'s identity.
 
@@ -316,6 +313,14 @@ class DiscordPersonaSender:
                 cannot produce real ``type: 19`` reply messages, so this
                 embed (author + snippet + jump link) is the closest
                 possible UX. See :class:`ReplyContext`.
+            extra_buttons: Additional interactive buttons to attach to the
+                message (e.g. the step-transcript expand toggle). They are
+                appended to the ``reply_to`` button view when one exists,
+                otherwise carried on a fresh view. Clicks dispatch via the
+                persistent view registered on the gateway client, matched by
+                ``custom_id`` — not by the throwaway view created here, which
+                only emits the component JSON and is garbage-collected after
+                its default timeout.
 
         Returns:
             :class:`SentMessage`. Its ``channel_id`` field is ``thread_id``
@@ -330,9 +335,7 @@ class DiscordPersonaSender:
             discord.HTTPException: For other Discord-side failures.
         """
         if self._client is None:
-            raise RuntimeError(
-                "DiscordPersonaSender not started; call start() or use as an async context manager."
-            )
+            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
 
         webhook = await self._get_or_create_webhook(channel_id)
 
@@ -345,11 +348,19 @@ class DiscordPersonaSender:
 
         embeds: Any = discord.utils.MISSING
         view: Any = discord.utils.MISSING
+        view_obj: discord.ui.View | None = None
         if reply_to is not None:
             if reply_to.style == "embed":
                 embeds = [_build_reply_embed(reply_to)]
             else:  # "button"
-                view = _build_reply_button(reply_to)
+                view_obj = _build_reply_button(reply_to)
+        if extra_buttons:
+            if view_obj is None:
+                view_obj = discord.ui.View()
+            for button in extra_buttons:
+                view_obj.add_item(button)
+        if view_obj is not None:
+            view = view_obj
 
         sent = await webhook.send(
             content=content,
@@ -370,6 +381,41 @@ class DiscordPersonaSender:
             reply_to.message_id if reply_to is not None else None,
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
+
+    async def edit_message(self, channel_id: int, message_id: int, *, content: str) -> None:
+        """Edit the ``content`` of a persona message previously sent to ``channel_id``.
+
+        Used for the live step-progress message, which is edited in place as
+        steps stream in. Only the text changes; the message's components and
+        embeds are left untouched (``view`` omitted ⇒ retained). The webhook
+        owns the message because this sender created it.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+            discord.NotFound: If the message no longer exists.
+            discord.HTTPException: For other Discord-side failures.
+        """
+        if self._client is None:
+            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
+        webhook = await self._get_or_create_webhook(channel_id)
+        await webhook.edit_message(message_id, content=content)
+
+    async def delete_message(self, channel_id: int, message_id: int) -> None:
+        """Delete a persona message previously sent to ``channel_id``.
+
+        Used to remove the transient step-progress message once the final
+        reply (which carries the expand toggle) is posted. The webhook owns
+        the message because this sender created it.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+            discord.NotFound: If the message was already deleted.
+            discord.HTTPException: For other Discord-side failures.
+        """
+        if self._client is None:
+            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
+        webhook = await self._get_or_create_webhook(channel_id)
+        await webhook.delete_message(message_id)
 
     async def _get_or_create_webhook(self, channel_id: int) -> discord.Webhook:
         """Return our webhook for ``channel_id``, discovering or creating as needed."""
@@ -392,11 +438,7 @@ class DiscordPersonaSender:
             channel = await self._fetch_text_channel(client, channel_id)
 
             for hook in await channel.webhooks():
-                if (
-                    hook.name == _WEBHOOK_NAME
-                    and hook.user is not None
-                    and hook.user.id == bot_user.id
-                ):
+                if hook.name == _WEBHOOK_NAME and hook.user is not None and hook.user.id == bot_user.id:
                     logger.info(
                         "reusing existing webhook id=%s in channel=%s",
                         hook.id,
