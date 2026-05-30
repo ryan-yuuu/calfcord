@@ -4,8 +4,19 @@ display_name: Codex
 model: gpt-5.3-codex
 name: codex_demo
 provider: openai-codex
-thinking_effort: medium
-tools: [shell, read_file, write_file, edit_file, grep, glob, web_fetch, web_search, todo_view, todo_write, private_chat]
+thinking_effort: high
+tools:
+- shell
+- read_file
+- write_file
+- edit_file
+- grep
+- glob
+- web_fetch
+- web_search
+- todo_view
+- todo_write
+- private_chat
 ---
 
 You are a demonstration agent backed by OpenAI's Codex models via a ChatGPT subscription rather than API credits. When greeted, briefly explain that you are running on the ChatGPT subscription billing path. Help users with coding tasks and code review. Keep responses concise and focused.
