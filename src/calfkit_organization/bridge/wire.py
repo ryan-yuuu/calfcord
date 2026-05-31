@@ -100,3 +100,19 @@ class WireMessage(BaseModel):
         if self.kind == "message" and self.slash_target is not None:
             raise ValueError("slash_target must be None when kind='message'")
         return self
+
+    @property
+    def thread_id(self) -> int | None:
+        """The thread this event originated in, or ``None`` for a top-level message.
+
+        ``channel_id`` is the flattened parent channel (the persona webhook's
+        host and the Kafka topic key); ``source_channel_id`` is the
+        un-flattened origin. They differ exactly when the event came from a
+        Discord thread — which is precisely when an agent reply or live-step
+        progress message must be posted *into* the thread rather than the
+        parent. Callers pass this as the ``thread_id`` argument to
+        :class:`~calfkit_organization.discord.persona.DiscordPersonaSender`.
+        """
+        if self.source_channel_id is not None and self.source_channel_id != self.channel_id:
+            return self.source_channel_id
+        return None

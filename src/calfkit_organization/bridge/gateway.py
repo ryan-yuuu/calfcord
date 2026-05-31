@@ -192,6 +192,11 @@ class DiscordIngressGateway:
         # line. Registered unconditionally alongside /thinking-effort and
         # pushed to Discord by the same _on_ready sync().
         self._slash.register_clear()
+        # The /task slash (open to anyone) posts a message, opens a thread
+        # anchored on it, and routes the task ambiently so the router summons
+        # the agents needed — replies and live-step progress land in the new
+        # thread. Same _on_ready sync() pushes it to Discord.
+        self._slash.register_task()
 
         # Bounded LRU of Discord message ids we've already invoked an agent
         # for. discord.py can redeliver MESSAGE_CREATE on gateway reconnect;

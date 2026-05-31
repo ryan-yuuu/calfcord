@@ -11,7 +11,8 @@ The tests exercise:
 
 * the preserved per-hop invariants, re-expressed against the progress
   sink: cursor monotonicity, per-hop persona resolution, the no-delta
-  early skip, outbox-retry dedup, and the thread-originated-wire skip;
+  early skip, outbox-retry dedup, and thread-originated-wire routing
+  (progress posts into the thread, not the parent);
 * the progress lifecycle: post-once-on-first-renderable-hop, step_count
   increments across hops, debounced edit reflects the latest count,
   terminal cancels debounce + deletes, pure-text turns post nothing;
@@ -654,6 +655,7 @@ class TestTerminalHop:
         persona_sender.delete_message.assert_awaited_once_with(
             _CHANNEL_ID,
             _PROGRESS_MESSAGE_ID,
+            thread_id=None,
         )
         # Entry popped + marked completed.
         assert steps_state.get(_CORRELATION_ID) is None
@@ -728,6 +730,7 @@ class TestTerminalHop:
         persona_sender.delete_message.assert_awaited_once_with(
             _CHANNEL_ID,
             _PROGRESS_MESSAGE_ID,
+            thread_id=None,
         )
         assert steps_state.is_completed(_CORRELATION_ID)
 
@@ -923,46 +926,51 @@ class TestSkipPaths:
 
 
 class TestThreadOriginatedWire:
-    """When the inbound wire originated inside a Discord thread, the
-    progress surface is disabled for that correlation (the parent-channel
-    webhook would post the counter in the wrong place). PRESERVED
-    invariant: thread-originated wires skip — no progress message."""
+    """When the inbound wire originated inside a Discord thread, the progress
+    surface posts INTO that thread — identical behavior to a top-level
+    channel. The persona webhook still hosts on the parent ``channel_id``;
+    ``thread_id`` routes the counter into the thread."""
 
-    async def test_thread_originated_wire_skips_seeding(
+    async def test_thread_originated_wire_posts_progress_into_thread(
         self,
         persona_sender: AsyncMock,
         steps_state: StepsState,
         broker: Any,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        thread_id = 999999
         pw = PendingWires()
         # source_channel_id != channel_id => message came from a thread.
-        pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=999999)))
+        pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=thread_id)))
         consumer = build_steps_consumer(
             persona_sender,
             _registry(),
             pw,
             steps_state,
         )
-        with caplog.at_level(logging.DEBUG):
-            await consumer.handler(
-                envelope=_envelope(
-                    message_history=[
-                        ModelResponse(
-                            parts=[
-                                ToolCallPart(tool_name="t", args={}, tool_call_id="x"),
-                            ]
-                        ),
-                    ]
-                ),
-                correlation_id=_CORRELATION_ID,
-                headers=_headers(),
-                broker=broker,
-            )
-        persona_sender.send.assert_not_called()
-        persona_sender.edit_message.assert_not_called()
-        assert steps_state.get(_CORRELATION_ID) is None
-        assert any("wire originated in a thread" in r.message for r in caplog.records)
+        await consumer.handler(
+            envelope=_envelope(
+                message_history=[
+                    ModelResponse(
+                        parts=[
+                            ToolCallPart(tool_name="t", args={}, tool_call_id="x"),
+                        ]
+                    ),
+                ]
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        # Progress posted: webhook hosts on the parent channel, thread_id
+        # routes it into the thread.
+        persona_sender.send.assert_awaited_once()
+        kwargs = persona_sender.send.call_args.kwargs
+        assert kwargs["channel_id"] == _CHANNEL_ID
+        assert kwargs["thread_id"] == thread_id
+        # The entry was seeded carrying the thread id.
+        entry = steps_state.get(_CORRELATION_ID)
+        assert entry is not None
+        assert entry.thread_id == thread_id
 
 
 class TestInitialCursorSeed:

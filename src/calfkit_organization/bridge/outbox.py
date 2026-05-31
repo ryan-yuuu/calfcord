@@ -219,6 +219,11 @@ def build_outbox_consumer(
         )
 
         persona = Persona(name=spec.display_name, avatar_url=spec.avatar_url)
+        # When the triggering event originated in a thread, post the reply
+        # into that thread; the webhook still hosts on the parent
+        # ``wire.channel_id``. ``None`` for a top-level message ⇒ posts to
+        # the channel as before. See :attr:`WireMessage.thread_id`.
+        thread_id = wire.thread_id
         try:
             sent = await _send_with_one_retry_on_outage(
                 persona_sender,
@@ -227,6 +232,7 @@ def build_outbox_consumer(
                 content=text,
                 reply_to=ReplyContext.from_wire(wire),
                 extra_buttons=extra_buttons,
+                thread_id=thread_id,
             )
         except discord.DiscordException as e:
             # Catch ``DiscordException`` (not just ``HTTPException``) so
@@ -332,6 +338,7 @@ async def _send_with_one_retry_on_outage(
     content: str,
     reply_to: ReplyContext | None,
     extra_buttons: list[discord.ui.Button[Any]] | None = None,
+    thread_id: int | None = None,
 ) -> SentMessage:
     """Send via the persona webhook with one extra attempt on 5xx.
 
@@ -355,7 +362,8 @@ async def _send_with_one_retry_on_outage(
 
     ``extra_buttons`` (e.g. the step-transcript expand toggle) are
     forwarded verbatim on both attempts so a 5xx-then-success reply
-    still carries the toggle.
+    still carries the toggle. ``thread_id`` (when the event came from a
+    thread) is likewise forwarded on both attempts.
     """
     try:
         return await persona_sender.send(
@@ -364,6 +372,7 @@ async def _send_with_one_retry_on_outage(
             content=content,
             reply_to=reply_to,
             extra_buttons=extra_buttons,
+            thread_id=thread_id,
         )
     except discord.DiscordServerError as e:
         logger.warning(
@@ -382,6 +391,7 @@ async def _send_with_one_retry_on_outage(
         content=content,
         reply_to=reply_to,
         extra_buttons=extra_buttons,
+        thread_id=thread_id,
     )
 
 
@@ -863,6 +873,10 @@ async def _post_chunked_fallback(
         [build_toggle_button(_render_step_count(turn_delta, wire))] if write_transcript else None
     )
 
+    # Post each chunk into the originating thread when present (parent
+    # otherwise); the webhook hosts on the parent ``wire.channel_id`` either
+    # way. See :attr:`WireMessage.thread_id`.
+    thread_id = wire.thread_id
     total = len(chunks)
     failure_statuses: list[int | None] = []
     for i, chunk in enumerate(chunks):
@@ -875,6 +889,7 @@ async def _post_chunked_fallback(
                 content=chunk,
                 reply_to=reply_to,
                 extra_buttons=extra_buttons,
+                thread_id=thread_id,
             )
             logger.info(
                 "chunk-split posted chunk %d/%d event_id=%s reply_id=%s channel_id=%s",

@@ -345,8 +345,10 @@ def build_steps_consumer(
     async def _post_progress(entry: StepsEntry, persona: Persona, step_count: int) -> None:
         """Post the transient progress message for the first renderable hop.
 
-        Stores ``sent.id`` on the entry as ``progress_message_id``. Plain
-        send: no ``reply_to``, no ``thread_id``, no ``extra_buttons``.
+        Stores ``sent.id`` on the entry as ``progress_message_id``. No
+        ``reply_to`` and no ``extra_buttons``; routes into the thread via
+        ``thread_id`` when the triggering event originated in one (``None``
+        for a top-level channel ⇒ posts to ``parent_channel_id``).
         Best-effort — any Discord failure is swallowed so it can't break
         the final-reply path. On failure the id stays ``None`` so the next
         renderable hop retries the post.
@@ -356,6 +358,7 @@ def build_steps_consumer(
                 persona=persona,
                 channel_id=entry.parent_channel_id,
                 content=_progress_content(step_count),
+                thread_id=entry.thread_id,
             ),
             action="post",
             key_label="channel_id",
@@ -379,6 +382,7 @@ def build_steps_consumer(
                 entry.parent_channel_id,
                 message_id,
                 content=_progress_content(entry.step_count),
+                thread_id=entry.thread_id,
             ),
             action="edit",
             key_label="message_id",
@@ -431,7 +435,7 @@ def build_steps_consumer(
         if message_id is None:
             return
         await _best_effort_progress(
-            persona_sender.delete_message(entry.parent_channel_id, message_id),
+            persona_sender.delete_message(entry.parent_channel_id, message_id, thread_id=entry.thread_id),
             action="delete",
             key_label="message_id",
             key_value=message_id,
@@ -473,20 +477,10 @@ def build_steps_consumer(
                     steps_state.pop_and_mark_completed(correlation_id)
                 return
             wire = pending.wire
-            if wire.source_channel_id is not None and wire.source_channel_id != wire.channel_id:
-                logger.debug(
-                    "steps: wire originated in a thread "
-                    "(channel=%d source=%d); step progress disabled "
-                    "for this correlation",
-                    wire.channel_id,
-                    wire.source_channel_id,
-                )
-                if is_terminal:
-                    steps_state.pop_and_mark_completed(correlation_id)
-                return
             entry = StepsEntry(
                 parent_channel_id=wire.channel_id,
                 parent_message_id=wire.message_id,
+                thread_id=wire.thread_id,
                 history_cursor=pending.initial_message_history_length,
             )
             steps_state.put(correlation_id, entry)

@@ -278,3 +278,79 @@ class SlashNormalizer:
             author=author,
             created_at=created_at,
         )
+
+    def normalize_task(
+        self,
+        interaction: Any,
+        message_arg: str,
+        *,
+        anchor_message_id: int,
+        thread_id: int,
+    ) -> WireMessage:
+        """Build an ambient :class:`WireMessage` for a ``/task`` invocation.
+
+        ``/task`` always routes **ambiently** (``kind="message"``): the
+        router decides which agents are summoned into the task thread,
+        matching the "threads are tasks" design where whichever agents are
+        needed get pulled in. ``source_channel_id`` is the freshly-created
+        thread, so agent replies and live-step progress post *into* it (see
+        :attr:`WireMessage.thread_id`); ``channel_id`` is the parent channel
+        that hosts the thread and the persona webhook. ``message_id`` is the
+        just-posted starter message, used as the inline-reply anchor.
+
+        Args:
+            interaction: The Discord interaction (the ``/task`` invocation).
+            message_arg: The text the user typed into the ``message`` parameter.
+            anchor_message_id: ID of the just-posted starter message the
+                thread is anchored on.
+            thread_id: ID of the newly-created thread.
+
+        Raises:
+            ValueError: If the interaction has no channel. Callers guard this
+                (``/task`` requires a text channel) but the contract is
+                enforced here defensively.
+        """
+        if interaction.channel is None:
+            raise ValueError("SlashNormalizer.normalize_task received an interaction with no channel")
+
+        guild_id = getattr(interaction, "guild_id", None) or interaction.guild.id
+        # ``interaction.channel`` is the parent text channel (the handler
+        # rejects threads/forums), so ``_resolve_channel_id`` returns its own
+        # id. ``source_channel_id`` is the new thread, which is what makes
+        # ``WireMessage.thread_id`` resolve and replies/steps land in-thread.
+        channel_id = _resolve_channel_id(interaction.channel)
+        user = interaction.user
+
+        is_bot = bool(getattr(user, "bot", False))
+        is_human_owner = (
+            not is_bot
+            and self._human_owner_id is not None
+            and user.id == self._human_owner_id
+        )
+        display_name = getattr(user, "display_name", None) or user.name
+
+        author = WireAuthor(
+            discord_user_id=user.id,
+            display_name=display_name,
+            is_bot=is_bot,
+            is_webhook=False,
+            webhook_id=None,
+            agent_id=None,
+            is_human_owner=is_human_owner,
+            avatar_url=_resolve_avatar_url(user),
+        )
+
+        created_at = getattr(interaction, "created_at", None) or datetime.now(UTC)
+
+        return WireMessage(
+            event_id=uuid_utils.uuid7().hex,
+            kind="message",
+            slash_target=None,
+            message_id=anchor_message_id,
+            channel_id=channel_id,
+            source_channel_id=thread_id,
+            guild_id=guild_id,
+            content=message_arg,
+            author=author,
+            created_at=created_at,
+        )

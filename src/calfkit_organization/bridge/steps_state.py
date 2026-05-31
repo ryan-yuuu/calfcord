@@ -13,8 +13,14 @@ cursor.
 
 * ``parent_channel_id`` / ``parent_message_id`` — the user's original
   Discord message. The transient progress message is posted to
-  ``parent_channel_id``; ``parent_message_id`` is retained for the
-  thread-origin skip check and future use.
+  ``parent_channel_id`` (the persona webhook's host); ``parent_message_id``
+  is retained for future use.
+* ``thread_id`` — the thread the triggering event originated in, or
+  ``None`` for a top-level channel. When set, the transient progress
+  message is posted/edited/deleted *inside* that thread (the webhook still
+  hosts on ``parent_channel_id``), so step progress in a thread streams
+  into the thread rather than the parent — identical behavior to a
+  top-level channel.
 * ``progress_message_id`` — populated lazily on the first hop that
   produces a rendered step. ``None`` until then so a pure-text agent
   reply (no intermediates) does not post an empty progress message.
@@ -74,6 +80,7 @@ class StepsEntry:
 
     parent_channel_id: int
     parent_message_id: int
+    thread_id: int | None = None
     progress_message_id: int | None = None
     step_count: int = 0
     history_cursor: int = 0

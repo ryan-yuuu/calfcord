@@ -83,3 +83,20 @@ class TestFrozen:
         author = _make_author()
         with pytest.raises(ValidationError):
             author.display_name = "mutated"  # type: ignore[misc]
+
+
+class TestThreadId:
+    """``thread_id`` resolves the originating thread, or None for top-level."""
+
+    def test_none_when_no_source_channel(self) -> None:
+        assert _make_message().thread_id is None
+
+    def test_none_when_source_equals_channel(self) -> None:
+        # A top-level message: the normalizer sets source == channel.
+        msg = _make_message(channel_id=200, source_channel_id=200)
+        assert msg.thread_id is None
+
+    def test_returns_source_when_it_differs_from_channel(self) -> None:
+        # A thread message: parent (channel_id) and thread (source) differ.
+        msg = _make_message(channel_id=200, source_channel_id=555)
+        assert msg.thread_id == 555

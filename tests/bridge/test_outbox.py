@@ -321,6 +321,101 @@ class TestHappyPath:
         assert names == ["Aksel", "Finn"]
 
 
+class TestThreadRouting:
+    """Replies post into the originating thread when the wire came from one.
+
+    A wire whose ``source_channel_id`` differs from the flattened parent
+    ``channel_id`` originated in a thread, so the reply must post into that
+    thread (``thread_id=``) while the persona webhook still hosts on the
+    parent channel.
+    """
+
+    _THREAD_ID = 555
+
+    async def test_main_reply_posts_into_thread(
+        self,
+        persona_sender: AsyncMock,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        pw = PendingWires()
+        pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=self._THREAD_ID)))
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pw, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(), correlation_id=_CORRELATION_ID, headers=_headers(), broker=broker
+        )
+        kwargs = persona_sender.send.call_args.kwargs
+        # Webhook hosts on the parent; thread_id routes the post into the thread.
+        assert kwargs["channel_id"] == 6789
+        assert kwargs["thread_id"] == self._THREAD_ID
+        # Jump link anchors to the in-thread message (the source channel).
+        assert kwargs["reply_to"].channel_id == self._THREAD_ID
+
+    async def test_main_reply_posts_to_parent_when_not_a_thread(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        # The default fixture wire has source_channel_id=None ⇒ top-level.
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(), correlation_id=_CORRELATION_ID, headers=_headers(), broker=broker
+        )
+        kwargs = persona_sender.send.call_args.kwargs
+        assert kwargs["channel_id"] == 6789
+        assert kwargs["thread_id"] is None
+        assert kwargs["reply_to"].channel_id == 6789
+
+    async def test_chunked_fallback_posts_every_chunk_into_thread(
+        self,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The last-resort chunked fallback also targets the thread: the
+        failed reply send and every chunk send carry ``thread_id``."""
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+
+        pw = PendingWires()
+        pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=self._THREAD_ID)))
+        # Exhaust the agent-retry budget so an agent-fixable 400 falls
+        # straight through to the chunk-split fallback.
+        for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
+            pw.increment_retry(_CORRELATION_ID)
+
+        persona_sender = AsyncMock()
+        persona_sender.send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 400),  # the reply fails agent-fixably
+                SentMessage(id=70001, channel_id=6789),  # chunk 1
+                SentMessage(id=70002, channel_id=6789),  # chunk 2
+            ]
+        )
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pw, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(final_text="x" * 3000),  # forces ≥2 chunks
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        assert persona_sender.send.await_count == 3
+        for call in persona_sender.send.call_args_list:
+            assert call.kwargs["channel_id"] == 6789
+            assert call.kwargs["thread_id"] == self._THREAD_ID
+
+
 class TestDropPaths:
     async def test_intermediate_hop_gate_rejects(
         self,

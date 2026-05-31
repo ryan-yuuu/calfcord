@@ -443,6 +443,36 @@ extra state store.
 A2A `private_chat` history is a separate, stateless reader and does
 **not** honor the marker.
 
+### Task threads (`/task`)
+
+`/task <message>` posts the message into the invoking channel, opens a
+public **thread** anchored on it, and routes the message **ambiently** so the
+router summons whichever agents the task needs. Agent replies — and the live
+`⚙ running…` step-progress message — post **into the new thread**, realizing
+the "threads are tasks" model as a first-class command.
+
+- **Open to anyone** in the guild (no owner gate, unlike `/clear` and
+  `/thinking-effort`): anyone can spin up a task.
+- **Where it runs.** Only in a top-level text channel. Inside an existing
+  thread it is rejected (Discord can't nest threads); forum/voice channels
+  are rejected (the persona webhook needs a parent text channel).
+- **Thread title** is derived from the message (whitespace-collapsed,
+  truncated to Discord's 100-char cap; falls back to `Task` if empty).
+- **Routing.** Always ambient (`kind="message"`) — the router decides the
+  respondents. To involve a specific agent, `@mention` it inside the thread
+  afterward (normal mention routing applies there).
+- **Permissions.** The bot needs **Create Public Threads** (in addition to
+  the **Manage Webhooks** it already needs for persona replies) in any
+  channel where `/task` is used. A missing permission is surfaced to the
+  invoker as an ephemeral error; the already-posted message is left in place.
+
+This rides the same thread-aware reply path used for **any** message sent
+inside a thread: when an event originates in a thread (its
+`source_channel_id` differs from the flattened parent `channel_id`), the
+outbox posts the agent's reply — and the steps consumer posts its live
+progress message — into that thread rather than the parent. See
+`WireMessage.thread_id`.
+
 ### Outbox retry behavior
 
 When the outbox consumer fails to post an agent's reply to Discord

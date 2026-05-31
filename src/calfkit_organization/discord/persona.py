@@ -129,10 +129,15 @@ class ReplyContext:
         Used wherever an agent replies inline to the inbound event that
         triggered it. The default ``style="button"`` matches the reply
         rendering used across the project's agents.
+
+        The jump link uses ``source_channel_id`` when set (falling back to
+        ``channel_id``): the anchored message lives in the un-flattened
+        source channel, so for a message posted inside a thread the link
+        must point at the thread, not the flattened parent.
         """
         return cls(
             message_id=wire.message_id,
-            channel_id=wire.channel_id,
+            channel_id=wire.source_channel_id or wire.channel_id,
             guild_id=wire.guild_id,
             author_display_name=wire.author.display_name,
             content_snippet=wire.content,
@@ -387,13 +392,19 @@ class DiscordPersonaSender:
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
 
-    async def edit_message(self, channel_id: int, message_id: int, *, content: str) -> None:
+    async def edit_message(
+        self, channel_id: int, message_id: int, *, content: str, thread_id: int | None = None
+    ) -> None:
         """Edit the ``content`` of a persona message previously sent to ``channel_id``.
 
         Used for the live step-progress message, which is edited in place as
         steps stream in. Only the text changes; the message's components and
         embeds are left untouched (``view`` omitted ⇒ retained). The webhook
         owns the message because this sender created it.
+
+        ``thread_id`` must be supplied when the message lives inside a thread:
+        the webhook still hosts on ``channel_id`` (the parent), but Discord
+        requires the owning thread to locate the message for the edit.
 
         Raises:
             RuntimeError: If :meth:`start` has not been called.
@@ -405,14 +416,19 @@ class DiscordPersonaSender:
         if self._client is None:
             raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
         webhook = await self._get_or_create_webhook(channel_id)
-        await webhook.edit_message(message_id, content=content)
+        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
+        await webhook.edit_message(message_id, content=content, thread=thread)
 
-    async def delete_message(self, channel_id: int, message_id: int) -> None:
+    async def delete_message(self, channel_id: int, message_id: int, *, thread_id: int | None = None) -> None:
         """Delete a persona message previously sent to ``channel_id``.
 
         Used to remove the transient step-progress message once the final
         reply (which carries the expand toggle) is posted. The webhook owns
         the message because this sender created it.
+
+        ``thread_id`` must be supplied when the message lives inside a thread
+        (see :meth:`edit_message`): the webhook hosts on the parent
+        ``channel_id`` but Discord needs the owning thread to find the message.
 
         Raises:
             RuntimeError: If :meth:`start` has not been called.
@@ -424,7 +440,8 @@ class DiscordPersonaSender:
         if self._client is None:
             raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
         webhook = await self._get_or_create_webhook(channel_id)
-        await webhook.delete_message(message_id)
+        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
+        await webhook.delete_message(message_id, thread=thread)
 
     async def _get_or_create_webhook(self, channel_id: int) -> discord.Webhook:
         """Return our webhook for ``channel_id``, discovering or creating as needed."""

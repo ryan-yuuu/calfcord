@@ -245,6 +245,29 @@ class TestFromWire:
         assert ctx.content_snippet == wire.content
         assert ctx.author_avatar_url == wire.author.avatar_url
 
+    def test_thread_message_anchors_jump_link_to_source_channel(self) -> None:
+        """For a message posted inside a thread the jump link must point at
+        the thread (``source_channel_id``) — where the message actually lives
+        — not the flattened parent ``channel_id``."""
+        wire = WireMessage(
+            event_id="evt-thread",
+            kind="message",
+            message_id=12345,
+            channel_id=6789,
+            source_channel_id=555,
+            guild_id=4242,
+            content="in a thread",
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+            ),
+            created_at=datetime.now(UTC),
+        )
+        ctx = ReplyContext.from_wire(wire)
+        assert ctx.channel_id == 555
+
     def test_default_style_is_button(self, wire: WireMessage) -> None:
         """The project's convention; matches echo and the new bridge handler."""
         ctx = ReplyContext.from_wire(wire)
