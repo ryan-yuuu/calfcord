@@ -180,6 +180,22 @@ class TestParseTaskCommand:
     def test_mention_mid_sentence_is_not_a_command(self) -> None:
         assert _parse_task_command("please run /task later") == (False, None)
 
+    def test_token_then_only_newline_has_no_body(self) -> None:
+        # "/task" then Enter (no body) — the realistic bare-task case via the
+        # composer. DOTALL means \n is consumed by \s+, body strips to None.
+        assert _parse_task_command("/task\n") == (True, None)
+
+    def test_tab_separator_is_accepted(self) -> None:
+        # \s+ matches a tab, not just a space.
+        assert _parse_task_command("/task\tfix it") == (True, "fix it")
+
+    def test_whitespace_only_multiline_body_has_no_body(self) -> None:
+        assert _parse_task_command("/task   \n  ") == (True, None)
+
+    def test_leading_whitespace_before_token_is_not_a_command(self) -> None:
+        # Anchored at start: a leading space means it is not the command.
+        assert _parse_task_command("  /task do it") == (False, None)
+
 
 class TestThreadNameFromText:
     def test_short_text_passes_through(self) -> None:
@@ -190,6 +206,21 @@ class TestThreadNameFromText:
 
     def test_truncates_long_text_with_ellipsis(self) -> None:
         name = _thread_name_from_text("x" * 250)
+        assert len(name) == 100
+        assert name.endswith("…")
+
+    def test_exactly_max_len_passes_through(self) -> None:
+        # 100 chars is the cap; it must pass through unchanged, no ellipsis.
+        text = "x" * 100
+        name = _thread_name_from_text(text)
+        assert name == text
+        assert len(name) == 100
+        assert not name.endswith("…")
+
+    def test_one_over_max_len_truncates_to_cap(self) -> None:
+        # 101 chars must be truncated to exactly the 100-char cap (Discord
+        # hard-rejects longer names) — guards the off-by-one in the slice.
+        name = _thread_name_from_text("x" * 101)
         assert len(name) == 100
         assert name.endswith("…")
 
@@ -224,6 +255,26 @@ class TestNormalizeTaskWire:
         assert wire.author.discord_user_id == _USER_ID
         assert wire.author.is_bot is False
         assert wire.author.is_webhook is False
+
+    def test_preserves_message_created_at(self) -> None:
+        # created_at is forwarded from the message (not stamped with now()), so
+        # the wire orders correctly in history alongside other channel events.
+        normalizer = MessageNormalizer(
+            registry=_registry(), bot_user_id=_BOT_USER_ID, human_owner_id=None
+        )
+        message = _message(content="/task do the thing")
+        wire = normalizer.normalize_task(message, thread_id=_THREAD_ID)
+        assert wire.created_at == message.created_at
+
+    def test_marks_owner_authored_task(self) -> None:
+        # A task started by the configured human owner carries is_human_owner.
+        owner_id = 9999
+        normalizer = MessageNormalizer(
+            registry=_registry(), bot_user_id=_BOT_USER_ID, human_owner_id=owner_id
+        )
+        message = _message(content="/task do the thing", author_id=owner_id)
+        wire = normalizer.normalize_task(message, thread_id=_THREAD_ID)
+        assert wire.author.is_human_owner is True
 
     def test_dm_raises(self) -> None:
         normalizer = MessageNormalizer(
@@ -364,6 +415,34 @@ class TestMaybeHandleTaskGuardsAndFailures:
         # (which would create a duplicate thread).
         assert "duplicate" in reply.lower()
 
+    async def test_pre_ready_replies_and_owns(self) -> None:
+        # If a /task somehow reaches the handler before the gateway is ready
+        # (normalizer unset), it must not silently vanish: log + tell the user
+        # to retry, and still claim ownership (no normal routing).
+        gateway, ingress = _gateway()
+        gateway._message_normalizer = None
+        message = _message(content="/task do the thing")
+
+        owned = await gateway._maybe_handle_task(message)
+
+        assert owned is True
+        message.create_thread.assert_not_awaited()
+        ingress.handle.assert_not_awaited()
+        assert "starting up" in message.reply.await_args.args[0].lower()
+
+    async def test_reply_swallows_non_http_discord_error(self) -> None:
+        # _reply_best_effort is the sole user-feedback sink for every /task
+        # failure. A non-HTTP DiscordException (e.g. the socket dropping during
+        # the same turbulence that triggered the failure) must be swallowed
+        # here, not escape into discord.py's dispatcher to be silently dropped.
+        gateway, _ingress = _gateway()
+        message = _message(content="/task do the thing")
+        message.reply = AsyncMock(side_effect=discord.ClientException("socket closed"))
+
+        # Must not raise.
+        await gateway._reply_best_effort(message, "anything")
+        message.reply.assert_awaited_once()
+
 
 class TestOnMessageDivertsTasks:
     """``_on_message`` must divert a ``/task`` to ``_maybe_handle_task`` and
@@ -395,3 +474,17 @@ class TestOnMessageDivertsTasks:
         wire = ingress.handle.call_args.args[0]
         assert wire.content == "hello there"
         assert wire.kind == "message"
+
+    async def test_redelivered_task_does_not_spawn_second_thread(self) -> None:
+        # discord.py can redeliver MESSAGE_CREATE on gateway reconnect. The
+        # /task divert is checked AFTER the _already_seen dedupe precisely so a
+        # redelivery can't open a second thread (and double-spend on the LLM).
+        # This pins that ordering invariant against a future reorder.
+        gateway, ingress = _gateway()
+        message = _message(content="/task do the thing")
+
+        await gateway._on_message(message)  # first delivery: opens the thread
+        await gateway._on_message(message)  # reconnect redelivery: same id
+
+        message.create_thread.assert_awaited_once()
+        ingress.handle.assert_awaited_once()

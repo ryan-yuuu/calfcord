@@ -429,8 +429,22 @@ class DiscordIngressGateway:
             return True
 
         if self._message_normalizer is None:
-            # Pre-ready; the _on_message guard already covers this, but the
-            # contract is enforced here too since we own the message now.
+            # Pre-ready guard. In practice unreachable via _on_message (which
+            # returns early when the normalizer is unset, before reaching here),
+            # but enforced defensively because we have already claimed the
+            # message. Make the drop loud rather than silent: log it and tell
+            # the user to retry. No thread has been created yet, so a retry is
+            # clean (no duplicate-thread risk).
+            logger.warning(
+                "task command arrived before gateway ready; dropping message_id=%s channel_id=%s",
+                message.id,
+                channel.id,
+            )
+            await self._reply_best_effort(
+                message,
+                "I'm still starting up and can't open a task thread yet — give me "
+                "a few seconds and run `/task` again.",
+            )
             return True
 
         # Open a public thread anchored on the user's own message. This is the
@@ -446,8 +460,9 @@ class DiscordIngressGateway:
             )
             await self._reply_best_effort(
                 message,
-                "Couldn't open a task thread (Discord rejected it). Check that I "
-                "have the Create Public Threads permission here and try again.",
+                "Couldn't open a task thread (Discord rejected it). I may be "
+                "missing the Create Public Threads permission here, or this "
+                "message already has a thread.",
             )
             return True
 
@@ -497,14 +512,20 @@ class DiscordIngressGateway:
     async def _reply_best_effort(self, message: discord.Message, text: str) -> None:
         """Inline-reply to ``message``, logging and swallowing Discord errors.
 
-        Shared by the ``/task`` branches. Mirrors the error-recovery shape of
-        :meth:`_reply_unknown_mention` and friends: a failed reply is in an
-        error path with nowhere useful to escalate, so it is logged and
-        swallowed rather than raised.
+        Shared by the ``/task`` branches. A failed reply is in an error path
+        with nowhere useful to escalate, so it is logged and swallowed rather
+        than raised. Catches the broad ``DiscordException`` (not just
+        ``HTTPException``): this helper is the sole user-feedback sink for every
+        ``/task`` failure, and a non-HTTP Discord error here (e.g. a
+        ``ConnectionClosed`` from the very gateway turbulence that triggered the
+        failure being reported) would otherwise escape into discord.py's event
+        dispatcher and be swallowed there with no log — the textbook silent
+        failure. Swallowing it here keeps the log line and never crashes the
+        handler.
         """
         try:
             await message.reply(text)
-        except discord.HTTPException:
+        except discord.DiscordException:
             logger.exception("failed to send task reply message_id=%s", message.id)
 
     def _already_seen(self, message_id: int) -> bool:
