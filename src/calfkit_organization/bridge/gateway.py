@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import time
 from collections import OrderedDict
@@ -83,6 +84,54 @@ logger = logging.getLogger(__name__)
 
 _REPLY_TOPIC = "discord.outbox"
 _SEEN_MESSAGE_IDS_CAPACITY = 1024
+
+# Discord caps thread names at 100 characters.
+_THREAD_NAME_MAX_LEN = 100
+
+# A plaintext ``/task`` command: a message whose content is the bare token
+# ``/task`` optionally followed by the task text. Case-insensitive; DOTALL so
+# a multi-line task body is captured whole. Anchored at the start so it is a
+# real command, not a ``/task`` mentioned mid-sentence; ``/taskfoo`` does NOT
+# match (the command must be the bare token ``/task``). A bare ``/task`` —
+# nothing after it, or only whitespace — matches with an empty body, which
+# :func:`_parse_task_command` reports as ``None``.
+_TASK_COMMAND_RE = re.compile(r"^/task(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+def _thread_name_from_text(text: str, *, fallback: str = "Task", max_len: int = _THREAD_NAME_MAX_LEN) -> str:
+    """Derive a thread title from the ``/task`` body text.
+
+    Collapses runs of whitespace and truncates to Discord's ``max_len``-char
+    thread-name cap (appending an ellipsis when truncated). Falls back to
+    ``fallback`` when the text is empty after collapsing.
+    """
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return fallback
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 1].rstrip() + "…"
+
+
+def _parse_task_command(content: str) -> tuple[bool, str | None]:
+    """Classify a message body as a plaintext ``/task`` command.
+
+    Returns ``(is_task, body)``:
+
+    - ``(False, None)`` — not a ``/task`` command; route the message normally.
+    - ``(True, None)`` — a bare ``/task`` with no task text (reply with usage).
+    - ``(True, "<text>")`` — a ``/task`` carrying task text (open a thread).
+
+    The returned ``body`` is whitespace-stripped and used only to derive the
+    thread title; the routed wire keeps the full original message content.
+    """
+    match = _TASK_COMMAND_RE.match(content)
+    if match is None:
+        return False, None
+    body = match.group("body")
+    if body is not None:
+        body = body.strip()
+    return True, (body or None)
 
 
 @asynccontextmanager
@@ -192,11 +241,11 @@ class DiscordIngressGateway:
         # line. Registered unconditionally alongside /thinking-effort and
         # pushed to Discord by the same _on_ready sync().
         self._slash.register_clear()
-        # The /task slash (open to anyone) posts a message, opens a thread
-        # anchored on it, and routes the task ambiently so the router summons
-        # the agents needed — replies and live-step progress land in the new
-        # thread. Same _on_ready sync() pushes it to Discord.
-        self._slash.register_task()
+        # NOTE: ``/task`` is intentionally NOT a Discord slash command. It is a
+        # plaintext command (``/task <text>``) detected in :meth:`_on_message`
+        # so the task's opening message is genuinely authored by the user — a
+        # slash interaction can only post the anchor as the bot or a webhook.
+        # See :meth:`_maybe_handle_task`.
 
         # Bounded LRU of Discord message ids we've already invoked an agent
         # for. discord.py can redeliver MESSAGE_CREATE on gateway reconnect;
@@ -279,6 +328,14 @@ class DiscordIngressGateway:
         if self._already_seen(message.id):
             logger.debug("ignoring redelivered message id=%s", message.id)
             return
+        # Plaintext ``/task`` command: open a thread off this (user-authored)
+        # message and route the task into it. Checked AFTER the dedupe so a
+        # reconnect redelivery can't spawn a duplicate thread, and after the
+        # self-filter so the bot's own posts never trigger it. When it owns the
+        # message it returns True and we stop — the message must not also flow
+        # through normal ambient routing.
+        if await self._maybe_handle_task(message):
+            return
         try:
             wire = self._message_normalizer.normalize(message)
         except UnknownAgentMentionError as err:
@@ -305,6 +362,171 @@ class DiscordIngressGateway:
             # is best-effort.
             logger.exception("ingress publish failed for event_id=%s", wire.event_id)
             await self._reply_ingress_failure(message)
+
+    async def _maybe_handle_task(self, message: discord.Message) -> bool:
+        """Handle a plaintext ``/task`` command; return whether it was owned.
+
+        Returns ``True`` when the message is a ``/task`` command this method
+        has fully handled (so the caller must stop and NOT route it normally),
+        and ``False`` when the message is not a task and should flow through
+        the usual ambient/slash routing.
+
+        ``/task`` is a plaintext command rather than a Discord slash command on
+        purpose: a slash invocation can only post the thread's opening message
+        as the bot or a webhook, whereas this rides the user's own message — so
+        the task's anchor is genuinely authored by the user. Discord's built-in
+        ``/thread`` reads as the user for the same reason (it runs as the
+        user's own client); a bot has no API to post a message as someone else,
+        so the user must author the anchor and we thread off it.
+
+        Flow once a task is recognised (every branch returns ``True``):
+
+        1. Only humans start tasks — an agent-persona webhook (or any bot) that
+           posts ``/task`` falls through to normal routing instead.
+        2. Require a top-level text channel: reject inside an existing thread
+           (Discord can't nest threads) or a non-text channel (forum/voice —
+           the persona webhook needs a parent text channel anyway).
+        3. A bare ``/task`` (no task text) gets a usage hint.
+        4. Open a public thread anchored on the user's own message (the thread
+           shares the message id) and route an ambient, thread-scoped wire so
+           the router summons the agents and their replies + live-step progress
+           post into the thread.
+
+        Every Discord call is best-effort: a failure logs and inline-replies
+        explaining what went wrong.
+        """
+        is_task, body = _parse_task_command(message.content)
+        if not is_task:
+            return False
+        # Only genuine humans spawn tasks. Persona webhooks (and any other bot)
+        # that happen to post "/task ..." flow through to normal routing so
+        # peers still see the message — they don't open task threads.
+        if message.webhook_id is not None or message.author.bot:
+            return False
+
+        logger.info(
+            "task command invoked channel_id=%s user_id=%s message_id=%s",
+            getattr(message.channel, "id", None),
+            message.author.id,
+            message.id,
+        )
+
+        channel = message.channel
+        if not isinstance(channel, discord.TextChannel):
+            await self._reply_best_effort(
+                message,
+                "`/task` only works in a top-level text channel — not inside a "
+                "thread (threads can't be nested) or a forum/voice channel.",
+            )
+            return True
+
+        if body is None:
+            await self._reply_best_effort(
+                message,
+                "Usage: `/task <what you want done>` — describe the task and I'll "
+                "open a thread for the agents to work in.",
+            )
+            return True
+
+        if self._message_normalizer is None:
+            # Pre-ready guard. In practice unreachable via _on_message (which
+            # returns early when the normalizer is unset, before reaching here),
+            # but enforced defensively because we have already claimed the
+            # message. Make the drop loud rather than silent: log it and tell
+            # the user to retry. No thread has been created yet, so a retry is
+            # clean (no duplicate-thread risk).
+            logger.warning(
+                "task command arrived before gateway ready; dropping message_id=%s channel_id=%s",
+                message.id,
+                channel.id,
+            )
+            await self._reply_best_effort(
+                message,
+                "I'm still starting up and can't open a task thread yet — give me "
+                "a few seconds and run `/task` again.",
+            )
+            return True
+
+        # Open a public thread anchored on the user's own message. This is the
+        # "Start Thread from Message" API — the thread shares the message id,
+        # and the anchor stays the user's genuinely-authored message.
+        try:
+            thread = await message.create_thread(name=_thread_name_from_text(body))
+        except discord.DiscordException:
+            logger.exception(
+                "task: failed to create thread channel_id=%s message_id=%s",
+                channel.id,
+                message.id,
+            )
+            await self._reply_best_effort(
+                message,
+                "Couldn't open a task thread (Discord rejected it). I may be "
+                "missing the Create Public Threads permission here, or this "
+                "message already has a thread.",
+            )
+            return True
+
+        # Route the task ambiently; replies and live-step progress land in the
+        # new thread (its source_channel_id differs from the parent channel_id).
+        wire = self._message_normalizer.normalize_task(message, thread_id=thread.id)
+        try:
+            await self._ingress.handle(wire)
+        except AmbientRosterEmptyError:
+            logger.info(
+                "task: created thread but roster empty channel_id=%s thread_id=%s event_id=%s",
+                channel.id,
+                thread.id,
+                wire.event_id,
+            )
+            await self._reply_best_effort(
+                message,
+                f"Opened the task thread ({thread.jump_url}), but no assistant "
+                "agents are configured to work it. Contact an operator to add one.",
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "task: ingress publish failed channel_id=%s thread_id=%s event_id=%s",
+                channel.id,
+                thread.id,
+                wire.event_id,
+            )
+            await self._reply_best_effort(
+                message,
+                f"Opened the task thread ({thread.jump_url}), but dispatching it to "
+                "the agents failed. The thread already exists, so don't re-run "
+                "`/task` (that would create a duplicate) — an operator should check "
+                f"the bridge logs for event `{wire.event_id}`.",
+            )
+            return True
+
+        logger.info(
+            "task dispatched channel_id=%s thread_id=%s anchor_id=%s event_id=%s",
+            channel.id,
+            thread.id,
+            message.id,
+            wire.event_id,
+        )
+        return True
+
+    async def _reply_best_effort(self, message: discord.Message, text: str) -> None:
+        """Inline-reply to ``message``, logging and swallowing Discord errors.
+
+        Shared by the ``/task`` branches. A failed reply is in an error path
+        with nowhere useful to escalate, so it is logged and swallowed rather
+        than raised. Catches the broad ``DiscordException`` (not just
+        ``HTTPException``): this helper is the sole user-feedback sink for every
+        ``/task`` failure, and a non-HTTP Discord error here (e.g. a
+        ``ConnectionClosed`` from the very gateway turbulence that triggered the
+        failure being reported) would otherwise escape into discord.py's event
+        dispatcher and be swallowed there with no log — the textbook silent
+        failure. Swallowing it here keeps the log line and never crashes the
+        handler.
+        """
+        try:
+            await message.reply(text)
+        except discord.DiscordException:
+            logger.exception("failed to send task reply message_id=%s", message.id)
 
     def _already_seen(self, message_id: int) -> bool:
         """Bounded-LRU dedupe of Discord ``message.id``.

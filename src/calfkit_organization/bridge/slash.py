@@ -41,7 +41,7 @@ from discord import app_commands
 
 from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
 from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT
-from calfkit_organization.bridge.ingress import AmbientRosterEmptyError, BridgeIngress
+from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.control_plane.publish import publish_control_command
@@ -52,25 +52,6 @@ logger = logging.getLogger(__name__)
 _THINKING_EFFORT_VALUES: tuple[ThinkingEffort, ...] = get_args(ThinkingEffort)
 _THINKING_EFFORT_COMMAND_NAME = "thinking-effort"
 _CLEAR_COMMAND_NAME = "clear"
-_TASK_COMMAND_NAME = "task"
-
-# Discord caps thread names at 100 characters.
-_THREAD_NAME_MAX_LEN = 100
-
-
-def _thread_name_from_text(text: str, *, fallback: str = "Task", max_len: int = _THREAD_NAME_MAX_LEN) -> str:
-    """Derive a thread title from the ``/task`` message.
-
-    Collapses runs of whitespace and truncates to Discord's ``max_len``-char
-    thread-name cap (appending an ellipsis when truncated). Falls back to
-    ``fallback`` when the message is empty after collapsing.
-    """
-    collapsed = " ".join(text.split())
-    if not collapsed:
-        return fallback
-    if len(collapsed) <= max_len:
-        return collapsed
-    return collapsed[: max_len - 1].rstrip() + "…"
 
 
 class SlashCommandManager:
@@ -155,34 +136,6 @@ class SlashCommandManager:
             app_commands.Command(
                 name=_CLEAR_COMMAND_NAME,
                 description="Clear agent context in this channel from this point onward",
-                callback=callback,
-            )
-        )
-
-    def register_task(self) -> None:
-        """Register the ``/task`` command on the command tree.
-
-        Open to anyone in the guild (no owner gate). The callback posts the
-        supplied message into the invoking channel, opens a public thread
-        anchored on it, and routes the message ambiently so the router
-        summons whichever agents the task needs — whose replies and
-        live-step progress post back into the new thread (see
-        :meth:`_on_task`). This realizes the "threads are tasks" design as a
-        first-class slash command.
-
-        Like ``/clear`` it takes a single text parameter and has no
-        agent-roster choice list, so it needs no debounced re-sync — it is
-        registered once and built inline here.
-        """
-
-        @app_commands.describe(message="What the task is; posted as the thread's opening message")
-        async def callback(interaction: discord.Interaction, message: str) -> None:
-            await self._on_task(interaction, message)
-
-        self._tree.add_command(
-            app_commands.Command(
-                name=_TASK_COMMAND_NAME,
-                description="Post a message and open a task thread for the agents to work in",
                 callback=callback,
             )
         )
@@ -396,140 +349,6 @@ class SlashCommandManager:
             logger.exception(
                 "failed to ack clear interaction_id=%s", interaction.id
             )
-
-    async def _on_task(self, interaction: discord.Interaction, message: str) -> None:
-        """Handle a ``/task`` invocation: post the message, open a thread, route it.
-
-        Open to anyone (no owner gate). Flow:
-
-        1. Defer ephemerally — the user gets a private ack and we buy time
-           past Discord's 3-second initial-response budget for the posts
-           below.
-        2. Require a top-level text channel: reject inside an existing thread
-           (Discord can't nest threads) or a non-text channel (forum/voice —
-           the persona webhook needs a parent text channel anyway).
-        3. Post the message as a plain bot message — the thread's anchor. A
-           bot, non-webhook message is filtered by the gateway's
-           ``_on_message`` handler, so it is NOT double-routed; we route a
-           hand-built wire below instead.
-        4. Open a public thread anchored on that message.
-        5. Build an ambient wire whose ``source_channel_id`` is the new
-           thread and hand it to the ingress (fire-and-forget). The router
-           fans out; replies and step progress post into the thread.
-        6. Confirm ephemerally with a jump link.
-
-        Every Discord call is best-effort: a failure logs and sends an
-        ephemeral followup explaining what went wrong rather than escaping
-        into the command dispatcher (which would surface to the user as a
-        generic "the application did not respond").
-        """
-        channel = interaction.channel
-        logger.info(
-            "task slash invoked channel_id=%s user_id=%s",
-            getattr(channel, "id", None),
-            interaction.user.id,
-        )
-
-        # Defer ephemerally up front; all later replies are ephemeral
-        # followups. A failed defer leaves nothing useful to do.
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.DiscordException:
-            logger.exception("task: defer failed interaction_id=%s", interaction.id)
-            return
-
-        async def followup(text: str) -> None:
-            try:
-                await interaction.followup.send(text, ephemeral=True)
-            except discord.DiscordException:
-                logger.exception("task: followup send failed interaction_id=%s", interaction.id)
-
-        # Step 2: require a top-level text channel.
-        if not isinstance(channel, discord.TextChannel):
-            await followup(
-                "`/task` must be run in a top-level text channel — not inside a "
-                "thread (threads can't be nested) or a forum/voice channel."
-            )
-            return
-
-        # Step 3: post the starter message (the thread's anchor).
-        try:
-            starter = await channel.send(message)
-        except discord.DiscordException:
-            logger.exception(
-                "task: failed to post starter channel_id=%s interaction_id=%s",
-                channel.id,
-                interaction.id,
-            )
-            await followup(
-                "Couldn't post the task message (Discord rejected it). Check that "
-                "I can send messages here and try again."
-            )
-            return
-
-        # Step 4: open the public thread anchored on the starter.
-        try:
-            thread = await channel.create_thread(
-                name=_thread_name_from_text(message),
-                message=discord.Object(id=starter.id),
-            )
-        except discord.DiscordException:
-            logger.exception(
-                "task: failed to create thread channel_id=%s anchor_id=%s interaction_id=%s",
-                channel.id,
-                starter.id,
-                interaction.id,
-            )
-            await followup(
-                "Posted the message but couldn't open a thread (Discord rejected "
-                "it). Check that I have the Create Public Threads permission here."
-            )
-            return
-
-        # Step 5: route the task ambiently; replies/steps land in the thread.
-        wire = self._normalizer.normalize_task(
-            interaction,
-            message,
-            anchor_message_id=starter.id,
-            thread_id=thread.id,
-        )
-        try:
-            await self._ingress.handle(wire)
-        except AmbientRosterEmptyError:
-            logger.info(
-                "task: created thread but roster empty channel_id=%s thread_id=%s event_id=%s",
-                channel.id,
-                thread.id,
-                wire.event_id,
-            )
-            await followup(
-                f"Opened the task thread ({thread.jump_url}), but no assistant "
-                "agents are configured to work it. Contact an operator to add one."
-            )
-            return
-        except Exception:
-            logger.exception(
-                "task: ingress publish failed channel_id=%s thread_id=%s event_id=%s",
-                channel.id,
-                thread.id,
-                wire.event_id,
-            )
-            await followup(
-                f"Opened the task thread ({thread.jump_url}), but dispatching it "
-                "to the agents failed. The thread already exists, so don't re-run "
-                "`/task` (that would create a duplicate) — an operator should "
-                f"check the bridge logs for event `{wire.event_id}`."
-            )
-            return
-
-        logger.info(
-            "task dispatched channel_id=%s thread_id=%s anchor_id=%s event_id=%s",
-            channel.id,
-            thread.id,
-            starter.id,
-            wire.event_id,
-        )
-        await followup(f"✅ Created task thread: {thread.jump_url}")
 
     def schedule_resync(self, agent_id: str) -> None:
         """Schedule a debounced re-sync of ``/thinking-effort``.

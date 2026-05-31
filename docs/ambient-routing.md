@@ -445,33 +445,60 @@ A2A `private_chat` history is a separate, stateless reader and does
 
 ### Task threads (`/task`)
 
-`/task <message>` posts the message into the invoking channel, opens a
-public **thread** anchored on it, and routes the message **ambiently** so the
-router summons whichever agents the task needs. Agent replies — and the live
+`/task <message>` is a **plaintext** command, not a Discord slash command:
+the user types `/task do the thing` as an ordinary message. The bridge
+detects the `/task` prefix in `_on_message`, opens a public **thread**
+anchored on **that same message**, and routes it **ambiently** so the router
+summons whichever agents the task needs. Agent replies — and the live
 `⚙ running…` step-progress message — post **into the new thread**, realizing
-the "threads are tasks" model as a first-class command.
+the "threads are tasks" model.
+
+**Why plaintext, not a slash command.** A slash command is a Discord
+*interaction*: anything it posts is authored by the bot or a webhook, never by
+the user. To keep the task's opening message **genuinely authored by the
+user**, the user must send a real message and the bridge threads off it (the
+[Start Thread from Message] API — the thread shares the message's id). This is
+the same reason Discord's built-in `/thread` reads as you: it runs as your own
+client. A bot has no API to post a message as someone else.
 
 - **Open to anyone** in the guild (no owner gate, unlike `/clear` and
   `/thinking-effort`): anyone can spin up a task.
+- **Humans only.** A persona webhook (or any bot) that happens to post
+  `/task …` is **not** treated as a command — it falls through to normal
+  routing so peers still see it. Only genuine human messages open task
+  threads.
 - **Where it runs.** Only in a top-level text channel. Inside an existing
-  thread it is rejected (Discord can't nest threads); forum/voice channels
-  are rejected (the persona webhook needs a parent text channel).
-- **Thread title** is derived from the message (whitespace-collapsed,
-  truncated to Discord's 100-char cap; falls back to `Task` if empty).
+  thread it is rejected with an inline reply (Discord can't nest threads);
+  forum/voice channels are rejected (the persona webhook needs a parent text
+  channel).
+- **Bare `/task`** (no task text) gets an inline usage hint and opens nothing.
+- **Full text kept.** The routed wire's `content` is the **entire** message,
+  `/task` prefix included; only the **thread title** strips the prefix
+  (whitespace-collapsed, truncated to Discord's 100-char cap; falls back to
+  `Task` if empty).
 - **Routing.** Always ambient (`kind="message"`) — the router decides the
-  respondents. To involve a specific agent, `@mention` it inside the thread
-  afterward (normal mention routing applies there).
+  respondents, even if the text contains an `@mention`. To direct a specific
+  agent, `@mention` it inside the thread afterward (normal mention routing
+  applies there).
+- **Single-route guarantee.** The divert happens inside `_on_message` (after
+  the redelivery dedupe and the bot-self filter) and returns early, so a
+  `/task` message is routed exactly once — into the thread — and never also
+  through normal ambient routing.
 - **Permissions.** The bot needs **Create Public Threads** (in addition to
   the **Manage Webhooks** it already needs for persona replies) in any
-  channel where `/task` is used. A missing permission is surfaced to the
-  invoker as an ephemeral error; the already-posted message is left in place.
+  channel where `/task` is used. A missing permission is surfaced to the user
+  as an inline reply; their original message is left in place.
 
 This rides the same thread-aware reply path used for **any** message sent
 inside a thread: when an event originates in a thread (its
 `source_channel_id` differs from the flattened parent `channel_id`), the
 outbox posts the agent's reply — and the steps consumer posts its live
-progress message — into that thread rather than the parent. See
+progress message — into that thread rather than the parent. Because routing
+keys on the flattened parent `channel_id`, a task thread inherits the parent
+channel's reachable agents with no per-thread setup. See
 `WireMessage.thread_id`.
+
+[Start Thread from Message]: https://discord.com/developers/docs/resources/channel#start-thread-from-message
 
 ### Outbox retry behavior
 

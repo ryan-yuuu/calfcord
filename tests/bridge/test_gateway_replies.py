@@ -165,6 +165,7 @@ class TestOnMessageEmptyRosterWiring:
         # _on_message's filters.
         message = MagicMock(spec=discord.Message)
         message.id = 42
+        message.content = "hello there"
         message.guild = MagicMock()
         message.guild.id = 5678  # matches settings.guild_id
         message.author = MagicMock()
@@ -197,6 +198,7 @@ class TestOnMessageEmptyRosterWiring:
 
         message = MagicMock(spec=discord.Message)
         message.id = 43
+        message.content = "hello there"
         message.guild = MagicMock()
         message.guild.id = 5678
         message.author = MagicMock()
@@ -237,6 +239,7 @@ class TestOnMessageIngressFailureWiring:
 
         message = MagicMock(spec=discord.Message)
         message.id = 44
+        message.content = "hello there"
         message.guild = MagicMock()
         message.guild.id = 5678
         message.author = MagicMock()
