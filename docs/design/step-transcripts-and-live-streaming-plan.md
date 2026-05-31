@@ -17,6 +17,18 @@ reconstructed history with the tool calls it made on prior turns.
 > `agent_id`/row creation deferred to post-time; deploy volume + gateway wiring +
 > test-rewrite breaks called out. **Decision D-1a chosen (§8): toggle on the
 > final reply, transient progress deleted — no pollution filter, no edit lock.**
+>
+> **v3 (post-merge-review) — supersedes the inline toggle in §7.5/§8:** the
+> expand/collapse toggle was replaced by **ephemeral step display**. Clicking the
+> reply's button sends the turn's steps as an **ephemeral** message visible only
+> to the clicker (`defer(thinking=True, ephemeral=True)` then an ephemeral
+> followup; an oversized transcript is attached as `steps.md`, untruncated). The
+> reply is never edited — removing the sentinel-collision, 2000-char-clamp,
+> chunked-reply, and collapse-state failure modes the review surfaced. Also added
+> a **Null-Object store-open degrade**: if the SQLite store can't open, the
+> gateway logs a loud ERROR and substitutes a `NullTranscriptStore` so
+> transcripts/replay/toggle disable instead of the bridge aborting; the outbox
+> suppresses the button when the store is not `enabled`.
 
 ---
 
