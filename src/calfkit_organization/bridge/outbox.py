@@ -70,7 +70,7 @@ from calfkit_organization.discord.persona import (
 )
 from calfkit_organization.discord.retry_feedback import (
     MAX_REPLY_RETRY_ATTEMPTS,
-    NON_AGENT_FIXABLE_STATUSES,
+    NON_AGENT_FIXABLE_STATUSES,  # noqa: F401  re-export pinned by TestRetryFeedbackSharedSymbols
     build_retry_history,
     build_retry_reminder,
     chunk_split,

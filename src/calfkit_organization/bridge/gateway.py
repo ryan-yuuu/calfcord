@@ -450,7 +450,10 @@ def main() -> None:
         # subscriber is still registered as a side-effect of Client.connect.
         # Its "no pending future" WARNINGs on every reply are expected; see
         # calfkit_organization.bridge.outbox.
-        async with DiscordPersonaSender(settings) as persona_sender:
+        # Kept as nested ``async with`` (not combined) so each context's
+        # rationale comment stays attached to it and the degrade/lifecycle reads
+        # top-to-bottom; the noqa silences SIM117's "combine them" hint.
+        async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
             async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as calfkit_client:
                 pending_wires = PendingWires()
                 ingress = BridgeIngress(

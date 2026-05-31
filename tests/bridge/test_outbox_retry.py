@@ -52,10 +52,6 @@ from calfkit_organization.bridge.outbox import (
     _publish_retry,
     build_outbox_consumer,
 )
-from calfkit_organization.discord.retry_feedback import (
-    CHUNK_SAFE_SIZE,
-    MAX_REPLY_RETRY_ATTEMPTS,
-)
 from calfkit_organization.bridge.pending_wires import (
     PendingEntry,
     PendingWires,
@@ -65,6 +61,9 @@ from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import Persona
+from calfkit_organization.discord.retry_feedback import (
+    MAX_REPLY_RETRY_ATTEMPTS,
+)
 from calfkit_organization.router.definition import build_router_definition
 
 _CORRELATION_ID = "evt-1"
