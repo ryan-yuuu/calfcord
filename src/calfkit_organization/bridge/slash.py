@@ -504,8 +504,10 @@ class SlashCommandManager:
                 wire.event_id,
             )
             await followup(
-                f"Opened the task thread ({thread.jump_url}), but something went "
-                "wrong dispatching it to the agents. Please try again."
+                f"Opened the task thread ({thread.jump_url}), but dispatching it "
+                "to the agents failed. The thread already exists, so don't re-run "
+                "`/task` (that would create a duplicate) — an operator should "
+                f"check the bridge logs for event `{wire.event_id}`."
             )
             return
 

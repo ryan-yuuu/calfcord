@@ -279,5 +279,8 @@ class TestOnTaskGuardsAndFailures:
 
         msg, kwargs = interaction.followup.send.call_args
         assert str(_THREAD_ID) in msg[0]
-        assert "something went wrong" in msg[0].lower()
+        # The thread already exists, so the message must NOT advise a plain
+        # retry (which would create a duplicate thread).
+        assert "dispatching it to the agents failed" in msg[0].lower()
+        assert "duplicate" in msg[0].lower()
         assert kwargs.get("ephemeral") is True
