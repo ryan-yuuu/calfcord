@@ -60,12 +60,14 @@ FROM python:3.12-slim AS runtime
 #   tmux            — persistent shell sessions for the ``shell`` tool
 #   ripgrep         — preferred backend for the ``grep`` tool
 #   git             — agents commonly run ``git`` via the ``shell`` tool
+#   curl            — agents commonly run ``curl`` via the ``shell`` tool
 #   ca-certificates — HTTPS trust store for ``web_fetch``
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         tmux \
         ripgrep \
         git \
+        curl \
         ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
