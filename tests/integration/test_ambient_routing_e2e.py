@@ -149,9 +149,7 @@ def _build_fanout_envelope_from_router_output(
     )
 
 
-def _build_synthesized_envelope(
-    *, synthesized_wire_dict: dict[str, Any], correlation_id: str
-) -> Envelope:
+def _build_synthesized_envelope(*, synthesized_wire_dict: dict[str, Any], correlation_id: str) -> Envelope:
     """Construct the envelope the synthesized-in @consumer would see.
 
     Equivalent to what ``invoke_node_with_metadata`` writes to
@@ -237,9 +235,7 @@ class TestAmbientRoutingEndToEnd:
         # Step 3: build the fan-out @consumer (router process) and
         # feed it an envelope mimicking the router agent's ReturnCall.
         fanout = build_fanout_consumer(router_client, router_agent_id=ROUTER_AGENT_ID)
-        decision = RoutingDecision(
-            agent_id="scribe", reasoning="scribe is the addressee"
-        )
+        decision = RoutingDecision(agent_id="scribe", reasoning="scribe is the addressee")
         fanout_envelope = _build_fanout_envelope_from_router_output(
             ambient_state=ambient_state,
             decision=decision,
@@ -322,15 +318,20 @@ class TestAmbientRoutingEndToEnd:
         # message id, breaking the inline-reply UI in Discord. This
         # test fails immediately on that regression.
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            return_value=SentMessage(id=11111, channel_id=12345)
-        )
+        persona_sender.send = AsyncMock(return_value=SentMessage(id=11111, channel_id=12345))
         # build_outbox_consumer now requires a calfkit Client (for the
-        # retry-on-Discord-error path). The outbox only invokes it on
-        # failure; this e2e test exercises the happy path so a bare
-        # MagicMock satisfies the signature without behavior.
+        # retry-on-Discord-error path) and a transcript_store (the sole
+        # transcript writer on tool-using terminal hops). The outbox only
+        # invokes the client on failure, and only writes a transcript when
+        # the reply's message_history slice renders to steps; this e2e test
+        # exercises the pure-text happy path, so a bare ``AsyncMock`` store
+        # and ``MagicMock`` client satisfy the signature without behavior.
         outbox = build_outbox_consumer(
-            persona_sender, _registry(), pending_wires, MagicMock()
+            persona_sender,
+            _registry(),
+            pending_wires,
+            MagicMock(),
+            transcript_store=AsyncMock(),
         )
 
         # The outbox reads ``emitter_node_id`` from the envelope
@@ -340,9 +341,7 @@ class TestAmbientRoutingEndToEnd:
             target = synth_wire_dict["slash_target"]
             synth_event_id = synth_wire_dict["event_id"]
             reply_state = State()
-            reply_state.final_output_parts = [
-                TextPart(text=f"{target}'s reply")
-            ]
+            reply_state.final_output_parts = [TextPart(text=f"{target}'s reply")]
             reply_envelope = Envelope(
                 internal_workflow_state=WorkflowState(
                     call_stack=CallFrameStack(
@@ -356,9 +355,7 @@ class TestAmbientRoutingEndToEnd:
                 ),
                 context=SessionRunContext(
                     state=reply_state,
-                    deps=Deps(
-                        correlation_id=synth_event_id, provided_deps={}
-                    ),
+                    deps=Deps(correlation_id=synth_event_id, provided_deps={}),
                 ),
             )
             await outbox.handler(
@@ -394,8 +391,5 @@ class TestAmbientRoutingEndToEnd:
         # the chosen agent — scribe's reply goes under "Scribe". This
         # pins that ``emitter_node_id`` (from the outbox headers)
         # correctly drives persona projection at the end of the chain.
-        persona_names_by_content = {
-            call.kwargs["content"]: call.kwargs["persona"].name
-            for call in send_calls
-        }
+        persona_names_by_content = {call.kwargs["content"]: call.kwargs["persona"].name for call in send_calls}
         assert persona_names_by_content["scribe's reply"] == "Scribe"

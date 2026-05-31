@@ -105,9 +105,7 @@ def _registry() -> AgentRegistry:
     )
 
 
-def _http_exc(
-    exc_cls: type[discord.HTTPException], status: int, *, code: int = 0
-) -> discord.HTTPException:
+def _http_exc(exc_cls: type[discord.HTTPException], status: int, *, code: int = 0) -> discord.HTTPException:
     """Build a discord HTTPException with status + JSON error code."""
     response = SimpleNamespace(status=status, reason="Test")
     return exc_cls(response, {"message": "synthetic", "code": code})
@@ -213,15 +211,15 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         # No retry, no chunk-split.
         calfkit_client.invoke_node.assert_not_called()
         persona_sender.send.assert_not_called()
-        assert any(
-            "forbidden" in r.message and "Manage Webhooks" in r.message
-            for r in caplog.records
-        )
+        assert any("forbidden" in r.message and "Manage Webhooks" in r.message for r in caplog.records)
 
     async def test_non_retryable_404_drops(
         self,
@@ -245,13 +243,13 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         calfkit_client.invoke_node.assert_not_called()
-        assert any(
-            "not found" in r.message.lower() and "channel" in r.message.lower()
-            for r in caplog.records
-        )
+        assert any("not found" in r.message.lower() and "channel" in r.message.lower() for r in caplog.records)
 
     async def test_5xx_after_smoothing_drops(
         self,
@@ -278,6 +276,9 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         calfkit_client.invoke_node.assert_not_called()
@@ -305,6 +306,9 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         # Retry was published; no chunk-split.
@@ -341,6 +345,9 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         # No retry; chunk-split fired.
@@ -378,14 +385,14 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         calfkit_client.invoke_node.assert_not_called()
         assert persona_sender.send.await_count >= 1
-        assert any(
-            "evicted before retry could be claimed" in r.message
-            for r in caplog.records
-        )
+        assert any("evicted before retry could be claimed" in r.message for r in caplog.records)
 
     async def test_retry_publish_failure_falls_back_to_chunk_split(
         self,
@@ -413,6 +420,9 @@ class TestHandlePostFailure:
                 persona_sender=persona_sender,
                 pending_wires=pw,
                 registry=_registry(),
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                turn_delta=None,
             )
 
         broken_client.invoke_node.assert_awaited_once()
@@ -420,9 +430,7 @@ class TestHandlePostFailure:
         assert pw.get_retry_count(_CORRELATION_ID) == 1
         # Chunk-split picked up.
         assert persona_sender.send.await_count >= 1
-        assert any(
-            "retry publish failed" in r.message for r in caplog.records
-        )
+        assert any("retry publish failed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -431,35 +439,25 @@ class TestHandlePostFailure:
 
 
 class TestPublishRetry:
-    async def test_envelope_uses_original_correlation_id(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_uses_original_correlation_id(self, calfkit_client: MagicMock) -> None:
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "failed text", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "failed text", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         assert kw["correlation_id"] == _CORRELATION_ID
 
-    async def test_envelope_targets_agent_inbox(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_targets_agent_inbox(self, calfkit_client: MagicMock) -> None:
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "failed text", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "failed text", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         assert kw["topic"] == "agent.scribe.in"
 
-    async def test_envelope_history_includes_original_prompt_and_failed_reply(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_history_includes_original_prompt_and_failed_reply(self, calfkit_client: MagicMock) -> None:
         original_history = (
             ModelRequest(parts=[UserPromptPart(content="<ryan> earlier turn")]),
             ModelResponse(parts=[TextPart(content="scribe's earlier reply")]),
@@ -467,9 +465,7 @@ class TestPublishRetry:
         entry = _entry(message_history=original_history)
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "FAILED TEXT", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "FAILED TEXT", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         history = kw["message_history"]
@@ -478,40 +474,26 @@ class TestPublishRetry:
         assert history[1] is original_history[1]
         # Then the original user prompt as a ModelRequest.
         assert isinstance(history[2], ModelRequest)
-        assert any(
-            isinstance(p, UserPromptPart) and p.content == "tell me a story"
-            for p in history[2].parts
-        )
+        assert any(isinstance(p, UserPromptPart) and p.content == "tell me a story" for p in history[2].parts)
         # Then the failed reply as a ModelResponse.
         assert isinstance(history[3], ModelResponse)
-        assert any(
-            isinstance(p, TextPart) and p.content == "FAILED TEXT"
-            for p in history[3].parts
-        )
+        assert any(isinstance(p, TextPart) and p.content == "FAILED TEXT" for p in history[3].parts)
 
-    async def test_envelope_user_prompt_is_system_reminder(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_user_prompt_is_system_reminder(self, calfkit_client: MagicMock) -> None:
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "fail", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         assert kw["user_prompt"].startswith("<system-reminder>")
         assert "HTTP 400" in kw["user_prompt"]
 
-    async def test_envelope_includes_phonebook_in_deps(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_includes_phonebook_in_deps(self, calfkit_client: MagicMock) -> None:
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "fail", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         assert "phonebook" in kw["deps"]
@@ -519,22 +501,16 @@ class TestPublishRetry:
         ids = {e["agent_id"] for e in kw["deps"]["phonebook"]}
         assert ids == {"scribe"}
 
-    async def test_envelope_preserves_temp_instructions(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_preserves_temp_instructions(self, calfkit_client: MagicMock) -> None:
         entry = _entry(temp_instructions="peer roster here")
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "fail", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
         kw = calfkit_client.invoke_node.call_args.kwargs
         assert kw["temp_instructions"] == "peer roster here"
 
-    async def test_envelope_cancels_handle_future(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_cancels_handle_future(self, calfkit_client: MagicMock) -> None:
         """Fire-and-forget pattern: the handle's future is cancelled so
         the reply dispatcher's pending-future map doesn't leak. We
         verify the publish happened exactly once; the cancel is on the
@@ -546,9 +522,7 @@ class TestPublishRetry:
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
-        await _publish_retry(
-            calfkit_client, _registry(), entry, "scribe", "fail", err
-        )
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
         calfkit_client.invoke_node.assert_awaited_once()
 
@@ -568,6 +542,10 @@ class TestChunkedFallback:
             Persona(name="Scribe", avatar_url=None),
             _wire(),
             "short reply",
+            transcript_store=AsyncMock(),
+            correlation_id=_CORRELATION_ID,
+            agent_id="scribe",
+            turn_delta=None,
         )
         persona_sender.send.assert_awaited_once()
         assert persona_sender.send.call_args.kwargs["reply_to"] is not None
@@ -583,6 +561,10 @@ class TestChunkedFallback:
             Persona(name="Scribe", avatar_url=None),
             _wire(),
             long,
+            transcript_store=AsyncMock(),
+            correlation_id=_CORRELATION_ID,
+            agent_id="scribe",
+            turn_delta=None,
         )
         assert persona_sender.send.await_count == 3
         # First chunk: reply_to set.
@@ -602,6 +584,10 @@ class TestChunkedFallback:
                 Persona(name="Scribe", avatar_url=None),
                 _wire(),
                 "",
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                agent_id="scribe",
+                turn_delta=None,
             )
         persona_sender.send.assert_not_called()
         assert any("empty text" in r.message for r in caplog.records)
@@ -627,6 +613,10 @@ class TestChunkedFallback:
                 Persona(name="Scribe", avatar_url=None),
                 _wire(),
                 long,
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                agent_id="scribe",
+                turn_delta=None,
             )
 
         # All three attempts happened, even after chunk 2 failed.
@@ -648,15 +638,11 @@ class TestEndToEnd:
         """Full handler path: agent reply lands, persona post fails with
         50035, retry envelope is published."""
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            side_effect=_http_exc(discord.HTTPException, 400, code=50035)
-        )
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.HTTPException, 400, code=50035))
         pw = PendingWires()
         pw.put(_CORRELATION_ID, make_pending_entry(_wire()))
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
         await consumer.handler(
             envelope=_envelope(final_text="x" * 3000),
             correlation_id=_CORRELATION_ID,
@@ -674,15 +660,11 @@ class TestEndToEnd:
         broker: MagicMock,
     ) -> None:
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            side_effect=_http_exc(discord.Forbidden, 403)
-        )
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
         pw = PendingWires()
         pw.put(_CORRELATION_ID, make_pending_entry(_wire()))
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
         await consumer.handler(
             envelope=_envelope(final_text="hello"),
             correlation_id=_CORRELATION_ID,
@@ -701,9 +683,7 @@ class TestEndToEnd:
         """A successful post AFTER retries logs the 'agent retry succeeded'
         line so operators can see which retries paid off."""
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            return_value=SentMessage(id=99999, channel_id=6789)
-        )
+        persona_sender.send = AsyncMock(return_value=SentMessage(id=99999, channel_id=6789))
         pw = PendingWires()
         # Simulate "this is the result of retry attempt #1." The
         # counter lives on the side-table; bump it via increment_retry
@@ -712,9 +692,7 @@ class TestEndToEnd:
         pw.put(_CORRELATION_ID, _entry())
         pw.increment_retry(_CORRELATION_ID)
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
         with caplog.at_level(logging.INFO):
             await consumer.handler(
                 envelope=_envelope(final_text="now shorter"),
@@ -724,10 +702,7 @@ class TestEndToEnd:
             )
 
         persona_sender.send.assert_awaited_once()
-        assert any(
-            "agent retry succeeded after 1 attempt" in r.message
-            for r in caplog.records
-        )
+        assert any("agent retry succeeded after 1 attempt" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -756,15 +731,11 @@ class TestMultiRetrySequence:
         """
         persona_sender = AsyncMock()
         # Every send fails with 400-50035.
-        persona_sender.send = AsyncMock(
-            side_effect=_http_exc(discord.HTTPException, 400, code=50035)
-        )
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.HTTPException, 400, code=50035))
         pw = PendingWires()
         pw.put(_CORRELATION_ID, _entry())
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
 
         # Three handler invocations: original + retry 1 + retry 2.
         for _ in range(3):
@@ -795,18 +766,14 @@ class TestMultiRetrySequence:
         plural case.
         """
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            return_value=SentMessage(id=99999, channel_id=6789)
-        )
+        persona_sender.send = AsyncMock(return_value=SentMessage(id=99999, channel_id=6789))
         pw = PendingWires()
         pw.put(_CORRELATION_ID, _entry())
         # Side-table counter == 2 (we're delivering after retry attempt #2).
         pw.increment_retry(_CORRELATION_ID)
         pw.increment_retry(_CORRELATION_ID)
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
         with caplog.at_level(logging.INFO):
             await consumer.handler(
                 envelope=_envelope(final_text="finally fits"),
@@ -815,10 +782,7 @@ class TestMultiRetrySequence:
                 broker=broker,
             )
 
-        assert any(
-            "agent retry succeeded after 2 attempt" in r.message
-            for r in caplog.records
-        )
+        assert any("agent retry succeeded after 2 attempt" in r.message for r in caplog.records)
 
 
 class TestRateLimitedHandling:
@@ -841,9 +805,7 @@ class TestRateLimitedHandling:
         pw = PendingWires()
         pw.put(_CORRELATION_ID, _entry())
 
-        consumer = build_outbox_consumer(
-            persona_sender, _registry(), pw, calfkit_client
-        )
+        consumer = build_outbox_consumer(persona_sender, _registry(), pw, calfkit_client, transcript_store=AsyncMock())
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(final_text="hello"),
@@ -854,10 +816,7 @@ class TestRateLimitedHandling:
 
         # No retry published; operator-actionable WARN.
         calfkit_client.invoke_node.assert_not_called()
-        assert any(
-            "rate-limit backoff exhausted" in r.message
-            for r in caplog.records
-        )
+        assert any("rate-limit backoff exhausted" in r.message for r in caplog.records)
 
 
 class TestAllChunksFailSummary:
@@ -872,9 +831,7 @@ class TestAllChunksFailSummary:
     ) -> None:
         """All 3 chunks 403 → one WARN summary with dominant_status=403."""
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            side_effect=_http_exc(discord.Forbidden, 403)
-        )
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
         long = ("a" * 1500) + "\n\n" + ("b" * 1500) + "\n\n" + ("c" * 1500)
 
         with caplog.at_level(logging.WARNING):
@@ -883,6 +840,10 @@ class TestAllChunksFailSummary:
                 Persona(name="Scribe", avatar_url=None),
                 _wire(),
                 long,
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                agent_id="scribe",
+                turn_delta=None,
             )
 
         # All chunks attempted.
@@ -890,8 +851,7 @@ class TestAllChunksFailSummary:
         # The aggregate summary WARN names the status + total + zero
         # successes so an operator sees a single actionable line.
         assert any(
-            "chunk-split delivered 0/3 chunks" in r.message
-            and "dominant_status=403" in r.message
+            "chunk-split delivered 0/3 chunks" in r.message and "dominant_status=403" in r.message
             for r in caplog.records
         )
 
@@ -916,10 +876,11 @@ class TestAllChunksFailSummary:
                 Persona(name="Scribe", avatar_url=None),
                 _wire(),
                 long,
+                transcript_store=AsyncMock(),
+                correlation_id=_CORRELATION_ID,
+                agent_id="scribe",
+                turn_delta=None,
             )
 
         # No aggregate "0/N" summary fired.
-        assert not any(
-            "chunk-split delivered 0/" in r.message
-            for r in caplog.records
-        )
+        assert not any("chunk-split delivered 0/" in r.message for r in caplog.records)

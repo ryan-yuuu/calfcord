@@ -9,6 +9,8 @@ discord.py, or an LLM.
 from __future__ import annotations
 
 import logging
+import pathlib
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +18,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from calfkit._vendor.pydantic_ai.messages import TextPart as PaiTextPart
 from calfkit.models import State, TextPart
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
@@ -30,6 +41,8 @@ from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.outbox import build_outbox_consumer
 from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.steps_toggle import _TOGGLE_CUSTOM_ID
+from calfkit_organization.bridge.transcripts import TranscriptStore
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.messages import SentMessage
 
@@ -82,13 +95,21 @@ def _envelope(
     correlation_id: str = _CORRELATION_ID,
     final_text: str | None = "Booked.",
     deps_provided: dict[str, Any] | None = None,
+    message_history: list[Any] | None = None,
 ) -> Envelope:
     """Build a synthetic envelope mimicking an agent's ``ReturnCall`` publish.
 
     ``final_text=None`` produces an envelope with no ``final_output_parts``
     (an intermediate hop). Anything else is wrapped in a single ``TextPart``.
+
+    ``message_history`` seeds ``state.message_history`` (the cumulative
+    pydantic_ai conversation the outbox slices for the turn's transcript).
+    Default ``None`` leaves it empty — the pure-text/no-toggle behavior the
+    pre-existing tests rely on.
     """
     state = State()
+    if message_history is not None:
+        state.message_history = list(message_history)
     if final_text is not None:
         state.final_output_parts = [TextPart(text=final_text)]
     call_stack = CallFrameStack()
@@ -166,15 +187,32 @@ def broker() -> MagicMock:
     return MagicMock()
 
 
+@pytest.fixture
+async def transcript_store(tmp_path: pathlib.Path) -> AsyncIterator[TranscriptStore]:
+    """A real (tmp-path) transcript store so tests can assert the outbox's
+    SOLE-writer behavior end-to-end: the consumer writes a row, the test
+    reads it back by ``final_message_id``. The toggle is verified separately
+    via the ``extra_buttons`` passed to ``persona_sender.send``."""
+    store = TranscriptStore(tmp_path / "state" / "transcripts.sqlite3")
+    await store.connect()
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
 class TestHappyPath:
     async def test_posts_under_resolved_persona(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -197,9 +235,12 @@ class TestHappyPath:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(final_text="  Booked.\n\n"),
             correlation_id=_CORRELATION_ID,
@@ -213,7 +254,8 @@ class TestHappyPath:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Two agents reply for the same correlation_id; both post."""
         registry = AgentRegistry(
@@ -234,7 +276,9 @@ class TestHappyPath:
                 ),
             ]
         )
-        consumer = build_outbox_consumer(persona_sender, registry, pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, registry, pending_wires, calfkit_client, transcript_store=transcript_store
+        )
 
         await consumer.handler(
             envelope=_envelope(final_text="A1"),
@@ -260,10 +304,13 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Envelope with empty ``final_output_parts`` is an intermediate hop — skip."""
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(final_text=None),
             correlation_id=_CORRELATION_ID,
@@ -277,11 +324,14 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Foreign producer / pre-restart event with no wire in the map."""
         empty_pw = PendingWires()
-        consumer = build_outbox_consumer(persona_sender, _registry(), empty_pw, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), empty_pw, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.DEBUG):
             await consumer.handler(
                 envelope=_envelope(),
@@ -298,9 +348,12 @@ class TestDropPaths:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -316,9 +369,12 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -333,9 +389,12 @@ class TestDropPaths:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -351,10 +410,13 @@ class TestDropPaths:
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Discord rejects empty webhook executes; skip the post."""
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(final_text="   \n  "),
             correlation_id=_CORRELATION_ID,
@@ -383,13 +445,16 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Forbidden = bot lost Manage Webhooks; retry won't help."""
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -406,12 +471,15 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(side_effect=_http_exc(discord.NotFound, 404))
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -427,7 +495,8 @@ class TestDiscordErrorHandling:
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """First call hits 5xx; retry returns a SentMessage."""
         persona_sender = AsyncMock()
@@ -438,7 +507,9 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -453,7 +524,8 @@ class TestDiscordErrorHandling:
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """Both attempts hit 5xx; one warning per attempt, no exception out."""
         persona_sender = AsyncMock()
@@ -464,7 +536,9 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -477,21 +551,16 @@ class TestDiscordErrorHandling:
         # Two log lines expected: the 5xx-retry-warn from
         # _send_with_one_retry_on_outage, and the final-5xx-exhausted
         # log from _handle_post_failure.
-        assert any(
-            "retrying once" in r.message and "5xx" in r.message
-            for r in caplog.records
-        )
-        assert any(
-            "5xx + extra retry exhausted" in r.message
-            for r in caplog.records
-        )
+        assert any("retrying once" in r.message and "5xx" in r.message for r in caplog.records)
+        assert any("5xx + extra retry exhausted" in r.message for r in caplog.records)
 
     async def test_retry_surfacing_forbidden_keeps_actionable_log(
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """First attempt 5xx, second attempt 403 — operator-actionable
         Manage-Webhooks language is preserved (now emitted by
@@ -504,7 +573,9 @@ class TestDiscordErrorHandling:
             ]
         )
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         with caplog.at_level(logging.WARNING):
             await consumer.handler(
                 envelope=_envelope(),
@@ -514,24 +585,22 @@ class TestDiscordErrorHandling:
             )
 
         assert persona_sender.send.await_count == 2
-        assert any(
-            "forbidden" in r.message and "Manage Webhooks" in r.message
-            for r in caplog.records
-        )
+        assert any("forbidden" in r.message and "Manage Webhooks" in r.message for r in caplog.records)
 
     async def test_other_http_exception_drops_without_retry(
         self,
         pending_wires: PendingWires,
         broker: MagicMock,
-            calfkit_client: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
     ) -> None:
         """An odd 4xx (e.g. 400 bad request) is not retried."""
         persona_sender = AsyncMock()
-        persona_sender.send = AsyncMock(
-            side_effect=_http_exc(discord.HTTPException, 400)
-        )
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.HTTPException, 400))
 
-        consumer = build_outbox_consumer(persona_sender, _registry(), pending_wires, calfkit_client)
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
         await consumer.handler(
             envelope=_envelope(),
             correlation_id=_CORRELATION_ID,
@@ -540,3 +609,150 @@ class TestDiscordErrorHandling:
         )
 
         assert persona_sender.send.await_count == 1
+
+
+def _tool_using_history() -> list[Any]:
+    """A cumulative terminal ``message_history`` where the turn used a tool.
+
+    ``[initial_len=0 : -1]`` (the slice the outbox renders) is the first
+    three messages — a ``ToolCallPart`` + a ``ToolReturnPart`` → 2 rendered
+    steps. The trailing ``ModelResponse`` is the final answer the outbox
+    posts to the channel (dropped by the ``[:-1]`` slice).
+    """
+    return [
+        ModelRequest(parts=[UserPromptPart(content="weather in tokyo?")]),
+        ModelResponse(parts=[ToolCallPart(tool_name="weather", args={"c": "Tokyo"}, tool_call_id="t1")]),
+        ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="t1")]),
+        ModelResponse(parts=[PaiTextPart(content="It's 18 degrees in Tokyo.")]),
+    ]
+
+
+class TestTranscriptAndToggle:
+    """The outbox is the SOLE transcript writer: a tool-using terminal reply
+    writes a row AND attaches the expand toggle; a pure-text reply does
+    neither; the chunked fallback writes the row against the first chunk."""
+
+    async def test_tool_using_reply_writes_row_and_attaches_toggle(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="It's 18 degrees in Tokyo.",
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # Toggle attached to the reply: one secondary button carrying the
+        # static toggle custom_id, labelled with the 2-step count.
+        persona_sender.send.assert_awaited_once()
+        buttons = persona_sender.send.call_args.kwargs["extra_buttons"]
+        assert buttons is not None
+        assert len(buttons) == 1
+        assert buttons[0].custom_id == _TOGGLE_CUSTOM_ID
+        assert buttons[0].label == "⤵ 2 steps"
+
+        # Transcript row written against the posted reply id (99999), keyed
+        # by correlation_id, with the round-trippable delta slice.
+        row = await transcript_store.get_by_final_message_id("99999")
+        assert row is not None
+        assert row.correlation_id == _CORRELATION_ID
+        assert row.agent_id == "scheduler"
+        assert row.conversation_key == "6789"  # wire.channel_id (no thread)
+        # The persisted delta deserializes back to the 3-message slice.
+        messages = ModelMessagesTypeAdapter.validate_json(row.delta_json)
+        assert len(messages) == 3
+
+    async def test_pure_text_reply_writes_no_row_and_no_toggle(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        # A pure-text turn: history is just the user prompt + the final
+        # answer, so the [initial_len:-1] slice renders to zero steps.
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="hi")]),
+            ModelResponse(parts=[PaiTextPart(content="Hello there.")]),
+        ]
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(final_text="Hello there.", message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # No toggle, no row.
+        persona_sender.send.assert_awaited_once()
+        assert persona_sender.send.call_args.kwargs["extra_buttons"] is None
+        assert await transcript_store.get_by_final_message_id("99999") is None
+
+    async def test_chunked_fallback_writes_row_with_first_chunk_id(
+        self,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When agent retries are exhausted, the chunked fallback posts the
+        content and writes the transcript against the FIRST chunk's id, with
+        the toggle on that first chunk only."""
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        # Drive straight to the chunk-split branch: exhaust the agent-retry
+        # budget so an agent-fixable 400 falls back to chunking.
+        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+
+        for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
+            pending_wires.increment_retry(_CORRELATION_ID)
+
+        persona_sender = AsyncMock()
+        first_chunk = SentMessage(id=70001, channel_id=6789)
+        rest_chunk = SentMessage(id=70002, channel_id=6789)
+        # First send (the reply) fails agent-fixably; subsequent sends are
+        # the chunk-split posts, which succeed.
+        persona_sender.send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 400),
+                first_chunk,
+                rest_chunk,
+            ]
+        )
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="x" * 3000,  # forces ≥2 chunks
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # Row written against the FIRST chunk's id, not the second.
+        assert await transcript_store.get_by_final_message_id("70001") is not None
+        assert await transcript_store.get_by_final_message_id("70002") is None
+
+        # Toggle rode the first chunk only.
+        chunk_calls = persona_sender.send.call_args_list[1:]
+        assert chunk_calls[0].kwargs["extra_buttons"] is not None
+        assert chunk_calls[0].kwargs["extra_buttons"][0].custom_id == _TOGGLE_CUSTOM_ID
+        assert chunk_calls[1].kwargs["extra_buttons"] is None
