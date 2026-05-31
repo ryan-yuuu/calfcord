@@ -55,12 +55,17 @@ Ambient-reply health signal (v1):
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 import uuid_utils
-from calfkit._vendor.pydantic_ai.messages import ModelMessage
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ToolReturnPart,
+)
 from calfkit.client import Client, InvocationHandle
 
 from calfkit_organization._compat.invoke import (
@@ -83,6 +88,7 @@ from calfkit_organization.bridge.history import (
 )
 from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.transcripts import TranscriptStore
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.router.roster import build_router_temp_instructions
 from calfkit_organization.topics import (
@@ -95,6 +101,69 @@ from calfkit_organization.topics import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INGRESS_TOPIC_TEMPLATE = "discord.channel.{cid}.in"
+
+REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000
+"""Per-tool-return character cap applied to replayed (hydrated) tool
+returns before they re-enter an agent's ``message_history``.
+
+Deliberately distinct from — and much larger than — the 1500-char
+``STEP_CONTENT_MAX_CHARS`` used to render steps into a 2000-char Discord
+message: the Discord cap is a *display* budget, while this one bounds the
+*LLM context* a replayed turn re-injects. Reusing the 1500-char render cap
+would lobotomize the tool context the model gets to reason over on the
+next turn (the whole point of replay). Only oversized individual ``str``
+tool returns are trimmed; ``history_turns`` already bounds how many turns
+replay can touch (plan §4: "``history_turns`` bounds replay; no backstop"
+and §11 Q-5: this is the lever that keeps the hydrated envelope under the
+broker's max message size)."""
+
+_REPLAY_TRUNCATION_MARKER: Final[str] = "\n…(truncated)"
+"""Visible marker appended to a tool return truncated to
+:data:`REPLAY_TOOL_RETURN_MAX_CHARS` so the model can tell the content was
+cut rather than genuinely short."""
+
+
+def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Cap oversized ``str`` tool-return payloads in a replayed delta.
+
+    Walks ``messages`` (the deserialized structured slice of a prior
+    turn) and, for every :class:`ToolReturnPart` whose ``content`` is a
+    ``str`` longer than :data:`REPLAY_TOOL_RETURN_MAX_CHARS`, replaces the
+    part with an immutable copy carrying the truncated string (plus
+    :data:`_REPLAY_TRUNCATION_MARKER`). Non-``str`` contents (structured
+    payloads) and already-short strings are left untouched; messages with
+    no oversized tool returns are returned unchanged (the same object),
+    and a message that does need trimming is rebuilt with
+    :func:`dataclasses.replace` on the affected parts so the deserialized
+    objects are never mutated in place.
+
+    Returns a NEW list — callers can splice it into the hydration map
+    without worrying about aliasing the input. The non-mutating contract
+    matters because the deserialized parts may be shared once the
+    type-adapter caches anything, and because :func:`project_history`
+    treats its hydration deltas as read-only.
+    """
+    out: list[ModelMessage] = []
+    for msg in messages:
+        new_parts: list[Any] | None = None
+        parts = getattr(msg, "parts", None)
+        if parts is not None:
+            for idx, part in enumerate(parts):
+                if (
+                    isinstance(part, ToolReturnPart)
+                    and isinstance(part.content, str)
+                    and len(part.content) > REPLAY_TOOL_RETURN_MAX_CHARS
+                ):
+                    if new_parts is None:
+                        new_parts = list(parts)
+                    head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
+                    truncated = part.content[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
+                    new_parts[idx] = dataclasses.replace(part, content=truncated)
+        if new_parts is None:
+            out.append(msg)
+        else:
+            out.append(dataclasses.replace(msg, parts=new_parts))
+    return out
 
 
 class AmbientRosterEmptyError(ValueError):
@@ -154,6 +223,14 @@ class BridgeIngress:
         # set yet so a Discord event arriving in the brief window
         # before ``_on_ready`` doesn't crash the invocation path.
         self._fetcher: ChannelHistoryFetcher | None = None
+        # The transcript store is injected via :meth:`set_transcript_store`
+        # once the bridge's SQLite connection is open (gateway ``main()``,
+        # right after the ``async with TranscriptStore(...)`` enters).
+        # ``None`` is the documented pre-ready state — the slash history
+        # builder degrades to today's no-replay projection when the store
+        # isn't set yet, so a Discord event arriving before the store opens
+        # never crashes the invocation path. Mirrors :attr:`_fetcher`.
+        self._transcript_store: TranscriptStore | None = None
         # Validate every agent's provider at boot so a typo'd
         # CALFKIT_AGENT_DEFAULT_PROVIDER surfaces here (fail-fast) rather
         # than as an uncaught ValueError inside every targeted invocation.
@@ -199,6 +276,23 @@ class BridgeIngress:
         tests that swap in a fake.
         """
         self._fetcher = fetcher
+
+    def set_transcript_store(self, store: TranscriptStore) -> None:
+        """Inject the bridge-local transcript store for tool-call replay.
+
+        Called by the gateway's ``main()`` once the store's SQLite
+        connection is open. Until then the slash-history builder
+        (:meth:`_build_slash_message_history`) runs without hydration —
+        producing the same projection as before the replay feature —
+        rather than crashing on a missing store. After injection, each
+        slash invocation joins this turn's surviving self-reply records
+        against the store and splices their persisted tool calls/returns
+        into the projected ``message_history``.
+
+        Idempotent — calling again replaces the store. Mirrors
+        :meth:`set_fetcher`; useful for tests that swap in a fake store.
+        """
+        self._transcript_store = store
 
     async def handle(
         self,
@@ -647,7 +741,71 @@ class BridgeIngress:
 
         if spec.history_turns < len(records):
             records = records[-spec.history_turns:]
-        return project_history(records, self_agent_id=target)
+        hydration = await self._build_replay_hydration(records, target)
+        return project_history(records, self_agent_id=target, hydration=hydration)
+
+    async def _build_replay_hydration(
+        self,
+        records: Sequence[HistoryRecord],
+        target: str,
+    ) -> dict[int, list[ModelMessage]] | None:
+        """Build the tool-call replay map for ``target``'s slash invocation.
+
+        Joins — never DB-scans — the already-fetched (and ``/clear``-
+        truncated) ``records`` against the transcript store: only records
+        that are THIS agent's own replies (``author_agent_id == target``)
+        are candidates, so a ``/clear`` that truncated a reply out of
+        ``records`` simply means it is never looked up (plan §4: "replay
+        is a join against fetcher output, never a DB scan"; the read scope
+        is the surviving record set, which keeps ``/clear`` correct for
+        free). Each found row's ``delta_json`` is deserialized and its
+        oversized tool returns trimmed to
+        :data:`REPLAY_TOOL_RETURN_MAX_CHARS` before it enters the map.
+
+        Returns ``None`` (⇒ :func:`project_history` runs its pre-replay
+        behavior) when the store has not been injected yet (pre-ready
+        window) or when none of this turn's own-reply records have a
+        persisted transcript row. Otherwise returns
+        ``{int(final_message_id) -> trimmed delta messages}`` keyed to
+        match :attr:`HistoryRecord.message_id`. Best-effort: any failure
+        deserializing or trimming a single row is logged and that row is
+        skipped, so a corrupt blob degrades to "no replay for that reply"
+        rather than breaking the whole invocation.
+        """
+        store = self._transcript_store
+        if store is None:
+            return None
+        self_reply_ids = [
+            r.message_id for r in records if r.author_agent_id == target
+        ]
+        if not self_reply_ids:
+            return None
+        # The store keys ``final_message_id`` as TEXT (snowflake
+        # precision); join on the str form and map back to int to match
+        # ``HistoryRecord.message_id`` in :func:`project_history`.
+        rows = await store.get_by_final_message_ids([str(mid) for mid in self_reply_ids])
+        if not rows:
+            return None
+        hydration: dict[int, list[ModelMessage]] = {}
+        for final_message_id_str, row in rows.items():
+            try:
+                msgs = list(ModelMessagesTypeAdapter.validate_json(row.delta_json))
+                msgs = _truncate_replay_tool_returns(msgs)
+            except Exception:
+                # A single unparseable / malformed blob must not sink the
+                # whole invocation: skip just this reply's replay. The
+                # row was written by the outbox from a live turn, so this
+                # is unexpected — log loudly for investigation.
+                logger.exception(
+                    "replay hydration skipped reply_id=%s agent=%s: failed to "
+                    "deserialize/trim stored delta; this turn keeps only its "
+                    "final text in replay",
+                    final_message_id_str,
+                    target,
+                )
+                continue
+            hydration[int(final_message_id_str)] = msgs
+        return hydration or None
 
     def _router_history_turns(self) -> int:
         """Return the router's configured ``history_turns``.

@@ -61,7 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -617,6 +617,8 @@ class ChannelHistoryFetcher:
 def project_history(
     records: Sequence[HistoryRecord],
     self_agent_id: str | None,
+    *,
+    hydration: Mapping[int, list[ModelMessage]] | None = None,
 ) -> list[ModelMessage]:
     """Project records into a ``list[ModelMessage]`` from one agent's POV.
 
@@ -633,6 +635,21 @@ def project_history(
             ``None`` (used by the router) treats everything as
             ``ModelRequest`` — the router is an outside observer with
             no prior turns in the channel.
+        hydration: Optional tool-call replay map, ``message_id → the
+            stored structured delta`` for that reply. When a SELF record
+            (one projected to a :class:`ModelResponse`) has its
+            ``message_id`` in this map, the mapped delta messages are
+            spliced in IMMEDIATELY BEFORE that record's
+            :class:`ModelResponse`, so the agent re-sees the tool
+            calls/returns it made on that prior turn rather than only its
+            final text. ``None`` (the default — and the only value the
+            router and ambient paths ever pass) reproduces the
+            pre-replay behavior exactly: nothing is spliced and the
+            output is byte-identical to passing no map. Pure: the caller
+            pre-fetches and truncates the deltas; this function never
+            touches the DB. See
+            ``docs/design/step-transcripts-and-live-streaming-plan.md``
+            §4, §7.6.
 
     Returns:
         A list suitable for ``Client.invoke_node(message_history=...)``.
@@ -664,6 +681,7 @@ def project_history(
       open with a ``ModelResponse`` and Anthropic would 400.
     """
     out: list[ModelMessage] = []
+    seen_request = False
     for r in records:
         if not r.content.strip():
             continue
@@ -671,12 +689,34 @@ def project_history(
             self_agent_id is not None and r.author_agent_id == self_agent_id
         )
         if is_self:
+            # Tool-call replay: when this self-record's reply has a
+            # persisted structured delta, splice it in just BEFORE the
+            # record's final-text ``ModelResponse`` so the agent re-sees
+            # the tool calls/returns it made on that turn. ``hydration``
+            # is always ``None`` on the router / ambient (observer) path
+            # — those never self-classify, so the splice can't fire there
+            # — and when ``None`` here the output is byte-identical to the
+            # pre-replay behavior.
+            #
+            # Gate on ``seen_request``: a self reply with no preceding user
+            # ``ModelRequest`` is a *leading* ``ModelResponse`` that the
+            # trailing drop below removes (Anthropic rejects an
+            # assistant-first history). Splicing its delta there would leave
+            # an orphaned tool-return ``ModelRequest`` (a ``tool_result``
+            # with no matching ``tool_use``) at the head once the leading
+            # ``ModelResponse`` is popped → provider 400. So only replay for
+            # turns that survive the leading drop.
+            if hydration is not None and seen_request:
+                replay = hydration.get(r.message_id)
+                if replay:
+                    out.extend(replay)
             out.append(ModelResponse(parts=[TextPart(content=r.content)]))
         else:
             prefix = f"<{r.author_display_name}> "
             out.append(
                 ModelRequest(parts=[UserPromptPart(content=prefix + r.content)])
             )
+            seen_request = True
     while out and isinstance(out[0], ModelResponse):
         out.pop(0)
     return out

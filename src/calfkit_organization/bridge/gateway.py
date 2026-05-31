@@ -399,6 +399,15 @@ def main() -> None:
                 # single long-lived aiosqlite connection's lifetime brackets
                 # the consumer setup and the gateway run loop.
                 async with TranscriptStore(settings.transcript_db_path) as transcript_store:
+                    # Inject the now-open store into the ingress so the
+                    # slash-history builder can splice each agent's prior
+                    # tool calls/returns into its reconstructed
+                    # ``message_history`` (tool-call replay, plan §7.6).
+                    # Mirrors ``set_fetcher`` — both are post-construction
+                    # injections that degrade gracefully while unset. Done
+                    # right after the connection opens and before the
+                    # gateway/consumers are built.
+                    ingress.set_transcript_store(transcript_store)
                     # Construct the gateway early so its SlashCommandManager
                     # exists before we register the state consumer — the
                     # state consumer's callbacks must point at
