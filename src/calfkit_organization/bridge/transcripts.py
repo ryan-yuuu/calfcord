@@ -132,9 +132,12 @@ class TranscriptStore:
 
     # A live, persistent store: transcripts, replay, and the expand toggle
     # are all active. The :class:`NullTranscriptStore` substitute reports
-    # ``False`` so callers can gate those features off when the real store
-    # failed to open. A class attribute (not a property) since it is a
-    # fixed truth for every real instance.
+    # ``False`` so the WRITER (the outbox) can gate the toggle-attach + the
+    # transcript write off when the real store failed to open. READERS
+    # (steps_toggle, ingress replay) do NOT check this flag — they call the
+    # read methods unconditionally and rely on the Null store's no-op
+    # returns. A class attribute (not a property) since it is a fixed truth
+    # for every real instance.
     enabled = True
 
     def __init__(self, db_path: pathlib.Path) -> None:
@@ -297,8 +300,20 @@ class NullTranscriptStore:
     expand toggle DISABLED for the run: ``enabled`` is ``False``, writes
     are dropped, and reads return empty. Mirrors the read/write surface
     callers use against :class:`TranscriptStore` so no caller needs to
-    branch on which store it holds (it gates behaviour on
-    :attr:`enabled` instead).
+    branch on which store it holds.
+
+    **The contract is NOT "every caller gates on ``enabled``".** It is
+    split by role:
+
+    * **Writers** (the outbox) gate the toggle-attach + the
+      :meth:`write_turn` call on :attr:`enabled` — so a disabled run never
+      shows a dead toggle with no row behind it.
+    * **Readers** (steps_toggle's click callback, ingress's replay
+      hydration) do NOT check :attr:`enabled`. They call the read methods
+      unconditionally and rely on this store's no-op returns —
+      :meth:`get_by_final_message_id` ⇒ ``None`` and
+      :meth:`get_by_final_message_ids` ⇒ ``{}`` — to degrade to "nothing
+      to show / nothing to replay" without a per-call branch.
     """
 
     enabled = False
@@ -325,7 +340,9 @@ class NullTranscriptStore:
 
 
 # Either the real store or its no-op substitute. Callers type their
-# transcript-store parameters/fields as this union and gate transcript/
-# replay/toggle behaviour on the store's ``enabled`` flag rather than on
-# which concrete class they hold.
+# transcript-store parameters/fields as this union rather than branching on
+# which concrete class they hold. The ``enabled`` flag is consulted only by
+# WRITERS (the outbox gates the toggle-attach + write on it); READERS
+# (steps_toggle, ingress replay) call the read methods unconditionally and
+# lean on the Null store's no-op ``None`` / ``{}`` returns.
 TranscriptStoreLike = TranscriptStore | NullTranscriptStore

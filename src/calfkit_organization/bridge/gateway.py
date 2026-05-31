@@ -116,6 +116,35 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
         await yielded.close()
 
 
+async def _prune_on_startup(store: TranscriptStoreLike, settings: DiscordSettings) -> None:
+    """Best-effort startup sweep: drop transcript rows past the retention window.
+
+    The bridge is the sole writer and restarts on every deploy, so a
+    startup prune bounds the store's growth without a background task.
+    Disabled when ``transcript_retention_days <= 0`` (keep forever).
+
+    Best-effort by contract: retention is housekeeping, so a prune failure
+    (read-only volume, disk full, …) must NEVER abort bridge startup —
+    that would take down all Discord routing, not just transcripts. Any
+    exception is logged and swallowed. A :class:`NullTranscriptStore`
+    (failed-open run) prunes nothing and reports zero, so this is a no-op
+    there too.
+    """
+    if settings.transcript_retention_days <= 0:
+        return
+    try:
+        cutoff = int(time.time()) - settings.transcript_retention_days * 86400
+        pruned = await store.prune_older_than(cutoff)
+        if pruned:
+            logger.info(
+                "pruned %d transcript row(s) older than %d days",
+                pruned,
+                settings.transcript_retention_days,
+            )
+    except Exception:
+        logger.exception("transcript retention prune failed at startup; continuing")
+
+
 class DiscordIngressGateway:
     """Long-lived gateway daemon. Translates Discord events into agent invocations."""
 
@@ -449,23 +478,10 @@ def main() -> None:
                     # Retention: drop transcript rows older than the
                     # configured window on startup. The bridge is the sole
                     # writer and restarts on every deploy, so a startup sweep
-                    # bounds growth without a background task. Disabled when
-                    # the setting is <= 0 (keep forever).
-                    if settings.transcript_retention_days > 0:
-                        # Best-effort: retention is housekeeping, so a prune
-                        # failure must never abort bridge startup (which would
-                        # take down all Discord routing, not just transcripts).
-                        try:
-                            cutoff = int(time.time()) - settings.transcript_retention_days * 86400
-                            pruned = await transcript_store.prune_older_than(cutoff)
-                            if pruned:
-                                logger.info(
-                                    "pruned %d transcript row(s) older than %d days",
-                                    pruned,
-                                    settings.transcript_retention_days,
-                                )
-                        except Exception:
-                            logger.exception("transcript retention prune failed at startup; continuing")
+                    # bounds growth without a background task. Best-effort and
+                    # disabled when the setting is <= 0 — see
+                    # :func:`_prune_on_startup`.
+                    await _prune_on_startup(transcript_store, settings)
                     # Construct the gateway early so its SlashCommandManager
                     # exists before we register the state consumer — the
                     # state consumer's callbacks must point at

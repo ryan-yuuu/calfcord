@@ -337,3 +337,26 @@ async def test_null_store_close_is_noop() -> None:
     store = NullTranscriptStore()
     assert await store.close() is None
     assert await store.close() is None
+
+
+def test_null_store_mirrors_real_store_surface() -> None:
+    # The Null-Object substitute must mirror the REAL store's caller-facing
+    # method surface so no caller has to branch on which concrete class it
+    # holds (the documented TranscriptStoreLike contract). If a new public
+    # method is added to TranscriptStore without a NullTranscriptStore
+    # counterpart, an ingress/toggle reader (which calls read methods
+    # unconditionally and relies on the Null store's no-op returns) would
+    # blow up with AttributeError at runtime on a failed-open run. This guard
+    # makes that a unit-test failure instead.
+    #
+    # ``connect`` is excluded: it is the real store's open step (replaced by
+    # the gateway's degrade-to-Null path), not part of the surface callers
+    # invoke against the union.
+    real = {
+        n
+        for n in vars(TranscriptStore)
+        if callable(getattr(TranscriptStore, n)) and not n.startswith("_") and n != "connect"
+    }
+    null = {n for n in vars(NullTranscriptStore) if not n.startswith("_")}
+    missing = real - null
+    assert real <= null, f"NullTranscriptStore is missing real-store method(s): {sorted(missing)}"

@@ -42,7 +42,11 @@ from calfkit_organization.bridge.outbox import build_outbox_consumer
 from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.steps_toggle import _TOGGLE_CUSTOM_ID
-from calfkit_organization.bridge.transcripts import NullTranscriptStore, TranscriptStore
+from calfkit_organization.bridge.transcripts import (
+    NullTranscriptStore,
+    TranscriptRow,
+    TranscriptStore,
+)
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.messages import SentMessage
 
@@ -51,6 +55,23 @@ def _http_exc(exc_cls: type[discord.HTTPException], status: int) -> discord.HTTP
     """Build a discord HTTPException-family instance without hitting the network."""
     response = SimpleNamespace(status=status, reason="Test")
     return exc_cls(response, {"message": "synthetic"})
+
+
+class _SpyNullStore(NullTranscriptStore):
+    """A ``NullTranscriptStore`` that records its ``write_turn`` calls.
+
+    Lets a test assert the outbox NEVER attempts a write against a disabled
+    store — a precise check the no-op ``write_turn`` itself can't surface
+    (it returns ``None`` whether called or not). Behaviour is otherwise
+    identical to the base Null store (every read still misses, ``enabled``
+    stays ``False``)."""
+
+    def __init__(self) -> None:
+        self.write_calls: list[TranscriptRow] = []
+
+    async def write_turn(self, row: TranscriptRow) -> None:
+        self.write_calls.append(row)
+        return await super().write_turn(row)
 
 
 _CORRELATION_ID = "evt-1"
@@ -768,7 +789,10 @@ class TestTranscriptAndToggle:
         (``enabled=False``). A tool-using terminal reply must then attach NO
         toggle and write NO row — users never get a dead button with no row
         behind it. The reply itself still posts."""
-        null_store = NullTranscriptStore()
+        # Spy on write_turn so we assert the outbox NEVER ATTEMPTS a write
+        # against a disabled store — stronger than checking that a read
+        # misses afterwards (a no-op write would also leave the read empty).
+        null_store = _SpyNullStore()
         consumer = build_outbox_consumer(
             persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=null_store
         )
@@ -786,5 +810,57 @@ class TestTranscriptAndToggle:
         # the turn using tools.
         persona_sender.send.assert_awaited_once()
         assert persona_sender.send.call_args.kwargs["extra_buttons"] is None
-        # And the Null store recorded nothing — the lookup misses.
-        assert await null_store.get_by_final_message_id("99999") is None
+        # The outbox never called write_turn on the disabled store.
+        assert null_store.write_calls == []
+
+    async def test_chunked_fallback_disabled_store_attaches_no_toggle_and_writes_no_row(
+        self,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The retry-exhaustion chunked fallback honours the disabled-store
+        gate too: with a ``NullTranscriptStore`` the FIRST chunk carries no
+        toggle (``extra_buttons is None``) and NO transcript write is
+        attempted — even though the turn used tools."""
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        # Exhaust the agent-retry budget so an agent-fixable 400 falls
+        # straight through to the chunk-split fallback.
+        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+
+        for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
+            pending_wires.increment_retry(_CORRELATION_ID)
+
+        persona_sender = AsyncMock()
+        first_chunk = SentMessage(id=70001, channel_id=6789)
+        rest_chunk = SentMessage(id=70002, channel_id=6789)
+        # First send (the reply) fails agent-fixably; the chunk-split posts
+        # then succeed.
+        persona_sender.send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 400),
+                first_chunk,
+                rest_chunk,
+            ]
+        )
+
+        null_store = _SpyNullStore()
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=null_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="x" * 3000,  # forces ≥2 chunks
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # The first chunk carried no toggle (disabled store gates it off).
+        chunk_calls = persona_sender.send.call_args_list[1:]
+        assert chunk_calls[0].kwargs["extra_buttons"] is None
+        # No transcript write was attempted against the disabled store.
+        assert null_store.write_calls == []

@@ -180,7 +180,11 @@ class StepsToggleView(discord.ui.View):
 
         message = interaction.message
         if message is None:
-            logger.debug("steps view: interaction carried no message; ignoring")
+            # Post-defer: the ephemeral "thinking" spinner is already
+            # showing, so we MUST land a followup rather than returning
+            # silently — a bare return leaves the spinner hung forever.
+            logger.debug("steps view: interaction carried no message; sending an unavailable followup")
+            await self._safe_followup(interaction, content="Step details are unavailable for this message.")
             return
 
         row = await self._store.get_by_final_message_id(str(message.id))
@@ -188,7 +192,22 @@ class StepsToggleView(discord.ui.View):
             await self._safe_followup(interaction, content="Step details are no longer available.")
             return
 
-        text, _count = render_steps(row.delta_json)
+        # render_steps can raise: ModelMessagesTypeAdapter.validate_json
+        # blows up on a corrupt blob, and _render_delta's
+        # ToolCallPart.args_as_json_str blows up on malformed tool-call
+        # args. Either would otherwise escape the callback AFTER the defer,
+        # hanging the ephemeral spinner. Mirror the outbox's
+        # _render_step_count guard: log + send an error followup instead.
+        try:
+            text, _count = render_steps(row.delta_json)
+        except Exception:
+            logger.exception(
+                "steps view: failed to render stored delta message_id=%s; "
+                "sending an error followup instead of hanging the interaction",
+                message.id,
+            )
+            await self._safe_followup(interaction, content="Could not render the steps for this response.")
+            return
         if not text:
             await self._safe_followup(interaction, content="This response recorded no steps.")
             return
@@ -219,7 +238,10 @@ class StepsToggleView(discord.ui.View):
         try:
             await interaction.followup.send(content=content, file=file, ephemeral=True)
         except discord.HTTPException:
+            # Log whether a file rode the send so an oversized-steps.md 413
+            # (file-only path) is distinguishable from a content-send failure.
             logger.warning(
-                "steps view: followup.send failed message_id=%s",
+                "steps view: followup.send failed message_id=%s file=%s",
                 getattr(interaction.message, "id", None),
+                file is not discord.utils.MISSING,
             )

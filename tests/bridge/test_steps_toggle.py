@@ -32,6 +32,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     TextPart,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
 
 from calfkit_organization.bridge.steps_toggle import (
@@ -266,6 +267,100 @@ async def test_callback_missing_row_sends_ephemeral_followup(tmp_path: pathlib.P
         kwargs = interaction.followup.send.call_args.kwargs
         assert kwargs["ephemeral"] is True
         assert kwargs["content"] == "Step details are no longer available."
+    finally:
+        await store.close()
+
+
+async def test_callback_render_failure_sends_error_followup(tmp_path: pathlib.Path) -> None:
+    """A row whose ``delta_json`` is corrupt/unparseable must NOT escape the
+    callback after the defer. ``render_steps`` raises (``validate_json`` on a
+    bad blob); the callback catches it, sends ONE ephemeral error followup,
+    and never raises — so the ephemeral "thinking" spinner always resolves."""
+    store = TranscriptStore(tmp_path / "state" / "transcripts.sqlite3")
+    await store.connect()
+    bad_message_id = 50505
+    # A blob that ModelMessagesTypeAdapter.validate_json cannot parse: the
+    # write goes in fine (delta_json is opaque TEXT to the store), but the
+    # toggle click's render blows up.
+    await store.write_turn(
+        TranscriptRow(
+            correlation_id="corr-bad",
+            conversation_key="chan-100",
+            agent_id="scheduler",
+            final_message_id=str(bad_message_id),
+            delta_json="not valid model-messages json {{{",
+            created_at=1000,
+        )
+    )
+    try:
+        view = StepsToggleView(store)
+        button = _button(view)
+        interaction = _fake_interaction(message_id=bad_message_id)
+        # Must not raise out of the callback.
+        await button.callback(interaction)
+
+        # Deferred ephemerally exactly once, then exactly one error followup.
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert kwargs["content"] == "Could not render the steps for this response."
+    finally:
+        await store.close()
+
+
+async def test_callback_message_none_sends_unavailable_followup(store: TranscriptStore) -> None:
+    """An interaction that carries no message must still land a followup after
+    the defer — a bare return would hang the ephemeral spinner forever. The
+    callback sends the "unavailable for this message" followup and never
+    raises."""
+    try:
+        view = StepsToggleView(store)
+        button = _button(view)
+        interaction = _fake_interaction()
+        interaction.message = None
+        # Must not raise.
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert kwargs["content"] == "Step details are unavailable for this message."
+    finally:
+        await store.close()
+
+
+async def test_callback_empty_steps_sends_no_steps_followup(tmp_path: pathlib.Path) -> None:
+    """A row whose ``delta_json`` renders to ZERO steps (a bare
+    ``ModelRequest([UserPromptPart])`` — no tool calls, no interim text)
+    sends the exact "no steps" followup ephemerally, never a file."""
+    store = TranscriptStore(tmp_path / "state" / "transcripts.sqlite3")
+    await store.connect()
+    empty_message_id = 60606
+    empty_delta = [ModelRequest(parts=[UserPromptPart(content="weather in tokyo?")])]
+    await store.write_turn(
+        TranscriptRow(
+            correlation_id="corr-empty",
+            conversation_key="chan-100",
+            agent_id="scheduler",
+            final_message_id=str(empty_message_id),
+            delta_json=ModelMessagesTypeAdapter.dump_json(empty_delta).decode(),
+            created_at=1000,
+        )
+    )
+    try:
+        view = StepsToggleView(store)
+        button = _button(view)
+        interaction = _fake_interaction(message_id=empty_message_id)
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert kwargs["content"] == "This response recorded no steps."
+        assert kwargs["file"] is discord.utils.MISSING
     finally:
         await store.close()
 
