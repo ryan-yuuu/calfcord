@@ -415,14 +415,20 @@ def main() -> None:
                     # bounds growth without a background task. Disabled when
                     # the setting is <= 0 (keep forever).
                     if settings.transcript_retention_days > 0:
-                        cutoff = int(time.time()) - settings.transcript_retention_days * 86400
-                        pruned = await transcript_store.prune_older_than(cutoff)
-                        if pruned:
-                            logger.info(
-                                "pruned %d transcript row(s) older than %d days",
-                                pruned,
-                                settings.transcript_retention_days,
-                            )
+                        # Best-effort: retention is housekeeping, so a prune
+                        # failure must never abort bridge startup (which would
+                        # take down all Discord routing, not just transcripts).
+                        try:
+                            cutoff = int(time.time()) - settings.transcript_retention_days * 86400
+                            pruned = await transcript_store.prune_older_than(cutoff)
+                            if pruned:
+                                logger.info(
+                                    "pruned %d transcript row(s) older than %d days",
+                                    pruned,
+                                    settings.transcript_retention_days,
+                                )
+                        except Exception:
+                            logger.exception("transcript retention prune failed at startup; continuing")
                     # Construct the gateway early so its SlashCommandManager
                     # exists before we register the state consumer — the
                     # state consumer's callbacks must point at
