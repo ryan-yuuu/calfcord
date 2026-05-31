@@ -43,10 +43,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Final
+import time
+from typing import Any, Final
 
 import discord
 from calfkit import ConsumerNodeDef, NodeResult
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from calfkit.client import Client
 from calfkit.models import SessionRunContext
 
@@ -56,6 +58,9 @@ from calfkit_organization.agents.phonebook import (
 )
 from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.bridge.steps import _render_delta
+from calfkit_organization.bridge.steps_toggle import build_toggle_button
+from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import (
@@ -65,7 +70,7 @@ from calfkit_organization.discord.persona import (
 )
 from calfkit_organization.discord.retry_feedback import (
     MAX_REPLY_RETRY_ATTEMPTS,
-    NON_AGENT_FIXABLE_STATUSES,
+    NON_AGENT_FIXABLE_STATUSES,  # noqa: F401  re-export pinned by TestRetryFeedbackSharedSymbols
     build_retry_history,
     build_retry_reminder,
     chunk_split,
@@ -100,6 +105,7 @@ def build_outbox_consumer(
     pending_wires: PendingWires,
     calfkit_client: Client,
     *,
+    transcript_store: TranscriptStoreLike,
     subscribe_topic: str = DEFAULT_OUTBOX_TOPIC,
     node_id: str = DEFAULT_CONSUMER_NODE_ID,
 ) -> ConsumerNodeDef[str]:
@@ -124,6 +130,16 @@ def build_outbox_consumer(
             outbox's "fire-and-forget cancel" of the retry's
             ``InvocationHandle._future`` matches the existing
             ingress pattern.
+        transcript_store: Bridge-local SQLite store and the SOLE
+            transcript writer. On the terminal hop, when the turn used
+            tools (the structured slice ``message_history[initial_len:-1]``
+            renders to at least one step) AND the store is ``enabled``,
+            the consumer attaches the expand toggle to the reply and —
+            *after* a successful post — writes the complete transcript row
+            keyed on ``correlation_id``. Pure-text turns write no row. When
+            the store failed to open (a :class:`NullTranscriptStore` with
+            ``enabled=False``), neither the toggle nor the write happens —
+            so users never get a dead button with no row behind it.
         subscribe_topic: Topic the consumer listens on. Defaults to
             the project-wide ``discord.outbox``. Overridable for tests.
         node_id: Identifier the Worker uses as the Kafka consumer
@@ -152,8 +168,7 @@ def build_outbox_consumer(
             # bridge restarted and lost the pending entry. DEBUG because
             # the latter is a normal-operations scenario.
             logger.debug(
-                "outbox saw correlation_id=%s emitter=%s with no pending "
-                "entry; skipping",
+                "outbox saw correlation_id=%s emitter=%s with no pending entry; skipping",
                 result.correlation_id,
                 result.emitter_node_id,
             )
@@ -187,6 +202,22 @@ def build_outbox_consumer(
             )
             return
 
+        # Structured slice of THIS turn (the cumulative terminal
+        # message_history minus the channel-history prefix and minus the
+        # final answer ModelResponse). When it renders to at least one
+        # step, the turn used tools / emitted interim text → attach the
+        # expand toggle and (after a successful post) write the durable
+        # transcript. A pure-text turn renders to an empty list and
+        # behaves exactly as before (no toggle, no row). The
+        # ``transcript_store.enabled`` gate suppresses both when the store
+        # failed to open (a NullTranscriptStore) — no dead button users
+        # could click with no row behind it.
+        delta = _turn_delta(result, entry)
+        rendered = _render_step_count(delta, wire)
+        extra_buttons: list[discord.ui.Button[Any]] | None = (
+            [build_toggle_button(rendered)] if rendered and transcript_store.enabled else None
+        )
+
         persona = Persona(name=spec.display_name, avatar_url=spec.avatar_url)
         try:
             sent = await _send_with_one_retry_on_outage(
@@ -195,6 +226,7 @@ def build_outbox_consumer(
                 channel_id=wire.channel_id,
                 content=text,
                 reply_to=ReplyContext.from_wire(wire),
+                extra_buttons=extra_buttons,
             )
         except discord.DiscordException as e:
             # Catch ``DiscordException`` (not just ``HTTPException``) so
@@ -215,14 +247,33 @@ def build_outbox_consumer(
                 persona_sender=persona_sender,
                 pending_wires=pending_wires,
                 registry=registry,
+                transcript_store=transcript_store,
+                correlation_id=result.correlation_id,
+                turn_delta=delta if rendered and transcript_store.enabled else None,
             )
             return
+
+        # Successful post. If the turn used tools (and the store is
+        # enabled), persist the transcript row keyed on correlation_id
+        # (idempotent on outbox retries). This is the single success
+        # point — a turn that dropped / stayed retry-pending writes no
+        # row, so the toggle on its (never-posted) reply has nothing to
+        # read, which is the documented degradation. A disabled store
+        # (NullTranscriptStore) writes nothing and got no toggle above.
+        if rendered and transcript_store.enabled:
+            await _write_transcript(
+                transcript_store,
+                correlation_id=result.correlation_id,
+                wire=wire,
+                agent_id=result.emitter_node_id,
+                final_message_id=sent.id,
+                delta=delta,
+            )
 
         retry_attempt = pending_wires.get_retry_count(result.correlation_id)
         if retry_attempt > 0:
             logger.info(
-                "agent retry succeeded after %d attempt(s) event_id=%s "
-                "agent=%s reply_id=%s channel=%s",
+                "agent retry succeeded after %d attempt(s) event_id=%s agent=%s reply_id=%s channel=%s",
                 retry_attempt,
                 wire.event_id,
                 result.emitter_node_id,
@@ -254,6 +305,7 @@ async def _send_with_one_retry_on_outage(
     channel_id: int,
     content: str,
     reply_to: ReplyContext | None,
+    extra_buttons: list[discord.ui.Button[Any]] | None = None,
 ) -> SentMessage:
     """Send via the persona webhook with one extra attempt on 5xx.
 
@@ -275,6 +327,9 @@ async def _send_with_one_retry_on_outage(
           immediately.
         - Second-attempt failure (whatever kind) → re-raised.
 
+    ``extra_buttons`` (e.g. the step-transcript expand toggle) are
+    forwarded verbatim on both attempts so a 5xx-then-success reply
+    still carries the toggle.
     """
     try:
         return await persona_sender.send(
@@ -282,11 +337,14 @@ async def _send_with_one_retry_on_outage(
             channel_id=channel_id,
             content=content,
             reply_to=reply_to,
+            extra_buttons=extra_buttons,
         )
     except discord.DiscordServerError as e:
         logger.warning(
             "discord 5xx on persona post; retrying once after %.1fs status=%s: %s",
-            _SERVER_ERROR_RETRY_DELAY_SECONDS, e.status, e,
+            _SERVER_ERROR_RETRY_DELAY_SECONDS,
+            e.status,
+            e,
         )
 
     # 5xx on first attempt; sleep + retry. Any failure on the retry
@@ -297,8 +355,95 @@ async def _send_with_one_retry_on_outage(
         channel_id=channel_id,
         content=content,
         reply_to=reply_to,
+        extra_buttons=extra_buttons,
     )
 
+
+def _turn_delta(result: NodeResult[str], entry: PendingEntry) -> list[ModelMessage]:
+    """Return THIS turn's structured slice of the cumulative history.
+
+    The terminal ``message_history`` is cumulative (append-only). The
+    turn's transcript is everything after the channel-history prefix
+    (``entry.initial_message_history_length``) and before the trailing
+    final-answer ``ModelResponse`` — i.e. ``[initial_len:-1]``. The
+    outbox posts that final answer's text to the channel; the slice is
+    the tool calls / returns / interim text the agent produced getting
+    there. Mirrors the steps consumer's terminal-hop slice so the toggle
+    and the live counter render the same parts.
+
+    Returns ``[]`` for a pure-text turn (history is just the prefix plus
+    the final answer, so the slice is empty).
+    """
+    history = result.message_history
+    initial_len = entry.initial_message_history_length
+    if not history:
+        return []
+    return list(history[initial_len:-1])
+
+
+def _render_step_count(delta: list[ModelMessage], wire: WireMessage) -> int:
+    """Count the renderable step parts in ``delta``, defensively.
+
+    Wraps :func:`~calfkit_organization.bridge.steps._render_delta` (which
+    can raise — ``ToolCallPart.args_as_json_str`` blows up on malformed
+    args) so a single bad turn never crashes the reply post. On failure the
+    turn is treated as having zero steps: the reply still posts, just
+    without the toggle or a transcript row (degraded, not fatal). Mirrors
+    the steps consumer's identical guard.
+    """
+    try:
+        return len(_render_delta(delta))
+    except Exception:
+        logger.exception(
+            "outbox _render_delta raised computing step count event_id=%s; posting reply without toggle/transcript",
+            wire.event_id,
+        )
+        return 0
+
+
+async def _write_transcript(
+    transcript_store: TranscriptStoreLike,
+    *,
+    correlation_id: str,
+    wire: WireMessage,
+    agent_id: str,
+    final_message_id: int,
+    delta: list[ModelMessage],
+) -> None:
+    """Persist the completed turn's transcript row (the SOLE writer).
+
+    Called only after a successful reply post, with a non-empty
+    ``delta``. Serializes the slice with pydantic-ai's
+    ``ModelMessagesTypeAdapter`` and upserts keyed on ``correlation_id``
+    (idempotent across outbox retries). ``conversation_key`` is the
+    thread-aware source channel (``wire.source_channel_id`` when the wire
+    originated in a thread, else the parent ``wire.channel_id``).
+
+    Best-effort: a store failure must not crash the consumer or undo the
+    already-posted reply, so it is logged and swallowed.
+    """
+    try:
+        delta_json = ModelMessagesTypeAdapter.dump_json(delta).decode()
+        await transcript_store.write_turn(
+            TranscriptRow(
+                correlation_id=correlation_id,
+                conversation_key=str(wire.source_channel_id or wire.channel_id),
+                agent_id=str(agent_id),
+                final_message_id=str(final_message_id),
+                delta_json=delta_json,
+                created_at=int(time.time()),
+            )
+        )
+    except Exception:
+        # Never let a transcript-write failure escape into the calfkit
+        # consumer framework — the reply is already posted; the steps
+        # toggle on it would simply read no row (the documented
+        # missing-row degradation).
+        logger.exception(
+            "outbox failed to write transcript correlation_id=%s reply_id=%s; step toggle will have no row to expand",
+            correlation_id,
+            final_message_id,
+        )
 
 
 # --- Retry-with-feedback path -------------------------------------------------
@@ -315,6 +460,9 @@ async def _handle_post_failure(
     persona_sender: DiscordPersonaSender,
     pending_wires: PendingWires,
     registry: AgentRegistry,
+    transcript_store: TranscriptStoreLike,
+    correlation_id: str,
+    turn_delta: list[ModelMessage] | None,
 ) -> None:
     """Triage a Discord post failure into one of four branches:
 
@@ -345,6 +493,11 @@ async def _handle_post_failure(
     :class:`BaseException`, not :class:`Exception`) propagates by
     design — a bridge shutdown should not be blocked by retry
     fallback logic.
+
+    ``turn_delta`` is the turn's structured slice when it used tools
+    (else ``None``). It is forwarded only to :func:`_post_chunked_fallback`:
+    when the fallback actually delivers, it attaches the expand toggle to
+    the FIRST chunk and writes the transcript with that chunk's id.
     """
     wire = entry.wire
     decision = classify_error(error)
@@ -361,37 +514,51 @@ async def _handle_post_failure(
                 "outbox post failed channel_id=%s event_id=%s agent=%s: "
                 "discord.py rate-limit backoff exhausted (%s); operator "
                 "should investigate burst traffic patterns",
-                wire.channel_id, wire.event_id, agent_id, error,
+                wire.channel_id,
+                wire.event_id,
+                agent_id,
+                error,
             )
         elif not isinstance(error, discord.HTTPException):
             # A ``DiscordException`` that's neither ``RateLimited`` nor
             # ``HTTPException`` is something discord.py added since we
             # last looked.
             logger.warning(
-                "outbox post failed channel_id=%s event_id=%s agent=%s: "
-                "unrecognized discord exception type=%s (%s)",
-                wire.channel_id, wire.event_id, agent_id,
-                type(error).__name__, error,
+                "outbox post failed channel_id=%s event_id=%s agent=%s: unrecognized discord exception type=%s (%s)",
+                wire.channel_id,
+                wire.event_id,
+                agent_id,
+                type(error).__name__,
+                error,
             )
         elif error.status == 404:
             logger.warning(
                 "outbox post failed channel_id=%s event_id=%s agent=%s: "
                 "channel or webhook not found (%s); operator must check "
                 "the channel exists",
-                wire.channel_id, wire.event_id, agent_id, error,
+                wire.channel_id,
+                wire.event_id,
+                agent_id,
+                error,
             )
         elif error.status == 403:
             logger.warning(
                 "outbox post failed channel_id=%s event_id=%s agent=%s: "
                 "forbidden (%s); operator must verify Manage Webhooks "
                 "permission",
-                wire.channel_id, wire.event_id, agent_id, error,
+                wire.channel_id,
+                wire.event_id,
+                agent_id,
+                error,
             )
         else:
             logger.warning(
-                "outbox post failed (not retryable) channel_id=%s "
-                "event_id=%s agent=%s status=%s: %s",
-                wire.channel_id, wire.event_id, agent_id, error.status, error,
+                "outbox post failed (not retryable) channel_id=%s event_id=%s agent=%s status=%s: %s",
+                wire.channel_id,
+                wire.event_id,
+                agent_id,
+                error.status,
+                error,
             )
         return
 
@@ -410,8 +577,11 @@ async def _handle_post_failure(
         logger.error(
             "classify_error invariant violated: returned %r for non-HTTPException "
             "type=%s on channel_id=%s event_id=%s agent=%s; dropping",
-            decision, type(error).__name__,
-            wire.channel_id, wire.event_id, agent_id,
+            decision,
+            type(error).__name__,
+            wire.channel_id,
+            wire.event_id,
+            agent_id,
         )
         return
 
@@ -419,9 +589,12 @@ async def _handle_post_failure(
         # 5xx survived _send_with_one_retry_on_outage's smoothing.
         # Discord is down; agent retry can't help.
         logger.warning(
-            "outbox post failed channel_id=%s event_id=%s agent=%s "
-            "status=%s: discord 5xx + extra retry exhausted (%s)",
-            wire.channel_id, wire.event_id, agent_id, error.status, error,
+            "outbox post failed channel_id=%s event_id=%s agent=%s status=%s: discord 5xx + extra retry exhausted (%s)",
+            wire.channel_id,
+            wire.event_id,
+            agent_id,
+            error.status,
+            error,
         )
         return
 
@@ -431,12 +604,24 @@ async def _handle_post_failure(
     # Branch 2: retry budget exhausted → chunk-split fallback.
     if retry_count >= MAX_REPLY_RETRY_ATTEMPTS:
         logger.warning(
-            "retry budget exhausted attempt=%d max=%d; chunk-splitting "
-            "reply event_id=%s agent=%s status=%s: %s",
-            retry_count, MAX_REPLY_RETRY_ATTEMPTS,
-            wire.event_id, agent_id, error.status, error,
+            "retry budget exhausted attempt=%d max=%d; chunk-splitting reply event_id=%s agent=%s status=%s: %s",
+            retry_count,
+            MAX_REPLY_RETRY_ATTEMPTS,
+            wire.event_id,
+            agent_id,
+            error.status,
+            error,
         )
-        await _post_chunked_fallback(persona_sender, persona, wire, failed_text)
+        await _post_chunked_fallback(
+            persona_sender,
+            persona,
+            wire,
+            failed_text,
+            transcript_store=transcript_store,
+            correlation_id=correlation_id,
+            agent_id=agent_id,
+            turn_delta=turn_delta,
+        )
         return
 
     # Branch 3: agent retry. Claim the attempt atomically; the LRU
@@ -445,18 +630,30 @@ async def _handle_post_failure(
     new_attempt = pending_wires.increment_retry(wire.event_id)
     if new_attempt is None:
         logger.warning(
-            "pending entry evicted before retry could be claimed; "
-            "chunk-splitting event_id=%s agent=%s",
-            wire.event_id, agent_id,
+            "pending entry evicted before retry could be claimed; chunk-splitting event_id=%s agent=%s",
+            wire.event_id,
+            agent_id,
         )
-        await _post_chunked_fallback(persona_sender, persona, wire, failed_text)
+        await _post_chunked_fallback(
+            persona_sender,
+            persona,
+            wire,
+            failed_text,
+            transcript_store=transcript_store,
+            correlation_id=correlation_id,
+            agent_id=agent_id,
+            turn_delta=turn_delta,
+        )
         return
 
     logger.info(
-        "outbox post failed; triggering agent retry attempt=%d "
-        "channel_id=%s event_id=%s agent=%s status=%s: %s",
-        new_attempt, wire.channel_id, wire.event_id, agent_id,
-        error.status, error,
+        "outbox post failed; triggering agent retry attempt=%d channel_id=%s event_id=%s agent=%s status=%s: %s",
+        new_attempt,
+        wire.channel_id,
+        wire.event_id,
+        agent_id,
+        error.status,
+        error,
     )
 
     try:
@@ -471,11 +668,20 @@ async def _handle_post_failure(
         # publish) so a future retry attempt for the same wire would
         # correctly see the higher count if one ever fired.
         logger.exception(
-            "retry publish failed event_id=%s agent=%s; "
-            "falling back to chunk-split",
-            wire.event_id, agent_id,
+            "retry publish failed event_id=%s agent=%s; falling back to chunk-split",
+            wire.event_id,
+            agent_id,
         )
-        await _post_chunked_fallback(persona_sender, persona, wire, failed_text)
+        await _post_chunked_fallback(
+            persona_sender,
+            persona,
+            wire,
+            failed_text,
+            transcript_store=transcript_store,
+            correlation_id=correlation_id,
+            agent_id=agent_id,
+            turn_delta=turn_delta,
+        )
 
 
 async def _publish_retry(
@@ -568,7 +774,9 @@ async def _publish_retry(
                 "handle._future.cancel() raised on retry publish "
                 "event_id=%s agent=%s; pending-future leak possible "
                 "but publish already succeeded",
-                wire.event_id, agent_id, exc_info=True,
+                wire.event_id,
+                agent_id,
+                exc_info=True,
             )
 
 
@@ -577,6 +785,11 @@ async def _post_chunked_fallback(
     persona: Persona,
     wire: WireMessage,
     text: str,
+    *,
+    transcript_store: TranscriptStoreLike,
+    correlation_id: str,
+    agent_id: str,
+    turn_delta: list[ModelMessage] | None,
 ) -> None:
     """Final fallback: split ``text`` into ≤2000-char chunks and post
     each as the same persona.
@@ -585,6 +798,12 @@ async def _post_chunked_fallback(
     appears as a "reply to" the user's original question; subsequent
     chunks are bare continuations from the same persona, which
     Discord renders as natural follow-ups directly below the first.
+
+    When ``turn_delta`` is non-empty (the turn used tools), the expand
+    toggle is attached to the FIRST chunk only and — if that first chunk
+    posts successfully — the transcript row is written against the first
+    chunk's id, so the toggle has a row to expand. Subsequent chunks are
+    unchanged. A first-chunk failure writes no row (no host message id).
 
     Per-chunk failures are logged independently so partial delivery
     is preserved (chunks 1 and 3 still post if chunk 2 fails). If
@@ -603,47 +822,78 @@ async def _post_chunked_fallback(
     chunks = chunk_split(text)
     if not chunks:
         logger.warning(
-            "chunk-split fallback received empty text; nothing to post "
-            "event_id=%s",
+            "chunk-split fallback received empty text; nothing to post event_id=%s",
             wire.event_id,
         )
         return
+
+    # Toggle rides the first chunk only when the turn used tools AND the
+    # store is enabled (a disabled NullTranscriptStore gets no toggle and
+    # no row — same gate as the main path). The step count is recomputed
+    # via the same defensive guard as the main path so a malformed-args
+    # turn can't crash the fallback.
+    write_transcript = bool(turn_delta) and transcript_store.enabled
+    first_chunk_buttons: list[discord.ui.Button[Any]] | None = (
+        [build_toggle_button(_render_step_count(turn_delta, wire))] if write_transcript else None
+    )
 
     total = len(chunks)
     failure_statuses: list[int | None] = []
     for i, chunk in enumerate(chunks):
         reply_to = ReplyContext.from_wire(wire) if i == 0 else None
+        extra_buttons = first_chunk_buttons if i == 0 else None
         try:
             sent = await persona_sender.send(
                 persona=persona,
                 channel_id=wire.channel_id,
                 content=chunk,
                 reply_to=reply_to,
+                extra_buttons=extra_buttons,
             )
             logger.info(
-                "chunk-split posted chunk %d/%d event_id=%s reply_id=%s "
-                "channel_id=%s",
-                i + 1, total, wire.event_id, sent.id, wire.channel_id,
+                "chunk-split posted chunk %d/%d event_id=%s reply_id=%s channel_id=%s",
+                i + 1,
+                total,
+                wire.event_id,
+                sent.id,
+                wire.channel_id,
             )
+            if i == 0 and write_transcript and turn_delta:
+                # First chunk delivered and the turn used tools (store
+                # enabled): persist the transcript against this chunk's id
+                # so its toggle can expand.
+                await _write_transcript(
+                    transcript_store,
+                    correlation_id=correlation_id,
+                    wire=wire,
+                    agent_id=agent_id,
+                    final_message_id=sent.id,
+                    delta=turn_delta,
+                )
         except discord.DiscordException as e:
             status = getattr(e, "status", None)
             failure_statuses.append(status)
             logger.error(
-                "chunk-split failed chunk %d/%d event_id=%s channel_id=%s "
-                "status=%s: %s",
-                i + 1, total, wire.event_id, wire.channel_id, status, e,
+                "chunk-split failed chunk %d/%d event_id=%s channel_id=%s status=%s: %s",
+                i + 1,
+                total,
+                wire.event_id,
+                wire.channel_id,
+                status,
+                e,
             )
 
     if failure_statuses and len(failure_statuses) == total:
         # All chunks failed. Surface a single summary signal so the
         # operator doesn't have to manually aggregate N ERROR lines.
         # Use the most-common status; ties broken by first occurrence.
-        dominant_status = max(
-            set(failure_statuses), key=failure_statuses.count
-        )
+        dominant_status = max(set(failure_statuses), key=failure_statuses.count)
         logger.warning(
             "chunk-split delivered 0/%d chunks event_id=%s channel_id=%s "
             "dominant_status=%s; reply is fully lost — operator should "
             "verify channel permissions and webhook health",
-            total, wire.event_id, wire.channel_id, dominant_status,
+            total,
+            wire.event_id,
+            wire.channel_id,
+            dominant_status,
         )

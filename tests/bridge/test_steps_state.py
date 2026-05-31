@@ -1,8 +1,9 @@
 """Unit tests for ``StepsState`` (bounded LRU) and ``StepsEntry``
-(per-correlation transcript cursor + thread cache)."""
+(per-correlation progress cursor + progress-message cache)."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -10,11 +11,16 @@ import pytest
 from calfkit_organization.bridge.steps_state import StepsEntry, StepsState
 
 
-def _entry(thread_id: int | None = None, history_cursor: int = 0) -> StepsEntry:
+def _entry(
+    progress_message_id: int | None = None,
+    history_cursor: int = 0,
+    step_count: int = 0,
+) -> StepsEntry:
     return StepsEntry(
         parent_channel_id=10,
         parent_message_id=20,
-        thread_id=thread_id,
+        progress_message_id=progress_message_id,
+        step_count=step_count,
         history_cursor=history_cursor,
     )
 
@@ -54,7 +60,8 @@ class TestBasic:
     def test_pop_and_mark_completed_marks_even_without_entry(self) -> None:
         """A terminal hop on a correlation that never had an active entry
         (pure-text reply with no intermediates) still records completion
-        so a retry of that correlation doesn't seed a fresh transcript."""
+        so a retry of that correlation doesn't seed a fresh progress
+        message."""
         s = StepsState()
         assert s.pop_and_mark_completed("never-seen") is None
         assert s.is_completed("never-seen")
@@ -141,22 +148,47 @@ class TestLRU:
         s.put("a", _entry())
         with caplog.at_level(logging.WARNING):
             s.put("b", _entry())
-        assert any(
-            "steps_state evicted" in r.message and "correlation_id=a" in r.message
-            for r in caplog.records
-        )
+        assert any("steps_state evicted" in r.message and "correlation_id=a" in r.message for r in caplog.records)
+
+    async def test_eviction_cancels_evicted_debounce_task(self) -> None:
+        """The oldest entry's in-flight debounce task is cancelled on
+        eviction so the orphaned trailing-edit coroutine doesn't leak after
+        its tracking entry is gone."""
+        s = StepsState(capacity=1)
+        # A real pending task standing in for the entry's live debounce
+        # timer (a long sleep that will never naturally fire in the test).
+        pending = asyncio.create_task(asyncio.sleep(3600))
+        try:
+            victim = _entry()
+            victim.debounce_task = pending
+            s.put("a", victim)
+            assert not pending.cancelled()  # still alive while resident
+            # Push past capacity → "a" is evicted and its task cancelled.
+            s.put("b", _entry())
+            # cancel() is synchronous request; let the loop process it so
+            # the task transitions to the cancelled state.
+            await asyncio.sleep(0)
+            assert pending.cancelled()
+        finally:
+            if not pending.done():
+                pending.cancel()
 
 
 class TestEntry:
-    def test_default_thread_id_and_cursor(self) -> None:
+    def test_defaults(self) -> None:
         e = StepsEntry(parent_channel_id=1, parent_message_id=2)
-        assert e.thread_id is None
+        assert e.progress_message_id is None
+        assert e.step_count == 0
         assert e.history_cursor == 0
+        assert e.debounce_task is None
 
     def test_entry_is_mutable(self) -> None:
-        """thread_id and history_cursor advance across hops."""
+        """progress_message_id, step_count, and history_cursor advance
+        across hops."""
         e = _entry()
-        e.thread_id = 999
+        e.progress_message_id = 999
+        e.step_count = 3
         e.history_cursor = 5
-        assert e.thread_id == 999
+        assert e.progress_message_id == 999
+        assert e.step_count == 3
         assert e.history_cursor == 5

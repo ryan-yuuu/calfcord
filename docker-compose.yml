@@ -110,6 +110,15 @@ services:
       # Override .env so this service always dials the in-network
       # broker regardless of what the host-side .env says.
       CALF_HOST_URL: redpanda:9092
+    volumes:
+      # Bridge-local SQLite transcript store (DISCORD_TRANSCRIPT_DB_PATH,
+      # default state/transcripts.sqlite3): step transcripts + tool-call
+      # replay. Persistent so transcripts survive restarts/redeploys; the
+      # bridge is the sole reader/writer. WAL mode writes -wal/-shm sidecar
+      # files alongside the DB, so the directory (not a single file) is
+      # mounted. Distinct sub-path from the agent's state/agents/*.json, so
+      # both services can share ./state without conflict.
+      - ./state:/app/state
 
   # One or more LLM-backed agent nodes. Defaults to "all agents in one
   # Worker"; for crash isolation per agent, override ``command:`` to

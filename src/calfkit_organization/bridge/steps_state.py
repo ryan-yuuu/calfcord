@@ -3,26 +3,31 @@
 The bridge's steps consumer
 (:func:`calfkit_organization.bridge.steps.build_steps_consumer`) needs
 to remember, across the multiple hops of a single agent invocation, which
-Discord parent message the steps belong to and how far through the
-agent's running ``message_history`` we've already streamed. Holding that
-state in a per-correlation entry lets the consumer treat each inbound
-envelope as a stateless delta against the cursor.
+Discord parent message the steps belong to, how far through the agent's
+running ``message_history`` we've already streamed, and how many steps it
+has rendered so far. Holding that state in a per-correlation entry lets the
+consumer treat each inbound envelope as a stateless delta against the
+cursor.
 
 **What's in a `StepsEntry`:**
 
 * ``parent_channel_id`` / ``parent_message_id`` — the user's original
-  Discord message. The thread is created off this message; intermediate
-  step posts target ``parent_channel_id`` with ``thread_id``.
-* ``source_content`` — snapshot of the user's prompt content from the
-  inbound wire, used as the thread title at create time. Snapshotted
-  rather than re-fetched so an edit between invocation and thread
-  creation doesn't change what the transcript is titled.
-* ``thread_id`` — populated lazily on the first hop that produces a
-  rendered step. ``None`` until then so a pure-text agent reply (no
-  intermediates) does not create an empty thread.
+  Discord message. The transient progress message is posted to
+  ``parent_channel_id``; ``parent_message_id`` is retained for the
+  thread-origin skip check and future use.
+* ``progress_message_id`` — populated lazily on the first hop that
+  produces a rendered step. ``None`` until then so a pure-text agent
+  reply (no intermediates) does not post an empty progress message.
+* ``step_count`` — running total of rendered parts across all hops. The
+  progress message renders ``⚙ running… N steps`` from this counter.
 * ``history_cursor`` — ``len(state.message_history)`` already processed.
   The consumer advances this on each hop so the next delta is
   ``message_history[history_cursor:]``.
+* ``debounce_task`` — the in-flight trailing-edit task handle, or
+  ``None``. At most one is pending per entry; subsequent hops bump
+  ``step_count`` and reuse the live task, which reads the latest count
+  at fire time. Cancelled on the terminal hop before the progress
+  message is deleted.
 
 The agent's persona deliberately lives **off** the entry. Co-tenant
 agents on an ambient channel topic all publish to ``agent.steps`` via
@@ -32,12 +37,12 @@ emitter's identity. The consumer resolves persona per-hop from
 ``result.emitter_node_id`` at post time — the same pattern
 :mod:`calfkit_organization.bridge.outbox` uses.
 
-``StepsEntry`` is **mutable** because ``thread_id`` and
-``history_cursor`` advance across hops. Entries are popped on the
-terminal hop (the one carrying ``state.final_output_parts``), so a
-clean run never leaves an entry behind. Bridge restarts strand entries
-in-process; the next hop after restart finds nothing and skips with a
-DEBUG log.
+``StepsEntry`` is **mutable** because ``progress_message_id``,
+``step_count``, ``history_cursor``, and ``debounce_task`` all advance
+across hops. Entries are popped on the terminal hop (the one carrying
+``state.final_output_parts``), so a clean run never leaves an entry
+behind. Bridge restarts strand entries in-process; the next hop after
+restart finds nothing and skips with a DEBUG log.
 
 Thread safety: the bridge runs on a single asyncio event loop and the
 steps consumer is single-worker by default, so all mutations are
@@ -47,6 +52,7 @@ or threads without an external lock.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -68,9 +74,10 @@ class StepsEntry:
 
     parent_channel_id: int
     parent_message_id: int
-    source_content: str = ""
-    thread_id: int | None = None
+    progress_message_id: int | None = None
+    step_count: int = 0
     history_cursor: int = 0
+    debounce_task: asyncio.Task[None] | None = None
 
 
 class StepsState:
@@ -89,14 +96,12 @@ class StepsState:
     :func:`~calfkit_organization.bridge.outbox._publish_retry`). Without
     a completion guard, the steps consumer would see the retry's first
     hop, find no active entry (the original terminal hop already popped
-    it), seed a fresh one, and create a second transcript thread off the
-    same parent message — the original is now locked and orphaned, the
-    new one inherits an even-longer prefix of "already-rendered" history.
-    Tracking completed correlation ids in a bounded LRU lets the consumer
-    cheaply detect "this is a retry hop; skip the entire steps surface."
-    The set is independent from the entries map and has its own capacity
-    so completion records don't get pushed out by a burst of unrelated
-    new invocations.
+    it), seed a fresh one, and post a second progress message off the
+    same parent channel. Tracking completed correlation ids in a bounded
+    LRU lets the consumer cheaply detect "this is a retry hop; skip the
+    entire steps surface." The set is independent from the entries map and
+    has its own capacity so completion records don't get pushed out by a
+    burst of unrelated new invocations.
     """
 
     def __init__(
@@ -108,9 +113,7 @@ class StepsState:
         if capacity <= 0:
             raise ValueError(f"capacity must be positive, got {capacity}")
         if completed_capacity <= 0:
-            raise ValueError(
-                f"completed_capacity must be positive, got {completed_capacity}"
-            )
+            raise ValueError(f"completed_capacity must be positive, got {completed_capacity}")
         self._capacity = capacity
         self._completed_capacity = completed_capacity
         self._entries: OrderedDict[str, StepsEntry] = OrderedDict()
@@ -126,7 +129,10 @@ class StepsState:
         Last-writer-wins on a duplicate id. If at capacity, evicts the
         oldest entry and logs a WARNING — its subsequent hops, if any
         later arrive, will be quietly dropped by the consumer (no entry
-        to look up).
+        to look up). The evicted entry's in-flight debounce task (if any)
+        is cancelled so it doesn't leak: its progress message is abandoned
+        anyway, and leaving the task pending would strand a coroutine that
+        edits a message no entry tracks.
         """
         if correlation_id in self._entries:
             self._entries[correlation_id] = entry
@@ -134,10 +140,14 @@ class StepsState:
             return
         self._entries[correlation_id] = entry
         if len(self._entries) > self._capacity:
-            evicted_id, _ = self._entries.popitem(last=False)
+            evicted_id, evicted = self._entries.popitem(last=False)
+            # Cancel (don't await — this is a sync method) the evicted
+            # entry's trailing-edit task so the orphaned debounce coroutine
+            # doesn't linger after its tracking entry is gone.
+            if evicted.debounce_task is not None and not evicted.debounce_task.done():
+                evicted.debounce_task.cancel()
             logger.warning(
-                "steps_state evicted correlation_id=%s (cap=%d); "
-                "any further hops for this invocation will be skipped",
+                "steps_state evicted correlation_id=%s (cap=%d); any further hops for this invocation will be skipped",
                 evicted_id,
                 self._capacity,
             )
@@ -158,7 +168,7 @@ class StepsState:
 
         Called by the consumer on the terminal hop. Adding the id to
         ``_completed`` is what prevents a later outbox-retry hop from
-        creating a second transcript thread for the same invocation.
+        posting a second progress message for the same invocation.
         Bounded by ``completed_capacity`` so a burst of completed
         correlations cannot grow the set without limit; the oldest
         completion records age out first.
@@ -166,8 +176,8 @@ class StepsState:
         entry = self._entries.pop(correlation_id, None)
         # Always record completion, even when the entry was never created
         # (pure-text reply with no intermediate hops). Otherwise a retry
-        # of such an invocation would create a thread the original run
-        # never had.
+        # of such an invocation would post a progress message the original
+        # run never had.
         self._completed[correlation_id] = None
         self._completed.move_to_end(correlation_id)
         while len(self._completed) > self._completed_capacity:
@@ -178,7 +188,7 @@ class StepsState:
         """Return ``True`` if this correlation has already passed a terminal hop.
 
         Used by the consumer's first-hop entry-creation guard to skip
-        outbox-retry hops without seeding a duplicate transcript thread.
+        outbox-retry hops without seeding a duplicate progress message.
         Touches recency so a retried correlation stays in the completed
         set long enough to absorb the retry's hops.
         """

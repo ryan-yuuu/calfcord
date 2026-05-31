@@ -55,6 +55,7 @@ def _gateway() -> DiscordIngressGateway:
         ingress=MagicMock(),
         registry=MagicMock(),
         calfkit_client=MagicMock(),
+        transcript_store=MagicMock(),
     )
 
 
@@ -85,27 +86,19 @@ class TestReplyEmptyRoster:
         assert "No assistant agents" in text
         assert "contact an operator" in text.lower()
 
-    async def test_logs_info_on_rejection(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_logs_info_on_rejection(self, caplog: pytest.LogCaptureFixture) -> None:
         """INFO log with the message_id makes the rejection
         correlatable to a user-reported "no reply"."""
         gateway = _gateway()
         message = _fake_message()
-        with caplog.at_level(
-            logging.INFO, logger="calfkit_organization.bridge.gateway"
-        ):
+        with caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"):
             await gateway._reply_empty_roster(message)
         assert any(
-            "rejected ambient publish" in r.message
-            and "empty roster" in r.message
-            and "12345" in r.message
+            "rejected ambient publish" in r.message and "empty roster" in r.message and "12345" in r.message
             for r in caplog.records
         )
 
-    async def test_swallows_http_exception(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_swallows_http_exception(self, caplog: pytest.LogCaptureFixture) -> None:
         """If Discord rejects the reply (rate-limit, deleted channel,
         etc.), the gateway logs and continues — matching the
         ``_reply_unknown_mention`` pattern. The caller is already in
@@ -120,19 +113,12 @@ class TestReplyEmptyRoster:
         fake_response = MagicMock()
         fake_response.status = 429
         fake_response.reason = "Too Many Requests"
-        message.reply = AsyncMock(
-            side_effect=discord.HTTPException(fake_response, "rate limited")
-        )
+        message.reply = AsyncMock(side_effect=discord.HTTPException(fake_response, "rate limited"))
 
-        with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.bridge.gateway"
-        ):
+        with caplog.at_level(logging.ERROR, logger="calfkit_organization.bridge.gateway"):
             # Must not raise — gateway swallows.
             await gateway._reply_empty_roster(message)
-        assert any(
-            "failed to send empty-roster reply" in r.message
-            for r in caplog.records
-        )
+        assert any("failed to send empty-roster reply" in r.message for r in caplog.records)
 
 
 class TestOnMessageEmptyRosterWiring:
@@ -168,11 +154,7 @@ class TestOnMessageEmptyRosterWiring:
         gateway._message_normalizer.normalize = MagicMock(return_value=fake_wire)
         gateway._bot_user_id = 0  # unique enough to bypass the self-message filter
 
-        gateway._ingress.handle = AsyncMock(
-            side_effect=AmbientRosterEmptyError(
-                event_id="evt-test", channel_id=6789
-            )
-        )
+        gateway._ingress.handle = AsyncMock(side_effect=AmbientRosterEmptyError(event_id="evt-test", channel_id=6789))
 
         # Spy on _reply_empty_roster so we don't actually touch
         # Discord — but call the real _on_message control flow.
@@ -248,9 +230,7 @@ class TestOnMessageIngressFailureWiring:
 
         # Simulate a broker-level failure that isn't
         # AmbientRosterEmptyError.
-        gateway._ingress.handle = AsyncMock(
-            side_effect=RuntimeError("kafka broker unreachable")
-        )
+        gateway._ingress.handle = AsyncMock(side_effect=RuntimeError("kafka broker unreachable"))
 
         reply_spy = AsyncMock()
         monkeypatch.setattr(gateway, "_reply_ingress_failure", reply_spy)
@@ -351,13 +331,13 @@ class TestOnReadyInjectsFetcher:
         # Patch the client.user attribute (populated by Discord after
         # handshake) so _on_ready's assertion holds.
         fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
-        with patch.object(
-            type(gateway._client), "user", new=fake_user, create=True
-        ), patch.object(
-            gateway._slash, "sync", new=AsyncMock(return_value=None)
-        ), patch(
-            "calfkit_organization.bridge.gateway.publish_discovery_ping",
-            new=AsyncMock(return_value=None),
+        with (
+            patch.object(type(gateway._client), "user", new=fake_user, create=True),
+            patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
+            patch(
+                "calfkit_organization.bridge.gateway.publish_discovery_ping",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             await gateway._on_ready()
 
@@ -366,22 +346,17 @@ class TestOnReadyInjectsFetcher:
         injected = gateway._ingress.set_fetcher.call_args.args[0]
         assert isinstance(injected, ChannelHistoryFetcher)
 
-    async def test_on_ready_logs_history_injection(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_on_ready_logs_history_injection(self, caplog: pytest.LogCaptureFixture) -> None:
         gateway = _gateway()
         fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
-        with patch.object(
-            type(gateway._client), "user", new=fake_user, create=True
-        ), patch.object(
-            gateway._slash, "sync", new=AsyncMock(return_value=None)
-        ), patch(
-            "calfkit_organization.bridge.gateway.publish_discovery_ping",
-            new=AsyncMock(return_value=None),
-        ), caplog.at_level(
-            logging.INFO, logger="calfkit_organization.bridge.gateway"
+        with (
+            patch.object(type(gateway._client), "user", new=fake_user, create=True),
+            patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
+            patch(
+                "calfkit_organization.bridge.gateway.publish_discovery_ping",
+                new=AsyncMock(return_value=None),
+            ),
+            caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"),
         ):
             await gateway._on_ready()
-        assert any(
-            "history fetcher injected" in r.message for r in caplog.records
-        )
+        assert any("history fetcher injected" in r.message for r in caplog.records)

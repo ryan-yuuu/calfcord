@@ -272,6 +272,27 @@ class TestProjectHistory:
         assert len(out) == 1
         assert isinstance(out[0], ModelRequest)
 
+    def test_hydration_none_is_byte_identical_default(self) -> None:
+        """Passing ``hydration=None`` explicitly produces the same output as
+        omitting it — the replay kwarg defaults to a no-op so every existing
+        caller (router, ambient) is unaffected. Tool-call replay itself is
+        exercised in :mod:`tests.bridge.test_replay`."""
+        records = [
+            _record(message_id=1, content="how do I X?", author_display_name="ryan"),
+            _record(
+                message_id=2,
+                content="here's how",
+                author_display_name="Scribe",
+                author_agent_id="scribe",
+            ),
+        ]
+        omitted = project_history(records, self_agent_id="scribe")
+        explicit = project_history(records, self_agent_id="scribe", hydration=None)
+        assert len(omitted) == len(explicit) == 2
+        for a, b in zip(omitted, explicit, strict=True):
+            assert type(a) is type(b)
+            assert _text(a) == _text(b)
+
 
 # ---------------------------------------------------------------------------
 # ChannelHistoryFetcher — fakes
