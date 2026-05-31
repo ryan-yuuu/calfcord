@@ -149,7 +149,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from typing import Final
 
 import discord
@@ -267,13 +267,41 @@ def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
     return out
 
 
+def _pluralize_steps(count: int) -> str:
+    """Render ``N step(s)`` with correct singular/plural for ``count``."""
+    return f"{count} step" if count == 1 else f"{count} steps"
+
+
 def _progress_content(step_count: int) -> str:
     """Render the transient progress message body for ``step_count`` steps.
 
     Pluralizes ``step`` so a single step reads naturally.
     """
-    plural = "" if step_count == 1 else "s"
-    return f"⚙ running… {step_count} step{plural}"
+    return f"⚙ running… {_pluralize_steps(step_count)}"
+
+
+async def _best_effort_progress[T](
+    coro: Awaitable[T], *, action: str, key_label: str, key_value: int
+) -> T | None:
+    """Await a best-effort progress-message Discord call, swallowing the
+    usual failures so a transient/gone message can never crash the steps
+    consumer. Returns the call's result, or None if it failed."""
+    try:
+        return await coro
+    except discord.NotFound:
+        logger.debug("steps: progress %s hit NotFound %s=%d (already gone)", action, key_label, key_value)
+    except discord.Forbidden:
+        logger.warning("steps: progress %s Forbidden %s=%d", action, key_label, key_value)
+    except discord.DiscordException as e:
+        logger.warning(
+            "steps: progress %s failed %s=%d status=%s: %s",
+            action,
+            key_label,
+            key_value,
+            getattr(e, "status", None),
+            e,
+        )
+    return None
 
 
 def build_steps_consumer(
@@ -323,33 +351,18 @@ def build_steps_consumer(
         the final-reply path. On failure the id stays ``None`` so the next
         renderable hop retries the post.
         """
-        try:
-            sent = await persona_sender.send(
+        sent = await _best_effort_progress(
+            persona_sender.send(
                 persona=persona,
                 channel_id=entry.parent_channel_id,
                 content=_progress_content(step_count),
-            )
-        except discord.NotFound:
-            logger.debug(
-                "steps: progress send hit NotFound channel_id=%d",
-                entry.parent_channel_id,
-            )
-            return
-        except discord.Forbidden:
-            logger.warning(
-                "steps: Forbidden posting progress message channel_id=%d; step progress disabled for this invocation",
-                entry.parent_channel_id,
-            )
-            return
-        except discord.DiscordException as e:
-            logger.warning(
-                "steps: progress send failed channel_id=%d status=%s: %s",
-                entry.parent_channel_id,
-                getattr(e, "status", None),
-                e,
-            )
-            return
-        entry.progress_message_id = sent.id
+            ),
+            action="post",
+            key_label="channel_id",
+            key_value=entry.parent_channel_id,
+        )
+        if sent is not None:
+            entry.progress_message_id = sent.id
 
     async def _edit_progress(entry: StepsEntry) -> None:
         """Edit the progress message to the entry's CURRENT ``step_count``.
@@ -361,29 +374,16 @@ def build_steps_consumer(
         message_id = entry.progress_message_id
         if message_id is None:
             return
-        try:
-            await persona_sender.edit_message(
+        await _best_effort_progress(
+            persona_sender.edit_message(
                 entry.parent_channel_id,
                 message_id,
                 content=_progress_content(entry.step_count),
-            )
-        except discord.NotFound:
-            logger.debug(
-                "steps: progress edit hit NotFound message_id=%d (already deleted)",
-                message_id,
-            )
-        except discord.Forbidden:
-            logger.warning(
-                "steps: Forbidden editing progress message_id=%d",
-                message_id,
-            )
-        except discord.DiscordException as e:
-            logger.warning(
-                "steps: progress edit failed message_id=%d status=%s: %s",
-                message_id,
-                getattr(e, "status", None),
-                e,
-            )
+            ),
+            action="edit",
+            key_label="message_id",
+            key_value=message_id,
+        )
 
     def _schedule_debounced_edit(entry: StepsEntry) -> None:
         """Ensure exactly one trailing-debounce edit task is pending.
@@ -430,25 +430,12 @@ def build_steps_consumer(
         message_id = entry.progress_message_id
         if message_id is None:
             return
-        try:
-            await persona_sender.delete_message(entry.parent_channel_id, message_id)
-        except discord.NotFound:
-            logger.debug(
-                "steps: progress delete hit NotFound message_id=%d (already gone)",
-                message_id,
-            )
-        except discord.Forbidden:
-            logger.warning(
-                "steps: Forbidden deleting progress message_id=%d",
-                message_id,
-            )
-        except discord.DiscordException as e:
-            logger.warning(
-                "steps: progress delete failed message_id=%d status=%s: %s",
-                message_id,
-                getattr(e, "status", None),
-                e,
-            )
+        await _best_effort_progress(
+            persona_sender.delete_message(entry.parent_channel_id, message_id),
+            action="delete",
+            key_label="message_id",
+            key_value=message_id,
+        )
 
     async def _sink(entry: StepsEntry, persona: Persona, rendered_count: int) -> None:
         """Reflect ``rendered_count`` new steps into the progress message.

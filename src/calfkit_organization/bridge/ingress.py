@@ -154,17 +154,16 @@ def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMes
     out: list[ModelMessage] = []
     for msg in messages:
         new_parts: list[Any] | None = None
-        parts = getattr(msg, "parts", None)
-        if parts is not None:
-            for idx, part in enumerate(parts):
-                if isinstance(part, BaseToolReturnPart):
-                    rendered = part.model_response_str()
-                    if len(rendered) > REPLAY_TOOL_RETURN_MAX_CHARS:
-                        if new_parts is None:
-                            new_parts = list(parts)
-                        head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
-                        truncated = rendered[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
-                        new_parts[idx] = dataclasses.replace(part, content=truncated)
+        parts = msg.parts
+        for idx, part in enumerate(parts):
+            if isinstance(part, BaseToolReturnPart):
+                rendered = part.model_response_str()
+                if len(rendered) > REPLAY_TOOL_RETURN_MAX_CHARS:
+                    if new_parts is None:
+                        new_parts = list(parts)
+                    head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
+                    truncated = rendered[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
+                    new_parts[idx] = dataclasses.replace(part, content=truncated)
         if new_parts is None:
             out.append(msg)
         else:

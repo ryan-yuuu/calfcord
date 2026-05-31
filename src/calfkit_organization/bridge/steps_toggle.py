@@ -45,7 +45,7 @@ from typing import Any
 
 import discord
 
-from calfkit_organization.bridge.steps import _render_delta
+from calfkit_organization.bridge.steps import _pluralize_steps, _render_delta
 from calfkit_organization.bridge.transcripts import TranscriptStoreLike
 
 logger = logging.getLogger(__name__)
@@ -59,11 +59,6 @@ _TOGGLE_CUSTOM_ID = "steps:toggle"
 # Discord's hard per-message content cap. Above it the rendered steps are
 # attached as a file rather than inlined into the ephemeral message.
 _DISCORD_MESSAGE_LIMIT = 2000
-
-
-def _pluralize_steps(count: int) -> str:
-    """Render ``N step(s)`` with correct singular/plural for ``count``."""
-    return f"{count} step" if count == 1 else f"{count} steps"
 
 
 def _collapsed_label(step_count: int) -> str:
