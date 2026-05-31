@@ -9,10 +9,15 @@ in its own Kafka consumer group. Every assistant agent's handler hop —
 ``@publisher`` decorator (see
 :meth:`calfkit.worker.Worker.register_handlers` and the agent factory's
 ``publish_topic=AGENT_STEPS_TOPIC`` injection). The consumer walks each
-hop's ``state.message_history`` delta, counts the new
+hop's ``state.message_history`` delta and renders the new
 :class:`TextPart` / :class:`ToolCallPart` / :class:`ToolReturnPart`
-entries, and reflects the running total in one compact progress message
-posted under the agent's persona in the user's original channel.
+entries into one transient progress message posted under the agent's
+persona in the user's original channel — streaming the agent's ACTUAL
+work as it happens: model text as prose, tool calls as
+``tool_name(args)`` lines, and tool returns as ``⎿ result`` lines — the
+message IS the trace, with no header/counter line. It is a bounded *tail
+window* (the most recent lines that fit Discord's 2000-char cap); the full
+untruncated transcript stays on the reply's ``⤵ steps`` button.
 
 Why this exists: the bridge's outbox consumer
 (:func:`~calfkit_organization.bridge.outbox.build_outbox_consumer`)
@@ -44,16 +49,16 @@ does not get re-counted as fresh steps (a bug class the
   progress message; the outbox path posts the final reply in the parent
   channel and that's the end of it.
 * **Edit (debounced)** — every subsequent hop that yields renderable
-  content bumps the entry's :attr:`StepsEntry.step_count` and schedules a
-  trailing, debounced edit (:data:`_PROGRESS_DEBOUNCE_SECONDS`). At most
-  one edit task is pending per entry; bumps that land while it sleeps are
-  picked up because the task reads the count at fire time. The edit keeps
-  the message's components/embeds (none here) and only rewrites the text.
+  content appends to the entry's :attr:`StepsEntry.rendered_lines` and
+  schedules a trailing, debounced edit (:data:`_PROGRESS_DEBOUNCE_SECONDS`).
+  At most one edit task is pending per entry; lines that land while it sleeps
+  are picked up because the task re-renders the entry at fire time. The edit
+  keeps the message's components/embeds (none here) and only rewrites the text.
 * **Delete** — on the terminal hop (``state.final_output_parts`` is set),
   any pending debounce edit is cancelled and the progress message is
-  deleted. The outbox's final reply (which, in a later phase, carries the
-  expand toggle) supersedes it, so the transient counter leaves no
-  permanent residue in the channel.
+  deleted. The outbox's final reply (which carries the ``⤵ steps`` toggle)
+  supersedes it, so the transient progress message leaves no permanent
+  residue in the channel.
 
 No database access happens here: this consumer is pure live-UI. The
 durable transcript is written by the outbox consumer on the terminal hop
@@ -71,11 +76,14 @@ the answer text, which the outbox posts to the parent channel.
 **Source-was-already-a-thread.** When the inbound wire originated
 inside a Discord thread, the bridge's normalizer flattens
 ``wire.channel_id`` to the parent channel for Kafka topic routing
-while ``wire.source_channel_id`` keeps the thread id. The consumer
-detects this mismatch and skips the progress surface entirely for the
-correlation — the parent-channel webhook would post the counter in the
-wrong place relative to where the user is actually talking. Step
-progress is disabled for thread-originated invocations in v1.
+while ``wire.source_channel_id`` keeps the thread id (exposed as
+:attr:`~calfkit_organization.bridge.wire.WireMessage.thread_id`). The
+consumer seeds :attr:`StepsEntry.thread_id` from it and posts/edits/
+deletes the progress message *inside* that thread — the persona webhook
+still hosts on the flattened parent ``channel_id``, but the
+``thread_id`` argument routes the message into the thread, so progress
+streams where the user is actually talking. Identical behavior to a
+top-level channel; ``thread_id`` is simply ``None`` there.
 
 **Outbox retries.** The bridge's outbox path re-invokes the agent on
 ``agent.{aid}.in`` with the **same** ``correlation_id`` after a
@@ -113,7 +121,7 @@ try/except that catches the common Discord error subclasses
 ``DiscordException`` — broader than ``HTTPException`` so the sibling
 ``RateLimited`` is also funneled through — warned and swallowed). A
 Discord failure on the progress surface must never affect the
-final-reply path. :func:`_render_delta` is also wrapped because
+final-reply path. :func:`_render_live_delta` is also wrapped because
 :meth:`ToolCallPart.args_as_json_str` can raise on malformed args; an
 unhandled exception there would otherwise loop because the cursor
 advances after rendering and the same bad message would be re-walked
@@ -148,6 +156,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import Awaitable, Sequence
 from typing import Final
@@ -180,11 +189,45 @@ STEP_CONTENT_MAX_CHARS: Final[int] = 1500
 """Maximum inner content length we render for a single ``ToolCallPart``
 args block or ``ToolReturnPart`` content block when counting steps.
 Above this, the body is truncated with an explicit indicator. Picked
-well below Discord's 2000-char message cap. Retained from the thread
-era because :func:`_render_delta` is shared with the (future) expand
-view; the live progress message only consumes its ``len``."""
+well below Discord's 2000-char message cap. Applies to :func:`_render_delta`,
+which is shared by the reply's ``⤵ steps`` expand view and tool-call replay;
+the live progress message uses its own tighter per-part caps
+(:data:`_LIVE_TEXT_MAX_CHARS` / :data:`_LIVE_TOOL_MAX_CHARS`) via
+:func:`_render_live_delta`."""
 
 TRUNCATION_MARKER: Final[str] = "\n… (truncated)"
+
+# --- Live progress body rendering -------------------------------------------
+# The transient progress message shows the agent's ACTUAL work as it streams
+# (model text, tool calls, tool returns) — not just a counter. It is edited in
+# place, and Discord hard-caps message content at 2000 chars, so the body is a
+# bounded *tail window*: the most recent lines that fit, with a marker when
+# older steps are elided. The full, untruncated transcript remains on the
+# reply's ``⤵ steps`` button after completion. These caps apply ONLY to this
+# live view; the durable transcript / toggle renderer (:func:`_render_delta`)
+# is untouched.
+
+_DISCORD_MESSAGE_LIMIT: Final[int] = 2000
+"""Discord's hard per-message content cap. The rendered progress body is
+clamped under this so an ``edit_message`` never fails with a 400-too-long."""
+
+_PROGRESS_BODY_MAX_CHARS: Final[int] = 1900
+"""Tail-window budget for the progress body (the whole message — there is no
+header line). Kept under :data:`_DISCORD_MESSAGE_LIMIT` to leave room for the
+elision marker prepended when older lines are dropped; a final slice in
+:func:`_progress_content` enforces the hard cap regardless."""
+
+_LIVE_TEXT_MAX_CHARS: Final[int] = 1000
+"""Per-part cap for a single model TextPart in the live body. Generous (it's
+prose) but bounded so one long preamble can't dominate the window."""
+
+_LIVE_TOOL_MAX_CHARS: Final[int] = 200
+"""Per-part cap for a single ``tool_name(args)`` call line or ``⎿ result``
+return line. Tight on purpose — tool args/results are the noisiest parts, and
+short lines let more recent steps stay visible in the tail window."""
+
+_HIDDEN_STEPS_MARKER: Final[str] = "…  *(earlier steps hidden — full trace on the ⤵ button)*"
+"""Prepended to the body when the tail window dropped older lines."""
 
 _PROGRESS_DEBOUNCE_SECONDS: Final[float] = 1.0
 """Trailing-debounce window for progress-message edits. Coalesces a
@@ -231,10 +274,12 @@ def _render_tool_return_part(part: ToolReturnPart) -> str:
 def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
     """Project the new ``message_history`` slice into post-ready strings.
 
-    Walks the delta in order and emits one string per renderable part.
-    The live progress sink only consumes ``len(...)`` of the result (the
-    step count); the strings themselves feed the future expand view.
-    Skips:
+    Walks the delta in order and emits one string per renderable part. This
+    is the VERBOSE renderer, used by the reply's ``⤵ steps`` expand/replay
+    view (:mod:`calfkit_organization.bridge.steps_toggle`), which renders the
+    full strings, and by the outbox, which consumes ``len(...)`` as the step
+    count for the toggle label. It is NOT used by the live progress message —
+    that path uses the compact :func:`_render_live_delta`. Skips:
 
     * ``ThinkingPart``, ``FilePart``, ``BuiltinTool*Part`` —
       out of scope for v1.
@@ -267,22 +312,175 @@ def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
     return out
 
 
+# --- Compact live renderer (Hybrid style: prose text + inline-code tools) ----
+
+
+def _truncate_inline(text: str, max_chars: int) -> str:
+    """Single-line truncate with a no-newline ellipsis.
+
+    Unlike :func:`_truncate` (whose marker starts with ``\\n``), this keeps the
+    result on one line so it is safe to wrap in Discord inline code.
+    """
+    if len(text) <= max_chars:
+        return text
+    ellipsis = "…"
+    return text[: max_chars - len(ellipsis)] + ellipsis
+
+
+def _collapse_ws(text: str) -> str:
+    """Collapse all runs of whitespace (incl. newlines) to single spaces."""
+    return " ".join(text.split())
+
+
+def _inline_code(inner: str) -> str:
+    """Wrap ``inner`` in Discord inline code, neutralizing backticks.
+
+    Inline code cannot contain a backtick (it would close the span early), so
+    any backtick in tool args/results is swapped for an apostrophe. This is a
+    live preview; the exact bytes are preserved in the durable transcript.
+    """
+    return f"`{inner.replace('`', chr(39))}`"
+
+
+def _format_call_args(part: ToolCallPart) -> str:
+    """Render a tool call's args as keyword form: ``k=<json-value>, …``.
+
+    Uses ``args_as_dict`` so a flat object renders as ``city="Tokyo", n=5``
+    (each value JSON-encoded, so strings keep their quotes and booleans read
+    as ``true``/``false``). Args that aren't a JSON object (a bare list or
+    scalar) fall back to the compact JSON string. The whole thing is collapsed
+    to one line; the caller truncates.
+    """
+    try:
+        args = part.args_as_dict()
+    except Exception:
+        # args isn't a JSON object (a bare list/scalar makes args_as_dict
+        # assert; malformed JSON makes it raise).
+        args = None
+    if not isinstance(args, dict):
+        # Either the parse failed above, OR — under ``python -O``, where the
+        # ``assert isinstance(..., dict)`` inside args_as_dict is stripped — a
+        # non-object (e.g. a list) slipped through and would blow up the
+        # ``.items()`` loop below. Fall back to the raw JSON string, itself
+        # guarded since args_as_json_str can raise (PydanticSerializationError)
+        # on a non-serializable args object. A live preview must NEVER raise
+        # out of here: the whole point is to render *something*.
+        try:
+            return _collapse_ws(part.args_as_json_str())
+        except Exception:
+            return "…"
+    if not args:
+        return ""
+    pairs: list[str] = []
+    for key, value in args.items():
+        try:
+            rendered_value = json.dumps(value, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            rendered_value = str(value)
+        pairs.append(f"{key}={rendered_value}")
+    return _collapse_ws(", ".join(pairs))
+
+
+def _render_live_tool_call_part(part: ToolCallPart) -> str:
+    """``\\`tool_name(args)\\``` — one inline-code line."""
+    call = f"{part.tool_name}({_format_call_args(part)})"
+    return _inline_code(_truncate_inline(call, _LIVE_TOOL_MAX_CHARS))
+
+
+def _render_live_tool_return_part(part: ToolReturnPart) -> str:
+    """``\\`⎿ result\\``` — one inline-code line, whitespace collapsed."""
+    body = _collapse_ws(part.model_response_str())
+    return _inline_code(_truncate_inline(f"⎿ {body}", _LIVE_TOOL_MAX_CHARS))
+
+
+def _render_live_delta(messages: Sequence[ModelMessage]) -> list[str]:
+    """Compact per-part render for the live progress body.
+
+    Same part-selection as :func:`_render_delta` (text + tool calls from
+    ``ModelResponse``; tool returns from ``ModelRequest``; everything else
+    skipped) but in the Hybrid display format: model text as plain markdown
+    prose, tool calls/returns as inline-code lines. One string per rendered
+    part, in order. The caller appends these to
+    :attr:`StepsEntry.rendered_lines`.
+
+    Wrapped by the caller in try/except — ``args_as_json_str`` can raise on
+    malformed args, exactly as for :func:`_render_delta`.
+    """
+    out: list[str] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    rendered = _render_text_part(part)
+                    if rendered is not None:
+                        out.append(_truncate(rendered, _LIVE_TEXT_MAX_CHARS))
+                elif isinstance(part, ToolCallPart):
+                    out.append(_render_live_tool_call_part(part))
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    out.append(_render_live_tool_return_part(part))
+    return out
+
+
+def _tail_window(lines: Sequence[str], max_chars: int) -> str:
+    """Join the most recent ``lines`` that fit in ``max_chars`` (newline-joined).
+
+    Walks from the end, keeping lines until the next one would overflow the
+    budget (the most recent line is always kept, even if oversized — the final
+    clamp in :func:`_progress_content` guards the hard cap). When older lines
+    were dropped, prepends :data:`_HIDDEN_STEPS_MARKER` so the elision is
+    visible. Returns ``""`` for no lines.
+    """
+    if not lines:
+        return ""
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        cost = len(line) + 1  # the newline that will join it
+        if kept and total + cost > max_chars:
+            break
+        kept.append(line)
+        total += cost
+    kept.reverse()
+    if len(kept) < len(lines):
+        return _HIDDEN_STEPS_MARKER + "\n" + "\n".join(kept)
+    return "\n".join(kept)
+
+
 def _pluralize_steps(count: int) -> str:
     """Render ``N step(s)`` with correct singular/plural for ``count``."""
     return f"{count} step" if count == 1 else f"{count} steps"
 
 
-def _progress_content(step_count: int) -> str:
-    """Render the transient progress message body for ``step_count`` steps.
+def _progress_content(entry: StepsEntry) -> str:
+    """Render the transient progress message: the live trace, nothing else.
 
-    Pluralizes ``step`` so a single step reads naturally.
+    A tail-windowed compact render of the entry's
+    :attr:`~calfkit_organization.bridge.steps_state.StepsEntry.rendered_lines`
+    — the agent's actual work as it streams (model text, ``tool_name(args)``,
+    ``⎿ result``), most-recent-fits-first. No header/counter line: the message
+    IS the trace. Hard-clamped to :data:`_DISCORD_MESSAGE_LIMIT` so an in-place
+    ``edit_message`` can never fail for length (the tail window keeps it well
+    under; this slice is a final safety net).
+
+    The message only ever posts/edits on a renderable hop, so
+    ``rendered_lines`` is non-empty whenever this is called; the empty-body
+    fallback (a lone ``…``) is purely defensive — Discord rejects an
+    empty-content message.
     """
-    return f"⚙ running… {_pluralize_steps(step_count)}"
+    body = _tail_window(entry.rendered_lines, _PROGRESS_BODY_MAX_CHARS)
+    if not body:
+        # Unreachable in practice — the message only posts/edits on a
+        # renderable hop, so rendered_lines is non-empty here. The lone "…"
+        # keeps a future regression from sending empty content (Discord
+        # rejects it with a 400) while surfacing the anomaly in the log.
+        logger.warning("steps: progress content rendered empty (unexpected); sending a placeholder")
+        return "…"
+    return body[:_DISCORD_MESSAGE_LIMIT]
 
 
-async def _best_effort_progress[T](
-    coro: Awaitable[T], *, action: str, key_label: str, key_value: int
-) -> T | None:
+async def _best_effort_progress[T](coro: Awaitable[T], *, action: str, key_label: str, key_value: int) -> T | None:
     """Await a best-effort progress-message Discord call, swallowing the
     usual failures so a transient/gone message can never crash the steps
     consumer. Returns the call's result, or None if it failed."""
@@ -342,22 +540,23 @@ def build_steps_consumer(
         :class:`~calfkit.Worker`.
     """
 
-    async def _post_progress(entry: StepsEntry, persona: Persona, step_count: int) -> None:
+    async def _post_progress(entry: StepsEntry, persona: Persona) -> None:
         """Post the transient progress message for the first renderable hop.
 
-        Stores ``sent.id`` on the entry as ``progress_message_id``. No
-        ``reply_to`` and no ``extra_buttons``; routes into the thread via
-        ``thread_id`` when the triggering event originated in one (``None``
-        for a top-level channel ⇒ posts to ``parent_channel_id``).
-        Best-effort — any Discord failure is swallowed so it can't break
-        the final-reply path. On failure the id stays ``None`` so the next
-        renderable hop retries the post.
+        Renders the entry's current trace (the first hop's lines are already
+        accumulated). Stores ``sent.id`` on the entry as
+        ``progress_message_id``. No ``reply_to`` and no ``extra_buttons``;
+        routes into the thread via ``thread_id`` when the triggering event
+        originated in one (``None`` for a top-level channel ⇒ posts to
+        ``parent_channel_id``). Best-effort — any Discord failure is swallowed
+        so it can't break the final-reply path. On failure the id stays
+        ``None`` so the next renderable hop retries the post.
         """
         sent = await _best_effort_progress(
             persona_sender.send(
                 persona=persona,
                 channel_id=entry.parent_channel_id,
-                content=_progress_content(step_count),
+                content=_progress_content(entry),
                 thread_id=entry.thread_id,
             ),
             action="post",
@@ -368,11 +567,11 @@ def build_steps_consumer(
             entry.progress_message_id = sent.id
 
     async def _edit_progress(entry: StepsEntry) -> None:
-        """Edit the progress message to the entry's CURRENT ``step_count``.
+        """Edit the progress message to the entry's CURRENT trace.
 
-        Reads ``step_count`` / ``progress_message_id`` at call time so a
-        debounced fire reflects every bump that landed while it slept.
-        Best-effort; a deleted message (``NotFound``) is ignored at DEBUG.
+        Re-renders from ``entry.rendered_lines`` at call time, so a debounced
+        fire reflects every line appended while it slept. Best-effort; a
+        deleted message (``NotFound``) is ignored at DEBUG.
         """
         message_id = entry.progress_message_id
         if message_id is None:
@@ -381,7 +580,7 @@ def build_steps_consumer(
             persona_sender.edit_message(
                 entry.parent_channel_id,
                 message_id,
-                content=_progress_content(entry.step_count),
+                content=_progress_content(entry),
                 thread_id=entry.thread_id,
             ),
             action="edit",
@@ -393,9 +592,9 @@ def build_steps_consumer(
         """Ensure exactly one trailing-debounce edit task is pending.
 
         If the entry already has a live (not-done) debounce task, return —
-        that task will read the latest ``step_count`` when it fires, so the
-        bump this hop just made is picked up for free. Otherwise spawn one
-        that sleeps :data:`_PROGRESS_DEBOUNCE_SECONDS` then edits.
+        that task re-renders ``entry.rendered_lines`` when it fires, so the
+        lines this hop just appended are picked up for free. Otherwise spawn
+        one that sleeps :data:`_PROGRESS_DEBOUNCE_SECONDS` then edits.
         """
         existing = entry.debounce_task
         if existing is not None and not existing.done():
@@ -441,17 +640,17 @@ def build_steps_consumer(
             key_value=message_id,
         )
 
-    async def _sink(entry: StepsEntry, persona: Persona, rendered_count: int) -> None:
-        """Reflect ``rendered_count`` new steps into the progress message.
+    async def _sink(entry: StepsEntry, persona: Persona) -> None:
+        """Reflect the just-appended steps into the progress message.
 
-        On the first renderable hop (``progress_message_id is None``) posts
-        the message under ``persona``; on later hops bumps ``step_count``
-        and schedules a debounced edit. ``rendered_count`` is the number of
-        parts the just-processed delta produced (always >= 1 here).
+        The caller has already appended this hop's rendered strings to
+        ``entry.rendered_lines``; this only decides post-vs-edit. On the first
+        renderable hop (``progress_message_id is None``) posts the message
+        under ``persona``; on later hops schedules a debounced edit (which
+        re-renders the body from the entry's lines at fire time).
         """
-        entry.step_count += rendered_count
         if entry.progress_message_id is None:
-            await _post_progress(entry, persona, entry.step_count)
+            await _post_progress(entry, persona)
         else:
             _schedule_debounced_edit(entry)
 
@@ -500,21 +699,33 @@ def build_steps_consumer(
             return
 
         try:
-            rendered = _render_delta(new_messages)
+            rendered = _render_live_delta(new_messages)
         except Exception:
-            # ToolCallPart.args_as_json_str can raise on malformed
-            # payloads; advancing the cursor still happens below so
-            # the next hop doesn't re-trip the same bad message.
+            # ToolCallPart.args_as_json_str can raise on malformed payloads;
+            # advancing the cursor still happens below so the next hop doesn't
+            # re-trip the same bad message. The whole hop's delta is dropped
+            # from the LIVE view (it stays recoverable via the ⤵ transcript,
+            # which renders independently in the outbox); log how much was lost
+            # so a gap in the live trace is diagnosable.
             logger.exception(
-                "steps: _render_delta raised on correlation_id=%s; skipping this hop's delta",
+                "steps: _render_live_delta raised on correlation_id=%s; dropping this hop's "
+                "delta of %d message(s) from the live view (recoverable via the ⤵ transcript) "
+                "and advancing the cursor to avoid re-walking it",
                 correlation_id,
+                len(new_messages),
             )
             rendered = []
 
         if new_messages:
             entry.history_cursor = len(history)
 
-        if rendered:
+        if rendered and not is_terminal:
+            # Skip on the terminal hop: the progress message is deleted just
+            # below, so rendering/posting the terminal delta into it is wasted
+            # — and on a single-pass turn (the first renderable hop is also the
+            # terminal one) posting then immediately deleting would flash a
+            # message in the channel. The turn's final answer is posted by the
+            # outbox, and the full steps live on the ⤵ transcript.
             spec = registry.by_id(result.emitter_node_id)
             if spec is None:
                 logger.warning(
@@ -527,7 +738,10 @@ def build_steps_consumer(
                     name=spec.display_name,
                     avatar_url=spec.avatar_url,
                 )
-                await _sink(entry, persona, len(rendered))
+                # Accumulate the compact lines BEFORE the sink so the post/edit
+                # renders the up-to-date trace.
+                entry.rendered_lines.extend(rendered)
+                await _sink(entry, persona)
 
         if is_terminal:
             # entry is non-None here (fetched or just seeded above): the

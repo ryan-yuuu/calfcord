@@ -4,8 +4,8 @@ The bridge's steps consumer
 (:func:`calfkit_organization.bridge.steps.build_steps_consumer`) needs
 to remember, across the multiple hops of a single agent invocation, which
 Discord parent message the steps belong to, how far through the agent's
-running ``message_history`` we've already streamed, and how many steps it
-has rendered so far. Holding that state in a per-correlation entry lets the
+running ``message_history`` we've already streamed, and the compact render
+of each step so far. Holding that state in a per-correlation entry lets the
 consumer treat each inbound envelope as a stateless delta against the
 cursor.
 
@@ -24,14 +24,21 @@ cursor.
 * ``progress_message_id`` — populated lazily on the first hop that
   produces a rendered step. ``None`` until then so a pure-text agent
   reply (no intermediates) does not post an empty progress message.
-* ``step_count`` — running total of rendered parts across all hops. The
-  progress message renders ``⚙ running… N steps`` from this counter.
+* ``rendered_lines`` — the accumulated compact render of every step so far
+  (model text stripped + length-capped, ``tool_name(args)`` for calls,
+  ``⎿ result`` for returns), one element per rendered part, in chronological
+  order. The
+  progress message IS a (tail-windowed) join of these, so the user watches
+  the actual work stream in. Grows for the invocation's lifetime; bounded
+  for display by the tail window, and the whole entry is dropped on the
+  terminal hop. (The number of steps, where needed, is just
+  ``len(rendered_lines)``.)
 * ``history_cursor`` — ``len(state.message_history)`` already processed.
   The consumer advances this on each hop so the next delta is
   ``message_history[history_cursor:]``.
 * ``debounce_task`` — the in-flight trailing-edit task handle, or
-  ``None``. At most one is pending per entry; subsequent hops bump
-  ``step_count`` and reuse the live task, which reads the latest count
+  ``None``. At most one is pending per entry; subsequent hops append to
+  ``rendered_lines`` and reuse the live task, which re-renders the entry
   at fire time. Cancelled on the terminal hop before the progress
   message is deleted.
 
@@ -44,7 +51,7 @@ emitter's identity. The consumer resolves persona per-hop from
 :mod:`calfkit_organization.bridge.outbox` uses.
 
 ``StepsEntry`` is **mutable** because ``progress_message_id``,
-``step_count``, ``history_cursor``, and ``debounce_task`` all advance
+``rendered_lines``, ``history_cursor``, and ``debounce_task`` all advance
 across hops. Entries are popped on the terminal hop (the one carrying
 ``state.final_output_parts``), so a clean run never leaves an entry
 behind. Bridge restarts strand entries in-process; the next hop after
@@ -61,7 +68,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 logger = logging.getLogger(__name__)
@@ -82,7 +89,7 @@ class StepsEntry:
     parent_message_id: int
     thread_id: int | None = None
     progress_message_id: int | None = None
-    step_count: int = 0
+    rendered_lines: list[str] = field(default_factory=list)
     history_cursor: int = 0
     debounce_task: asyncio.Task[None] | None = None
 

@@ -3,7 +3,8 @@
 Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
 that carry a hand-rolled ``state.message_history`` representing the
 agent's running pydantic_ai conversation. The consumer's sink is a single
-transient in-channel "progress" message (``⚙ running… N steps``) posted
+transient in-channel "progress" message (the live trace itself — model text /
+``tool_name(args)`` / ``⎿ result`` lines, no header) posted
 under the agent persona, edited (debounced) as steps stream in, and
 deleted on the terminal hop. There is NO database access in this phase.
 
@@ -13,11 +14,15 @@ The tests exercise:
   sink: cursor monotonicity, per-hop persona resolution, the no-delta
   early skip, outbox-retry dedup, and thread-originated-wire routing
   (progress posts into the thread, not the parent);
-* the progress lifecycle: post-once-on-first-renderable-hop, step_count
-  increments across hops, debounced edit reflects the latest count,
+* the progress lifecycle: post-once-on-first-renderable-hop, the trace
+  accumulates across hops, debounced edit reflects the latest lines,
   terminal cancels debounce + deletes, pure-text turns post nothing;
 * failure swallowing (Discord errors on send/edit/delete, exceptions
-  inside ``_render_delta``).
+  inside ``_render_live_delta``);
+* the compact live renderer itself: Hybrid prose + inline-code
+  ``tool_name(args)`` / ``⎿ result`` lines, keyword-arg formatting,
+  backtick neutralization, per-part truncation, and the tail-window cap
+  (see ``TestLiveRender``).
 
 For debounce, tests monkeypatch ``_PROGRESS_DEBOUNCE_SECONDS`` to 0 and
 await ``entry.debounce_task`` rather than sleeping — no real-time waits.
@@ -255,7 +260,9 @@ class TestProgressPost:
 
         call = persona_sender.send.call_args
         assert call.kwargs["channel_id"] == _CHANNEL_ID
-        assert call.kwargs["content"] == "⚙ running… 1 step"
+        # The message IS the live trace — just the model's interim text here,
+        # no header/counter line.
+        assert call.kwargs["content"] == "Let me check."
         assert call.kwargs["persona"].name == "Aksel"
         # Plain send: no reply, no thread, no extra buttons.
         assert call.kwargs.get("reply_to") is None
@@ -265,7 +272,7 @@ class TestProgressPost:
         entry = steps_state.get(_CORRELATION_ID)
         assert entry is not None
         assert entry.progress_message_id == _PROGRESS_MESSAGE_ID
-        assert entry.step_count == 1
+        assert len(entry.rendered_lines) == 1
         # Cursor advanced past the whole delta.
         assert entry.history_cursor == len(history)
 
@@ -304,8 +311,11 @@ class TestProgressPost:
             broker=broker,
         )
         assert persona_sender.send.await_count == 1
-        assert persona_sender.send.call_args.kwargs["content"] == "⚙ running… 2 steps"
-        assert steps_state.get(_CORRELATION_ID).step_count == 2
+        # Preamble prose, then the tool call as an inline-code keyword line.
+        assert persona_sender.send.call_args.kwargs["content"] == (
+            'Let me look that up.\n`weather_lookup(city="Tokyo")`'
+        )
+        assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 2
 
     async def test_whitespace_only_text_not_counted(
         self,
@@ -336,7 +346,9 @@ class TestProgressPost:
             headers=_headers(),
             broker=broker,
         )
-        assert persona_sender.send.call_args.kwargs["content"] == "⚙ running… 1 step"
+        # Whitespace-only text was skipped; only the empty-args tool call
+        # rendered, as `t()`.
+        assert persona_sender.send.call_args.kwargs["content"] == "`t()`"
 
     async def test_renderable_part_types_counted(
         self,
@@ -378,8 +390,9 @@ class TestProgressPost:
             headers=_headers(),
             broker=broker,
         )
-        # text + tool call + tool return = 3 (prompts excluded).
-        assert persona_sender.send.call_args.kwargs["content"] == "⚙ running… 3 steps"
+        # text + tool call + tool return = 3 (prompts excluded): prose line,
+        # then the call and the return as inline-code lines.
+        assert persona_sender.send.call_args.kwargs["content"] == "thinking\n`t()`\n`⎿ ok`"
 
 
 class TestPureText:
@@ -422,7 +435,7 @@ class TestPureText:
         assert entry is not None
         assert entry.history_cursor == len(history)
         assert entry.progress_message_id is None
-        assert entry.step_count == 0
+        assert len(entry.rendered_lines) == 0
 
     async def test_pure_text_terminal_posts_and_deletes_nothing(
         self,
@@ -452,10 +465,10 @@ class TestPureText:
 
 
 class TestDebouncedEdit:
-    """Subsequent renderable hops bump step_count and edit (debounced) —
+    """Subsequent renderable hops accumulate lines and edit (debounced) —
     they never post a second message."""
 
-    async def test_second_hop_edits_with_running_count(
+    async def test_second_hop_edits_with_accumulated_trace(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -468,7 +481,7 @@ class TestDebouncedEdit:
             pending_wires,
             steps_state,
         )
-        # Hop 1: a tool call → posts "1 step".
+        # Hop 1: a tool call → posts the call line.
         hop1 = [
             ModelRequest(parts=[UserPromptPart(content="lookup tokyo")]),
             ModelResponse(
@@ -485,7 +498,7 @@ class TestDebouncedEdit:
         )
         assert persona_sender.send.await_count == 1
 
-        # Hop 2: the tool return arrived → debounced edit to "2 steps".
+        # Hop 2: the tool return arrived → debounced edit appends the return line.
         hop2 = [
             *hop1,
             ModelRequest(
@@ -508,8 +521,8 @@ class TestDebouncedEdit:
         edit_call = persona_sender.edit_message.call_args
         assert edit_call.args[0] == _CHANNEL_ID
         assert edit_call.args[1] == _PROGRESS_MESSAGE_ID
-        assert edit_call.kwargs["content"] == "⚙ running… 2 steps"
-        assert steps_state.get(_CORRELATION_ID).step_count == 2
+        assert edit_call.kwargs["content"] == "`t(x=1)`\n`⎿ result`"
+        assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 2
 
     async def test_burst_coalesces_to_one_edit_at_latest_count(
         self,
@@ -520,14 +533,14 @@ class TestDebouncedEdit:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two edit-triggering hops while a debounce task is still pending
-        coalesce into a single edit that reflects the LATEST count (the
-        bump during the window is read at FIRE time, not schedule time).
+        coalesce into a single edit that reflects the LATEST trace (the lines
+        appended during the window are read at FIRE time, not schedule time).
 
         Determinism: the debounce ``sleep`` is replaced by an event we
         control, so the task is guaranteed to remain parked in its wait
-        (count NOT yet read) across both hops. Releasing the gate then
-        fires exactly one edit, which reads ``step_count`` at that instant
-        — by which point hop 3 has bumped it to 3. No reliance on
+        (trace NOT yet rendered) across both hops. Releasing the gate then
+        fires exactly one edit, which re-renders ``rendered_lines`` at that
+        instant — by which point hop 3 has appended its line. No reliance on
         event-loop scheduling of a zero-delay sleep."""
         gate = asyncio.Event()
 
@@ -542,7 +555,7 @@ class TestDebouncedEdit:
             pending_wires,
             steps_state,
         )
-        # Hop 1 posts ("1 step").
+        # Hop 1 posts (line "a").
         await consumer.handler(
             envelope=_envelope(
                 message_history=[
@@ -553,8 +566,8 @@ class TestDebouncedEdit:
             headers=_headers(),
             broker=broker,
         )
-        # Hop 2 schedules a debounce task (count now 2). It parks in the
-        # gated sleep — pending, not done, count NOT yet read.
+        # Hop 2 appends line "b" and schedules a debounce task. It parks in
+        # the gated sleep — pending, not done, trace NOT yet re-rendered.
         await consumer.handler(
             envelope=_envelope(
                 message_history=[
@@ -569,8 +582,8 @@ class TestDebouncedEdit:
         first_task = steps_state.get(_CORRELATION_ID).debounce_task
         assert first_task is not None
 
-        # Hop 3 bumps the count to 3 while the (parked) task is still
-        # pending; it must reuse the SAME pending task, not spawn a second.
+        # Hop 3 appends line "c" while the (parked) task is still pending;
+        # it must reuse the SAME pending task, not spawn a second.
         await consumer.handler(
             envelope=_envelope(
                 message_history=[
@@ -585,14 +598,14 @@ class TestDebouncedEdit:
         )
         assert steps_state.get(_CORRELATION_ID).debounce_task is first_task
 
-        # Release the gate so the single task wakes and edits NOW, reading
-        # the latest count (3).
+        # Release the gate so the single task wakes and edits NOW, re-rendering
+        # the latest trace (a/b/c).
         gate.set()
         await _drain_debounce(steps_state)
 
         persona_sender.edit_message.assert_awaited_once()
-        assert persona_sender.edit_message.call_args.kwargs["content"] == "⚙ running… 3 steps"
-        assert steps_state.get(_CORRELATION_ID).step_count == 3
+        assert persona_sender.edit_message.call_args.kwargs["content"] == "a\nb\nc"
+        assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 3
         # Still only one post.
         assert persona_sender.send.await_count == 1
 
@@ -615,7 +628,6 @@ class TestTerminalHop:
                 parent_channel_id=_CHANNEL_ID,
                 parent_message_id=_MESSAGE_ID,
                 progress_message_id=_PROGRESS_MESSAGE_ID,
-                step_count=2,
                 history_cursor=2,
             ),
         )
@@ -765,6 +777,39 @@ class TestTerminalHop:
         )
         persona_sender.delete_message.assert_not_called()
         assert steps_state.get(_CORRELATION_ID) is None
+        assert steps_state.is_completed(_CORRELATION_ID)
+
+    async def test_terminal_first_hop_does_not_post_then_delete(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        """A single-pass turn whose FIRST renderable hop is ALSO terminal must
+        not post a progress message it would immediately delete (no channel
+        flash, no wasted webhook call). The terminal hop renders nothing into
+        the live message — the final answer is the outbox's job, and the full
+        steps live on the ⤵ transcript."""
+        consumer = build_steps_consumer(persona_sender, _registry(), pending_wires, steps_state)
+        # Terminal envelope carrying a tool call + return in its delta (the
+        # trailing final-answer ModelResponse is dropped by [:-1]); no prior
+        # hop ever posted a progress message for this correlation.
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="weather?")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="weather", args={"c": "Tokyo"}, tool_call_id="t1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="t1")]),
+            ModelResponse(parts=[TextPart(content="It's 18 in Tokyo.")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history, final_text="It's 18 in Tokyo."),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        # Never posted ⇒ never deleted (no flash); completion still recorded.
+        persona_sender.send.assert_not_called()
+        persona_sender.delete_message.assert_not_called()
         assert steps_state.is_completed(_CORRELATION_ID)
 
 
@@ -929,7 +974,7 @@ class TestThreadOriginatedWire:
     """When the inbound wire originated inside a Discord thread, the progress
     surface posts INTO that thread — identical behavior to a top-level
     channel. The persona webhook still hosts on the parent ``channel_id``;
-    ``thread_id`` routes the counter into the thread."""
+    ``thread_id`` routes the progress message into the thread."""
 
     async def test_thread_originated_wire_posts_progress_into_thread(
         self,
@@ -1013,8 +1058,8 @@ class TestInitialCursorSeed:
         )
         # Only the one new TextPart counts; the prior 3 are skipped.
         assert persona_sender.send.await_count == 1
-        assert persona_sender.send.call_args.kwargs["content"] == "⚙ running… 1 step"
-        assert steps_state.get(_CORRELATION_ID).step_count == 1
+        assert persona_sender.send.call_args.kwargs["content"] == "this turn"
+        assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 1
 
 
 class TestCursorMonotonicity:
@@ -1048,11 +1093,11 @@ class TestCursorMonotonicity:
         entry = steps_state.get(_CORRELATION_ID)
         cursor_after_real = entry.history_cursor
         assert cursor_after_real == len(hop1_history)
-        assert entry.step_count == 2
+        assert len(entry.rendered_lines) == 2
         assert persona_sender.send.await_count == 1
 
         # Peer envelope: shorter (empty) history → must not rewind cursor,
-        # bump the count, or touch Discord.
+        # append lines, or touch Discord.
         await consumer.handler(
             envelope=_envelope(message_history=[]),
             correlation_id=_CORRELATION_ID,
@@ -1061,7 +1106,7 @@ class TestCursorMonotonicity:
         )
         entry = steps_state.get(_CORRELATION_ID)
         assert entry.history_cursor == cursor_after_real
-        assert entry.step_count == 2
+        assert len(entry.rendered_lines) == 2
         assert persona_sender.send.await_count == 1
         persona_sender.edit_message.assert_not_called()
 
@@ -1079,9 +1124,11 @@ class TestCursorMonotonicity:
         await _drain_debounce(steps_state)
         # Still only one post; the new step is reflected via a single edit.
         assert persona_sender.send.await_count == 1
-        assert steps_state.get(_CORRELATION_ID).step_count == 3
+        assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 3
         persona_sender.edit_message.assert_awaited_once()
-        assert persona_sender.edit_message.call_args.kwargs["content"] == "⚙ running… 3 steps"
+        assert persona_sender.edit_message.call_args.kwargs["content"] == (
+            "real hop 1\nreal hop 1 cont.\nreal hop 2 new"
+        )
 
 
 class TestPerHopPersona:
@@ -1185,9 +1232,9 @@ class TestPerHopPersona:
 
 class TestEarlySkip:
     """PRESERVED invariant #3: a no-delta non-terminal hop short-circuits
-    BEFORE ``_render_delta`` runs (and posts/edits nothing)."""
+    BEFORE ``_render_live_delta`` runs (and posts/edits nothing)."""
 
-    async def test_early_skip_bypasses_render_delta(
+    async def test_early_skip_bypasses_render(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -1198,7 +1245,7 @@ class TestEarlySkip:
         from unittest.mock import MagicMock
 
         spy = MagicMock(return_value=[])
-        monkeypatch.setattr(steps_mod, "_render_delta", spy)
+        monkeypatch.setattr(steps_mod, "_render_live_delta", spy)
 
         consumer = build_steps_consumer(
             persona_sender,
@@ -1293,7 +1340,7 @@ class TestFailureSwallowing:
         entry = steps_state.get(_CORRELATION_ID)
         assert entry is not None
         assert entry.progress_message_id is None
-        assert entry.step_count == 1
+        assert len(entry.rendered_lines) == 1
 
     async def test_forbidden_on_progress_send_is_swallowed(
         self,
@@ -1389,7 +1436,6 @@ class TestFailureSwallowing:
                 parent_channel_id=_CHANNEL_ID,
                 parent_message_id=_MESSAGE_ID,
                 progress_message_id=_PROGRESS_MESSAGE_ID,
-                step_count=1,
                 history_cursor=1,
             ),
         )
@@ -1420,12 +1466,12 @@ class TestFailureSwallowing:
         """If rendering a part raises, the exception is logged and the
         cursor still advances so we don't loop on the bad message — and no
         progress message is posted for the failed delta."""
-        original = steps_mod._render_tool_call_part
+        original = steps_mod._render_live_tool_call_part
 
         def _raise(_part: Any) -> str:
             raise RuntimeError("synthetic render failure")
 
-        steps_mod._render_tool_call_part = _raise
+        steps_mod._render_live_tool_call_part = _raise
         try:
             consumer = build_steps_consumer(
                 persona_sender,
@@ -1451,7 +1497,146 @@ class TestFailureSwallowing:
             entry = steps_state.get(_CORRELATION_ID)
             assert entry is not None
             assert entry.history_cursor == len(history)
-            assert entry.step_count == 0
-            assert any("_render_delta raised" in r.message for r in caplog.records)
+            assert len(entry.rendered_lines) == 0
+            assert any("_render_live_delta raised" in r.message for r in caplog.records)
         finally:
-            steps_mod._render_tool_call_part = original
+            steps_mod._render_live_tool_call_part = original
+
+
+class TestProgressTruncation:
+    """End-to-end (through ``_consume``): a turn that accumulates more trace
+    than fits the tail-window budget posts content that stays under Discord's
+    hard cap and carries the elision marker, with the most recent steps kept
+    and the oldest dropped. Guards the accumulator → tail-window → clamp
+    wiring that the per-function unit tests exercise only in isolation."""
+
+    async def test_long_trace_is_tail_windowed_in_posted_content(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        consumer = build_steps_consumer(persona_sender, _registry(), pending_wires, steps_state)
+        # 30 tool calls, each rendering to a long (per-part-capped) line —
+        # well over _PROGRESS_BODY_MAX_CHARS combined. The "i=<n>" prefix
+        # survives per-part truncation (it sits at the front of the args), so
+        # we can identify which steps the tail window kept vs dropped.
+        history = [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name="call", args={"i": n, "pad": "x" * 200}, tool_call_id=f"t{n}")
+                    for n in range(30)
+                ]
+            ),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        persona_sender.send.assert_awaited_once()
+        content = persona_sender.send.call_args.kwargs["content"]
+        # Never exceeds Discord's hard cap, and the elision is announced.
+        assert len(content) <= steps_mod._DISCORD_MESSAGE_LIMIT
+        assert content.startswith(steps_mod._HIDDEN_STEPS_MARKER)
+        # Most recent step kept; oldest dropped.
+        assert "i=29," in content
+        assert "i=0," not in content
+
+
+class TestLiveRender:
+    """The compact live renderer (Hybrid style: prose text + inline-code
+    ``tool_name(args)`` / ``⎿ result`` lines) and the tail-window cap that
+    keeps the in-place edit under Discord's 2000-char limit."""
+
+    def test_text_part_kept_as_prose(self) -> None:
+        delta = [ModelResponse(parts=[TextPart(content="On it — checking now.")])]
+        assert steps_mod._render_live_delta(delta) == ["On it — checking now."]
+
+    def test_tool_call_renders_keyword_args_as_inline_code(self) -> None:
+        delta = [
+            ModelResponse(parts=[ToolCallPart(tool_name="weather", args={"city": "Tokyo", "n": 5}, tool_call_id="t1")])
+        ]
+        assert steps_mod._render_live_delta(delta) == ['`weather(city="Tokyo", n=5)`']
+
+    def test_empty_args_render_bare_parens(self) -> None:
+        delta = [ModelResponse(parts=[ToolCallPart(tool_name="ping", args={}, tool_call_id="t1")])]
+        assert steps_mod._render_live_delta(delta) == ["`ping()`"]
+
+    def test_non_object_args_fall_back_to_raw_json(self) -> None:
+        # args is a JSON string that parses to a list, not an object →
+        # args_as_dict() asserts; the renderer falls back to the raw JSON.
+        delta = [ModelResponse(parts=[ToolCallPart(tool_name="f", args="[1, 2]", tool_call_id="t1")])]
+        assert steps_mod._render_live_delta(delta) == ["`f([1, 2])`"]
+
+    def test_scalar_arg_falls_back_to_raw_json(self) -> None:
+        # A bare scalar arg also fails args_as_dict (not an object) → fallback.
+        delta = [ModelResponse(parts=[ToolCallPart(tool_name="f", args="42", tool_call_id="t1")])]
+        assert steps_mod._render_live_delta(delta) == ["`f(42)`"]
+
+    def test_nested_object_arg_values_render_as_compact_json(self) -> None:
+        # Non-scalar arg VALUES are JSON-encoded with compact separators (no
+        # space after ':'/','), keeping the call line tight.
+        delta = [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="q",
+                        args={"filter": {"gte": 5, "lt": 10}, "tags": [1, 2]},
+                        tool_call_id="t1",
+                    )
+                ]
+            )
+        ]
+        assert steps_mod._render_live_delta(delta) == ['`q(filter={"gte":5,"lt":10}, tags=[1,2])`']
+
+    def test_tool_return_renders_with_corner_prefix(self) -> None:
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="t1")])]
+        assert steps_mod._render_live_delta(delta) == ["`⎿ 18C`"]
+
+    def test_tool_return_collapses_whitespace_to_one_line(self) -> None:
+        delta = [
+            ModelRequest(parts=[ToolReturnPart(tool_name="t", content="line1\n\n  line2\t end", tool_call_id="x")])
+        ]
+        # Newlines/tabs collapsed so the result stays a single inline-code line.
+        assert steps_mod._render_live_delta(delta) == ["`⎿ line1 line2 end`"]
+
+    def test_backticks_in_content_are_neutralized(self) -> None:
+        # A backtick in tool content would otherwise close the inline-code span.
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="use `code` now", tool_call_id="x")])]
+        rendered = steps_mod._render_live_delta(delta)
+        assert rendered == ["`⎿ use 'code' now`"]
+        assert "`" not in rendered[0][1:-1]  # no backticks inside the span
+
+    def test_oversized_tool_line_truncated_and_single_line(self) -> None:
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="x" * 5000, tool_call_id="x")])]
+        line = steps_mod._render_live_delta(delta)[0]
+        # Capped to the per-part tool limit (+2 wrapping backticks), no newline,
+        # ends with the single-line ellipsis inside the span.
+        assert len(line) <= steps_mod._LIVE_TOOL_MAX_CHARS + 2
+        assert "\n" not in line
+        assert line.endswith("…`")
+
+    def test_tail_window_drops_oldest_and_marks_elision(self) -> None:
+        lines = [f"line{i}" for i in range(100)]
+        body = steps_mod._tail_window(lines, max_chars=40)
+        assert body.startswith(steps_mod._HIDDEN_STEPS_MARKER)
+        assert "line99" in body  # most recent survives
+        assert "line0\n" not in body  # oldest dropped
+
+    def test_tail_window_no_marker_when_everything_fits(self) -> None:
+        body = steps_mod._tail_window(["a", "b", "c"], max_chars=1000)
+        assert body == "a\nb\nc"
+        assert steps_mod._HIDDEN_STEPS_MARKER not in body
+
+    def test_progress_content_is_body_only_and_hard_clamped(self) -> None:
+        entry = StepsEntry(parent_channel_id=1, parent_message_id=2)
+        entry.rendered_lines = [f"`⎿ {'x' * 150}`" for _ in range(200)]
+        content = steps_mod._progress_content(entry)
+        # No header line; the message IS the (tail-windowed) trace, never over
+        # Discord's hard cap.
+        assert not content.startswith("⚙ running…")
+        assert len(content) <= steps_mod._DISCORD_MESSAGE_LIMIT

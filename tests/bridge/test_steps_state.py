@@ -14,13 +14,11 @@ from calfkit_organization.bridge.steps_state import StepsEntry, StepsState
 def _entry(
     progress_message_id: int | None = None,
     history_cursor: int = 0,
-    step_count: int = 0,
 ) -> StepsEntry:
     return StepsEntry(
         parent_channel_id=10,
         parent_message_id=20,
         progress_message_id=progress_message_id,
-        step_count=step_count,
         history_cursor=history_cursor,
     )
 
@@ -178,17 +176,17 @@ class TestEntry:
     def test_defaults(self) -> None:
         e = StepsEntry(parent_channel_id=1, parent_message_id=2)
         assert e.progress_message_id is None
-        assert e.step_count == 0
+        assert e.rendered_lines == []
         assert e.history_cursor == 0
         assert e.debounce_task is None
 
     def test_entry_is_mutable(self) -> None:
-        """progress_message_id, step_count, and history_cursor advance
+        """progress_message_id, rendered_lines, and history_cursor advance
         across hops."""
         e = _entry()
         e.progress_message_id = 999
-        e.step_count = 3
+        e.rendered_lines.append("step")
         e.history_cursor = 5
         assert e.progress_message_id == 999
-        assert e.step_count == 3
+        assert e.rendered_lines == ["step"]
         assert e.history_cursor == 5
