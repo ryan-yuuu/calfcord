@@ -733,9 +733,10 @@ def _tool_using_history() -> list[Any]:
     """A cumulative terminal ``message_history`` where the turn used a tool.
 
     ``[initial_len=0 : -1]`` (the slice the outbox renders) is the first
-    three messages — a ``ToolCallPart`` + a ``ToolReturnPart`` → 2 rendered
-    steps. The trailing ``ModelResponse`` is the final answer the outbox
-    posts to the channel (dropped by the ``[:-1]`` slice).
+    three messages — a ``UserPromptPart`` (not rendered) plus a
+    ``ToolCallPart`` and its ``ToolReturnPart``, which render as ONE tree
+    block → 1 rendered step. The trailing ``ModelResponse`` is the final
+    answer the outbox posts to the channel (dropped by the ``[:-1]`` slice).
     """
     return [
         ModelRequest(parts=[UserPromptPart(content="weather in tokyo?")]),
@@ -772,13 +773,14 @@ class TestTranscriptAndToggle:
         )
 
         # Toggle attached to the reply: one secondary button carrying the
-        # static toggle custom_id, labelled with the 2-step count.
+        # static toggle custom_id, labelled with the 1-step count (the call
+        # and its result render as one tree block).
         persona_sender.send.assert_awaited_once()
         buttons = persona_sender.send.call_args.kwargs["extra_buttons"]
         assert buttons is not None
         assert len(buttons) == 1
         assert buttons[0].custom_id == _TOGGLE_CUSTOM_ID
-        assert buttons[0].label == "⤵ 2 steps"
+        assert buttons[0].label == "⤵ 1 step"
 
         # Transcript row written against the posted reply id (99999), keyed
         # by correlation_id, with the round-trippable delta slice.
@@ -1136,16 +1138,16 @@ class TestTranscriptAndToggle:
         transcript_store: TranscriptStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The outbox-side ``_render_step_count`` guard: if ``_render_delta``
-        raises (``ToolCallPart.args_as_json_str`` blows up on malformed args)
-        the step count degrades to 0 — so the reply STILL posts, just without
-        the toggle and without a transcript row (degraded, not fatal). Mirrors
-        the toggle callback's render guard."""
+        """The outbox-side ``_render_step_count`` guard: if
+        ``_render_tree_blocks`` raises (``ToolCallPart.args_as_json_str`` blows
+        up on malformed args) the step count degrades to 0 — so the reply STILL
+        posts, just without the toggle and without a transcript row (degraded,
+        not fatal). Mirrors the toggle callback's render guard."""
 
         def _boom(_messages: object) -> list[str]:
             raise ValueError("malformed tool-call args")
 
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._render_delta", _boom)
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._render_tree_blocks", _boom)
 
         consumer = build_outbox_consumer(
             persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store

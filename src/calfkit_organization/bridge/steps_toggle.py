@@ -45,7 +45,7 @@ from typing import Any
 
 import discord
 
-from calfkit_organization.bridge.steps import _pluralize_steps, _render_delta
+from calfkit_organization.bridge.steps import _pluralize_steps, _render_tree_blocks
 from calfkit_organization.bridge.transcripts import TranscriptStoreLike
 
 logger = logging.getLogger(__name__)
@@ -91,10 +91,12 @@ def render_steps(delta_json: str) -> tuple[str, int]:
     """Render a persisted ``delta_json`` blob into a full steps block.
 
     Deserializes the blob with pydantic-ai's ``ModelMessagesTypeAdapter``,
-    runs the shared :func:`~calfkit_organization.bridge.steps._render_delta`
-    to get one rendered string per step part, and joins them with a blank
-    line. The text is returned in full — NO truncation; the caller decides
-    whether it fits an inline message or must be attached as a file.
+    runs the shared
+    :func:`~calfkit_organization.bridge.steps._render_tree_blocks` to get one
+    rendered string per visual block (a prose block, or a ``● tool(args)`` /
+    ``⎿ result`` tree block), and joins them with a blank line. The text is
+    returned in full — NO truncation; the caller decides whether it fits an
+    inline message or must be attached as a file.
 
     Args:
         delta_json: The serialized structured slice of a turn's
@@ -111,7 +113,7 @@ def render_steps(delta_json: str) -> tuple[str, int]:
     from calfkit._vendor.pydantic_ai.messages import ModelMessagesTypeAdapter
 
     messages = ModelMessagesTypeAdapter.validate_json(delta_json)
-    rendered = _render_delta(messages)
+    rendered = _render_tree_blocks(messages)
     return "\n\n".join(rendered), len(rendered)
 
 
@@ -219,7 +221,7 @@ class StepsToggleView(discord.ui.View):
             return
 
         # render_steps can raise: ModelMessagesTypeAdapter.validate_json
-        # blows up on a corrupt blob, and _render_delta's
+        # blows up on a corrupt blob, and _render_tree_blocks'
         # ToolCallPart.args_as_json_str blows up on malformed tool-call
         # args. Either would otherwise escape the callback AFTER the defer,
         # hanging the ephemeral spinner. Mirror the outbox's

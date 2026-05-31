@@ -381,10 +381,21 @@ class SlashCommandManager:
             return
 
         logger.info("clear marker posted channel_id=%s", channel_id)
-        await reply(
-            "Context cleared. Agents won't see messages above the marker on "
-            "their next turn in this channel."
-        )
+        # The public 🧹 marker is the only confirmation the user needs, so we
+        # send no ephemeral ack. A slash command must still acknowledge its
+        # interaction or Discord surfaces "the application did not respond";
+        # defer ephemerally and immediately delete the placeholder so the ack
+        # leaves no lingering message — only the marker remains. Best-effort
+        # like ``reply``: a failed ack has nothing actionable left to do, and
+        # ``DiscordException`` also covers the placeholder already being gone
+        # (``NotFound``), so log and swallow.
+        try:
+            await interaction.response.defer(ephemeral=True)
+            await interaction.delete_original_response()
+        except discord.DiscordException:
+            logger.exception(
+                "failed to ack clear interaction_id=%s", interaction.id
+            )
 
     async def _on_task(self, interaction: discord.Interaction, message: str) -> None:
         """Handle a ``/task`` invocation: post the message, open a thread, route it.

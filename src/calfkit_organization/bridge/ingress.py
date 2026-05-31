@@ -106,12 +106,12 @@ REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000
 """Per-tool-return character cap applied to replayed (hydrated) tool
 returns before they re-enter an agent's ``message_history``.
 
-Deliberately distinct from — and much larger than — the 1500-char
-``STEP_CONTENT_MAX_CHARS`` used to render steps into a 2000-char Discord
-message: the Discord cap is a *display* budget, while this one bounds the
-*LLM context* a replayed turn re-injects. Reusing the 1500-char render cap
-would lobotomize the tool context the model gets to reason over on the
-next turn (the whole point of replay). Only oversized individual ``str``
+Deliberately distinct from — and much larger than — the 2000-char Discord
+display budget the steps renderer targets: the Discord cap is a *display*
+budget, while this one bounds the *LLM context* a replayed turn re-injects.
+Reusing a display-sized render cap would lobotomize the tool context the
+model gets to reason over on the next turn (the whole point of replay).
+Only oversized individual ``str``
 tool returns are trimmed; ``history_turns`` already bounds how many turns
 replay can touch (plan §4: "``history_turns`` bounds replay; no backstop"
 and §11 Q-5: this is the lever that keeps the hydrated envelope under the

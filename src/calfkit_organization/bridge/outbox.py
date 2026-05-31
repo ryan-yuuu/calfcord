@@ -58,7 +58,7 @@ from calfkit_organization.agents.phonebook import (
 )
 from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.steps import _render_delta
+from calfkit_organization.bridge.steps import _render_tree_blocks
 from calfkit_organization.bridge.steps_toggle import build_toggle_button
 from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfkit_organization.bridge.wire import WireMessage
@@ -418,20 +418,22 @@ def _turn_delta(result: NodeResult[str], entry: PendingEntry) -> list[ModelMessa
 
 
 def _render_step_count(delta: list[ModelMessage], wire: WireMessage) -> int:
-    """Count the renderable step parts in ``delta``, defensively.
+    """Count the renderable step blocks in ``delta``, defensively.
 
-    Wraps :func:`~calfkit_organization.bridge.steps._render_delta` (which
-    can raise — ``ToolCallPart.args_as_json_str`` blows up on malformed
-    args) so a single bad turn never crashes the reply post. On failure the
-    turn is treated as having zero steps: the reply still posts, just
-    without the toggle or a transcript row (degraded, not fatal). Mirrors
+    Wraps :func:`~calfkit_organization.bridge.steps._render_tree_blocks`
+    (which can raise — ``ToolCallPart.args_as_json_str`` blows up on malformed
+    args) so a single bad turn never crashes the reply post. A tool call and
+    its result render as ONE block, so the count credits a tool use once. On
+    failure the turn is treated as having zero steps: the reply still posts,
+    just without the toggle or a transcript row (degraded, not fatal). Mirrors
     the steps consumer's identical guard.
     """
     try:
-        return len(_render_delta(delta))
+        return len(_render_tree_blocks(delta))
     except Exception:
         logger.exception(
-            "outbox _render_delta raised computing step count event_id=%s; posting reply without toggle/transcript",
+            "outbox _render_tree_blocks raised computing step count event_id=%s; "
+            "posting reply without toggle/transcript",
             wire.event_id,
         )
         return 0

@@ -14,7 +14,8 @@ hop's ``state.message_history`` delta and renders the new
 entries into one transient progress message posted under the agent's
 persona in the user's original channel — streaming the agent's ACTUAL
 work as it happens: model text as prose, tool calls as
-``tool_name(args)`` lines, and tool returns as ``⎿ result`` lines — the
+``tool_name(args)`` lines, and tool returns as a short fenced ``⎿ result``
+block (the first few lines) — the
 message IS the trace, with no header/counter line. It is a bounded *tail
 window* (the most recent lines that fit Discord's 2000-char cap); the full
 untruncated transcript stays on the reply's ``⤵ steps`` button.
@@ -158,6 +159,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import Awaitable, Sequence
 from typing import Final
 
@@ -185,16 +187,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STEPS_CONSUMER_NODE_ID: Final[str] = "discord-steps-sink"
 
-STEP_CONTENT_MAX_CHARS: Final[int] = 1500
-"""Maximum inner content length we render for a single ``ToolCallPart``
-args block or ``ToolReturnPart`` content block when counting steps.
-Above this, the body is truncated with an explicit indicator. Picked
-well below Discord's 2000-char message cap. Applies to :func:`_render_delta`,
-which is shared by the reply's ``⤵ steps`` expand view and tool-call replay;
-the live progress message uses its own tighter per-part caps
-(:data:`_LIVE_TEXT_MAX_CHARS` / :data:`_LIVE_TOOL_MAX_CHARS`) via
-:func:`_render_live_delta`."""
-
 TRUNCATION_MARKER: Final[str] = "\n… (truncated)"
 
 # --- Live progress body rendering -------------------------------------------
@@ -204,8 +196,8 @@ TRUNCATION_MARKER: Final[str] = "\n… (truncated)"
 # bounded *tail window*: the most recent lines that fit, with a marker when
 # older steps are elided. The full, untruncated transcript remains on the
 # reply's ``⤵ steps`` button after completion. These caps apply ONLY to this
-# live view; the durable transcript / toggle renderer (:func:`_render_delta`)
-# is untouched.
+# live view; the durable transcript / toggle renderer
+# (:func:`_render_tree_blocks`) is untouched.
 
 _DISCORD_MESSAGE_LIMIT: Final[int] = 2000
 """Discord's hard per-message content cap. The rendered progress body is
@@ -222,9 +214,20 @@ _LIVE_TEXT_MAX_CHARS: Final[int] = 1000
 prose) but bounded so one long preamble can't dominate the window."""
 
 _LIVE_TOOL_MAX_CHARS: Final[int] = 200
-"""Per-part cap for a single ``tool_name(args)`` call line or ``⎿ result``
-return line. Tight on purpose — tool args/results are the noisiest parts, and
-short lines let more recent steps stay visible in the tail window."""
+"""Per-part cap for a single ``tool_name(args)`` call line in the live body.
+Tight on purpose — a tool call must never exceed one line, and short lines let
+more recent steps stay visible in the tail window. The result line has its own
+(multi-line) caps below."""
+
+_LIVE_RETURN_MAX_LINES: Final[int] = 3
+"""Max real lines kept from a tool result in the live body. The result is the
+noisiest part; a handful of lines gives useful context while staying compact.
+Beyond this the last kept line carries a ``… (truncated)`` marker — the full
+result lives on the ⤵ transcript."""
+
+_LIVE_RETURN_LINE_MAX_CHARS: Final[int] = 120
+"""Per-line cap for a kept live-result line, so one very long line can't blow
+the compact window (and also marks the result truncated)."""
 
 _HIDDEN_STEPS_MARKER: Final[str] = "…  *(earlier steps hidden — full trace on the ⤵ button)*"
 """Prepended to the body when the tail window dropped older lines."""
@@ -259,42 +262,119 @@ def _render_text_part(part: TextPart) -> str | None:
     return text
 
 
-def _render_tool_call_part(part: ToolCallPart) -> str:
-    """Render a ``ToolCallPart`` into a Discord-formatted code block."""
-    args = _truncate(part.args_as_json_str(), STEP_CONTENT_MAX_CHARS)
-    return f"**Calling `{part.tool_name}`**\n```json\n{args}\n```"
+# --- Full transcript tree renderer (the ⤵ steps expand view) ----------------
+# Renders the turn's steps as a Claude-Code-style trace: model text as prose,
+# each tool call as ``● tool(args)`` with its result nested under ``⎿``. Unlike
+# the live view this is the FULL trace — NO per-part truncation; the only bound
+# is Discord's message cap, beyond which steps_toggle attaches the whole render
+# as a steps.md file. One string per visual block (a prose block, or a
+# call+return pair); the block COUNT is reused by the outbox as the
+# ``⤵ N steps`` label, so a tool call and its result count as ONE step.
+
+_TREE_CALL_MARKER: Final[str] = "●"
+_TREE_RETURN_MARKER: Final[str] = "⎿"
+
+_TRIPLE_BACKTICK_RUN: Final[re.Pattern[str]] = re.compile(r"`{3,}")
 
 
-def _render_tool_return_part(part: ToolReturnPart) -> str:
-    """Render a ``ToolReturnPart`` into a Discord-formatted code block."""
-    body = _truncate(part.model_response_str(), STEP_CONTENT_MAX_CHARS)
-    return f"**`{part.tool_name}` returned**\n```\n{body}\n```"
+def _fence_safe(content: str) -> str:
+    """Neutralize runs of 3+ backticks so embedded fences can't break out.
 
-
-def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
-    """Project the new ``message_history`` slice into post-ready strings.
-
-    Walks the delta in order and emits one string per renderable part. This
-    is the VERBOSE renderer, used by the reply's ``⤵ steps`` expand/replay
-    view (:mod:`calfkit_organization.bridge.steps_toggle`), which renders the
-    full strings, and by the outbox, which consumes ``len(...)`` as the step
-    count for the toggle label. It is NOT used by the live progress message —
-    that path uses the compact :func:`_render_live_delta`. Skips:
-
-    * ``ThinkingPart``, ``FilePart``, ``BuiltinTool*Part`` —
-      out of scope for v1.
-    * ``UserPromptPart`` / ``SystemPromptPart`` — invocation context,
-      not the agent's "work"; the user prompt is already visible above
-      the progress message.
-    * ``RetryPromptPart`` — v1 simplification. These are pydantic-ai's
-      framework-level retry feedback (e.g. tool-arg validation failure)
-      and would actually help debug agent loops, but rendering them
-      requires distinguishing pydantic_ai's auto-retries from genuine
-      model-side errors — deferred to a follow-up.
-
-    Caller wraps this in a try/except — ``args_as_json_str`` can raise
-    on malformed args.
+    Discord closes a ``` code block at the next run of three-or-more
+    backticks regardless of the opening fence's length, so a triple-backtick
+    inside tool output would otherwise terminate the block early and spill the
+    remainder as raw markdown. Weaving a zero-width space between the backticks
+    of any 3+ run leaves the text visually identical while ensuring no raw
+    ``` survives to close the fence. Single/double backticks are left untouched
+    — they render literally inside a block. (The only cost: a steps.md copied
+    from output that itself contained ``` carries invisible zero-width spaces.)
     """
+    return _TRIPLE_BACKTICK_RUN.sub(lambda m: "\u200b".join("`" * len(m.group())), content)
+
+
+def _fenced(content: str) -> str:
+    """Wrap ``content`` in a code fence, neutralizing any inner ``` first."""
+    return f"```\n{_fence_safe(content)}\n```"
+
+
+def _tool_tree_block(call: ToolCallPart, ret: ToolReturnPart | None) -> str:
+    """Render a tool call and its (optional) result as one fenced tree block.
+
+    ``● tool(args)`` on the first line; when a matching return is present, its
+    result is nested under ``⎿`` with continuation lines aligned beneath the
+    first result character. Args use the keyword form WITHOUT whitespace
+    collapsing — this is the full view, so byte fidelity is preserved (real
+    newlines are already JSON-escaped, so the signature stays one line). No
+    truncation: the only bound is the overall message cap enforced upstream.
+    """
+    sig = f"{call.tool_name}({_format_call_args(call, collapse=False)})"
+    lines = [f"{_TREE_CALL_MARKER} {sig}"]
+    if ret is not None:
+        first, *rest = ret.model_response_str().split("\n")
+        lines.append(f"  {_TREE_RETURN_MARKER}  {first}")
+        lines.extend(f"     {line}" for line in rest)
+    return _fenced("\n".join(lines))
+
+
+def _return_tree_block(ret: ToolReturnPart) -> str:
+    """Render an orphan tool return (no call with its id in the slice) standalone.
+
+    Practically unreachable — a tool call and its return live in the same
+    agent run, after the history cursor, so they're sliced together. Rendered
+    defensively so an orphan return is never silently dropped, which would also
+    skew the step count that gates the ⤵ button.
+    """
+    first, *rest = ret.model_response_str().split("\n")
+    lines = [f"{_TREE_RETURN_MARKER}  {first}"]
+    lines.extend(f"   {line}" for line in rest)
+    return _fenced("\n".join(lines))
+
+
+def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
+    """Project the turn's ``message_history`` slice into full tree blocks.
+
+    The VERBOSE/full renderer behind the reply's ``⤵ steps`` expand view
+    (:mod:`calfkit_organization.bridge.steps_toggle`) and the source of the
+    outbox's step COUNT (``len(...)`` → the ``⤵ N steps`` label). It is NOT
+    used by the live progress message — that path uses the compact
+    :func:`_render_live_delta`. Walks the delta in order, emitting one string
+    per visual block:
+
+    * a model ``TextPart`` → a prose block (whitespace-only skipped);
+    * a ``ToolCallPart`` → ``● tool(args)`` with its matched ``ToolReturnPart``
+      (looked up by ``tool_call_id``) nested under ``⎿`` — a call and its
+      result are ONE block, so the step count credits a tool use once.
+
+    Skips the same parts as the live renderer (``ThinkingPart``, ``FilePart``,
+    ``BuiltinTool*Part``, ``UserPromptPart`` / ``SystemPromptPart``,
+    ``RetryPromptPart`` — see the original v1 rationale).
+
+    Pairing is purely by id and independent of message order: a return is
+    folded into its call iff a call with that id exists anywhere in the slice;
+    a return whose call is absent renders standalone (so nothing is dropped,
+    and the orphan path can't double-render a return that arrives before its
+    call). Output order follows message order. Duplicate ``tool_call_id``s
+    don't occur in well-formed pydantic-ai history; on a collision the last
+    return for an id wins.
+
+    Caller wraps this in a try/except — ``args_as_json_str`` /
+    ``model_response_str`` can raise on malformed payloads.
+    """
+    # Two index passes (order-independent): which ids have a call in the
+    # slice, and the return for each id. A return is then an orphan iff its id
+    # has no call here — decided without relying on walk order.
+    call_ids: set[str] = set()
+    returns_by_id: dict[str, ToolReturnPart] = {}
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart):
+                    call_ids.add(part.tool_call_id)
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    returns_by_id[part.tool_call_id] = part
+
     out: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelResponse):
@@ -304,11 +384,11 @@ def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
                     if rendered is not None:
                         out.append(rendered)
                 elif isinstance(part, ToolCallPart):
-                    out.append(_render_tool_call_part(part))
+                    out.append(_tool_tree_block(part, returns_by_id.get(part.tool_call_id)))
         elif isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, ToolReturnPart):
-                    out.append(_render_tool_return_part(part))
+                if isinstance(part, ToolReturnPart) and part.tool_call_id not in call_ids:
+                    out.append(_return_tree_block(part))
     return out
 
 
@@ -342,14 +422,27 @@ def _inline_code(inner: str) -> str:
     return f"`{inner.replace('`', chr(39))}`"
 
 
-def _format_call_args(part: ToolCallPart) -> str:
+def _format_call_args(part: ToolCallPart, *, collapse: bool = True) -> str:
     """Render a tool call's args as keyword form: ``k=<json-value>, …``.
 
     Uses ``args_as_dict`` so a flat object renders as ``city="Tokyo", n=5``
     (each value JSON-encoded, so strings keep their quotes and booleans read
     as ``true``/``false``). Args that aren't a JSON object (a bare list or
-    scalar) fall back to the compact JSON string. The whole thing is collapsed
-    to one line; the caller truncates.
+    scalar) fall back to the compact JSON string.
+
+    ``collapse`` (default ``True``) folds runs of real whitespace to single
+    spaces for the compact live preview. The full transcript tree passes
+    ``collapse=False`` to keep byte fidelity — JSON already escapes real
+    newlines, so the signature stays one line either way, but inner spacing in
+    string values is preserved.
+
+    NEVER raises: a deeply-malformed args object that even ``args_as_json_str``
+    can't serialize renders as ``…`` so the live preview (and the durable
+    transcript, which also routes through here) shows *something* rather than
+    losing the whole turn. That total failure IS logged so the dropped args are
+    diagnosable — historically the transcript path raised here and degraded
+    loudly via the outbox guard; the swallow keeps the rest of the trace, but
+    must not be silent about the loss.
     """
     try:
         args = part.args_as_dict()
@@ -366,9 +459,19 @@ def _format_call_args(part: ToolCallPart) -> str:
         # on a non-serializable args object. A live preview must NEVER raise
         # out of here: the whole point is to render *something*.
         try:
-            return _collapse_ws(part.args_as_json_str())
+            raw = part.args_as_json_str()
         except Exception:
+            # Both arg accessors failed — the args are unrenderable. Render a
+            # placeholder but log so this isn't a SILENT data loss in the
+            # durable transcript (the full view routes here too).
+            logger.exception(
+                "steps: tool-call args unrenderable for tool=%s call_id=%s; "
+                "rendering '…' (args omitted from this step)",
+                part.tool_name,
+                part.tool_call_id,
+            )
             return "…"
+        return _collapse_ws(raw) if collapse else raw
     if not args:
         return ""
     pairs: list[str] = []
@@ -378,7 +481,8 @@ def _format_call_args(part: ToolCallPart) -> str:
         except (TypeError, ValueError):
             rendered_value = str(value)
         pairs.append(f"{key}={rendered_value}")
-    return _collapse_ws(", ".join(pairs))
+    joined = ", ".join(pairs)
+    return _collapse_ws(joined) if collapse else joined
 
 
 def _render_live_tool_call_part(part: ToolCallPart) -> str:
@@ -388,23 +492,48 @@ def _render_live_tool_call_part(part: ToolCallPart) -> str:
 
 
 def _render_live_tool_return_part(part: ToolReturnPart) -> str:
-    """``\\`⎿ result\\``` — one inline-code line, whitespace collapsed."""
-    body = _collapse_ws(part.model_response_str())
-    return _inline_code(_truncate_inline(f"⎿ {body}", _LIVE_TOOL_MAX_CHARS))
+    """Compact fenced result: ``⎿`` first line + up to a few aligned more.
+
+    Keeps the first :data:`_LIVE_RETURN_MAX_LINES` real lines of the result so
+    multi-line output stays readable in the live stream, but bounded. The two
+    kinds of truncation are marked where they happen: a line longer than
+    :data:`_LIVE_RETURN_LINE_MAX_CHARS` is cut with a trailing ``…`` ON THAT
+    line, and when whole lines are dropped beyond the kept few a
+    ``… (truncated)`` marker is appended to the last kept line. Wrapped in a
+    fence (embedded ``` is neutralized) so a stray triple-backtick can't break
+    the progress message; the full, untruncated result lives on the ⤵ transcript.
+    """
+    lines = part.model_response_str().split("\n")
+    kept: list[str] = []
+    for line in lines[:_LIVE_RETURN_MAX_LINES]:
+        line = line.rstrip()
+        if len(line) > _LIVE_RETURN_LINE_MAX_CHARS:
+            # Mark the cut on the line that was actually cut, not elsewhere.
+            line = line[: _LIVE_RETURN_LINE_MAX_CHARS - 1].rstrip() + "…"
+        kept.append(line)
+    if not kept:
+        kept = [""]
+    if len(lines) > _LIVE_RETURN_MAX_LINES:
+        # Whole lines were dropped — flag it at the end of the block.
+        kept[-1] = f"{kept[-1]} … (truncated)".strip()
+    first, *rest = kept
+    tree = [f"{_TREE_RETURN_MARKER} {first}"]
+    tree.extend(f"  {line}" for line in rest)
+    return _fenced("\n".join(tree))
 
 
 def _render_live_delta(messages: Sequence[ModelMessage]) -> list[str]:
     """Compact per-part render for the live progress body.
 
-    Same part-selection as :func:`_render_delta` (text + tool calls from
+    Same part-selection as :func:`_render_tree_blocks` (text + tool calls from
     ``ModelResponse``; tool returns from ``ModelRequest``; everything else
-    skipped) but in the Hybrid display format: model text as plain markdown
-    prose, tool calls/returns as inline-code lines. One string per rendered
-    part, in order. The caller appends these to
-    :attr:`StepsEntry.rendered_lines`.
+    skipped) but in the compact live format: model text as plain markdown
+    prose, a tool call as one inline-code ``tool_name(args)`` line, a tool
+    return as a short fenced ``⎿`` block. One string per rendered part, in
+    order. The caller appends these to :attr:`StepsEntry.rendered_lines`.
 
     Wrapped by the caller in try/except — ``args_as_json_str`` can raise on
-    malformed args, exactly as for :func:`_render_delta`.
+    malformed args, exactly as for :func:`_render_tree_blocks`.
     """
     out: list[str] = []
     for msg in messages:

@@ -3,7 +3,8 @@
 Covers the three pieces of :mod:`calfkit_organization.bridge.steps_toggle`:
 
 * :func:`render_steps` — round-trips a ``ModelMessagesTypeAdapter`` blob
-  through ``_render_delta`` and returns the FULL untruncated text + count;
+  through ``_render_tree_blocks`` and returns the FULL untruncated text +
+  block count (a tool call and its result are one block);
 * :func:`build_toggle_button` — label / custom_id / style of the
   view-steps button;
 * :class:`StepsToggleView._show_steps` — the defer-then-ephemeral-followup
@@ -74,12 +75,11 @@ def _delta_json() -> str:
 def _big_delta_json(*, parts: int = 4, chars_per_return: int = 1000) -> str:
     """Serialize a turn slice whose JOINED render exceeds the Discord cap.
 
-    ``_render_delta`` caps each individual part at ``STEP_CONTENT_MAX_CHARS``
-    (1500), so a single oversized return can't push the total over 2000 on
-    its own. We therefore use several tool-call/return pairs whose combined
-    render is well over 2000 chars while each part stays under the per-part
-    cap — exercising the file-attachment branch of the callback. ``X * N``
-    is a recognizable marker we can assert survives in full.
+    ``_render_tree_blocks`` applies NO per-part truncation, so each call/return
+    pair renders in full. Several pairs whose combined render is well over 2000
+    chars exercise the file-attachment branch of the callback. ``X * N`` is a
+    recognizable marker we can assert survives in full. Each pair is ONE block,
+    so ``parts`` pairs render to ``parts`` blocks.
     """
     delta: list[object] = []
     for i in range(parts):
@@ -99,28 +99,28 @@ def _big_delta_json(*, parts: int = 4, chars_per_return: int = 1000) -> str:
 
 def test_render_steps_returns_full_untruncated_text_and_count() -> None:
     text, count = render_steps(_delta_json())
-    assert count == 3
-    # Each part rendered and joined with a blank line, in order — nothing
-    # truncated.
+    # Text block + one call/return block: a tool call and its result are ONE
+    # step, so the preamble + weather call count as 2 (not 3).
+    assert count == 2
+    # Prose preamble, then the tool call as ``● tool(args)`` with its result
+    # nested under ``⎿`` — in order, nothing truncated.
     assert "Let me check." in text
-    assert "**Calling `weather`**" in text
-    assert '{"c":"Tokyo"}' in text
-    assert "**`weather` returned**" in text
-    assert "18C" in text
-    # Blank-line join between the three parts.
-    assert text.count("\n\n") >= 2
+    assert '● weather(c="Tokyo")' in text
+    assert "⎿  18C" in text
+    # Blank-line join between the two blocks.
+    assert text.count("\n\n") >= 1
     # No truncation marker — the full render is returned regardless of size.
     assert "truncated" not in text
 
 
 def test_render_steps_does_not_truncate_large_render() -> None:
-    # render_steps adds NO truncation of its own. Each part stays under the
-    # per-part render cap, so the whole render comes back intact — and the
-    # joined total exceeds the Discord message cap (driving the file branch
-    # in the callback). One render per tool-call part + one per return part.
+    # render_steps adds NO truncation of its own (and the tree renderer has no
+    # per-part cap), so the whole render comes back intact — and the joined
+    # total exceeds the Discord message cap (driving the file branch in the
+    # callback). Each call/return pair is one block.
     text, count = render_steps(_big_delta_json(parts=4, chars_per_return=1000))
-    assert count == 8
-    # All 4000 marker chars survive (4 returns of 1000, each under the cap).
+    assert count == 4
+    # All 4000 marker chars survive (4 returns of 1000, rendered in full).
     assert text.count("X") == 4000
     assert len(text) > _DISCORD_MESSAGE_LIMIT
     # render_steps itself never appends a truncation marker.
@@ -207,8 +207,8 @@ async def test_callback_sends_steps_as_ephemeral_message(store: TranscriptStore)
         # The steps content is inlined (no file) since it fits the cap.
         assert kwargs["file"] is discord.utils.MISSING
         content = kwargs["content"]
-        assert "**Calling `weather`**" in content
-        assert "18C" in content
+        assert '● weather(c="Tokyo")' in content
+        assert "⎿  18C" in content
     finally:
         await store.close()
 

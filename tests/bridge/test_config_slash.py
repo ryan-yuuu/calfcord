@@ -96,10 +96,21 @@ def _interaction(*, user_id: int = _OWNER_USER_ID) -> Any:
 
 
 def _clear_interaction(*, user_id: int = _OWNER_USER_ID, channel: Any = None) -> Any:
-    """A fake interaction for /clear — like ``_interaction`` plus a ``channel``."""
-    response = SimpleNamespace(send_message=AsyncMock())
+    """A fake interaction for /clear — like ``_interaction`` plus a ``channel``.
+
+    Carries ``response.defer`` and ``delete_original_response`` mocks so the
+    success path's silent ack (defer ephemerally, then delete the placeholder)
+    is observable; guard/error paths still use ``response.send_message``.
+    """
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
     user = SimpleNamespace(id=user_id, name="alice", display_name="alice")
-    return SimpleNamespace(id=42, user=user, response=response, channel=channel)
+    return SimpleNamespace(
+        id=42,
+        user=user,
+        response=response,
+        channel=channel,
+        delete_original_response=AsyncMock(),
+    )
 
 
 def _httpexception(status: int = 500) -> discord.HTTPException:
@@ -510,7 +521,7 @@ class TestClear:
         assert kwargs.get("ephemeral") is True
         channel.send.assert_not_awaited()
 
-    async def test_owner_posts_marker_and_confirms(
+    async def test_owner_posts_marker_and_silently_acks(
         self, manager: SlashCommandManager
     ) -> None:
         channel = SimpleNamespace(id=12345, send=AsyncMock())
@@ -518,12 +529,12 @@ class TestClear:
         await manager._on_clear(interaction)
 
         channel.send.assert_awaited_once_with(CLEAR_MARKER_TEXT)
-        # Exactly one interaction response — no double-reply on the
-        # success path (the failure branch must not also fire).
-        interaction.response.send_message.assert_awaited_once()
-        msg, kwargs = interaction.response.send_message.call_args
-        assert "cleared" in msg[0].lower()
-        assert kwargs.get("ephemeral") is True
+        # Success posts only the public marker. The interaction is acked
+        # silently — deferred ephemerally, then the placeholder deleted — so no
+        # visible ephemeral message is sent to the invoker.
+        interaction.response.send_message.assert_not_awaited()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.delete_original_response.assert_awaited_once()
 
     async def test_owner_unset_permits_any_caller(self, agents_dir: Path) -> None:
         """When ``owner_user_id`` is None, /clear is open to anyone."""

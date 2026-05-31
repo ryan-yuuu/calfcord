@@ -19,10 +19,11 @@ The tests exercise:
   terminal cancels debounce + deletes, pure-text turns post nothing;
 * failure swallowing (Discord errors on send/edit/delete, exceptions
   inside ``_render_live_delta``);
-* the compact live renderer itself: Hybrid prose + inline-code
-  ``tool_name(args)`` / ``⎿ result`` lines, keyword-arg formatting,
-  backtick neutralization, per-part truncation, and the tail-window cap
-  (see ``TestLiveRender``).
+* the compact live renderer itself: Hybrid prose + an inline-code
+  ``tool_name(args)`` call line + a short fenced ``⎿`` result block (the
+  first few lines), keyword-arg formatting, single/triple-backtick handling,
+  the per-line/line-count result caps, and the tail-window cap (see
+  ``TestLiveRender``).
 
 For debounce, tests monkeypatch ``_PROGRESS_DEBOUNCE_SECONDS`` to 0 and
 await ``entry.debounce_task`` rather than sleeping — no real-time waits.
@@ -283,8 +284,9 @@ class TestProgressPost:
         steps_state: StepsState,
         broker: Any,
     ) -> None:
-        """One ModelResponse with preamble text + a tool call renders to
-        TWO parts → the first progress post already reads '2 steps'."""
+        """One ModelResponse with preamble text + a tool call renders BOTH
+        parts into the first progress post: the prose line and the tool-call
+        line (the live trace has no counter; the message IS the trace)."""
         consumer = build_steps_consumer(
             persona_sender,
             _registry(),
@@ -350,15 +352,16 @@ class TestProgressPost:
         # rendered, as `t()`.
         assert persona_sender.send.call_args.kwargs["content"] == "`t()`"
 
-    async def test_renderable_part_types_counted(
+    async def test_renderable_part_types_each_render_a_live_line(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
         steps_state: StepsState,
         broker: Any,
     ) -> None:
-        """TextPart, ToolCallPart, and ToolReturnPart each count as one
-        step; prompts do not."""
+        """TextPart, ToolCallPart, and ToolReturnPart each render into the live
+        progress content (prose, the call line, the fenced ⎿ block); prompts do
+        not. (The live trace has no step counter — that lives on the ⤵ view.)"""
         consumer = build_steps_consumer(
             persona_sender,
             _registry(),
@@ -390,9 +393,9 @@ class TestProgressPost:
             headers=_headers(),
             broker=broker,
         )
-        # text + tool call + tool return = 3 (prompts excluded): prose line,
-        # then the call and the return as inline-code lines.
-        assert persona_sender.send.call_args.kwargs["content"] == "thinking\n`t()`\n`⎿ ok`"
+        # text + tool call + tool return (prompts excluded): prose line, the
+        # call as an inline-code line, the return as a fenced ``⎿`` block.
+        assert persona_sender.send.call_args.kwargs["content"] == "thinking\n`t()`\n```\n⎿ ok\n```"
 
 
 class TestPureText:
@@ -521,7 +524,7 @@ class TestDebouncedEdit:
         edit_call = persona_sender.edit_message.call_args
         assert edit_call.args[0] == _CHANNEL_ID
         assert edit_call.args[1] == _PROGRESS_MESSAGE_ID
-        assert edit_call.kwargs["content"] == "`t(x=1)`\n`⎿ result`"
+        assert edit_call.kwargs["content"] == "`t(x=1)`\n```\n⎿ result\n```"
         assert len(steps_state.get(_CORRELATION_ID).rendered_lines) == 2
 
     async def test_burst_coalesces_to_one_edit_at_latest_count(
@@ -1455,7 +1458,7 @@ class TestFailureSwallowing:
         assert steps_state.get(_CORRELATION_ID) is None
         assert steps_state.is_completed(_CORRELATION_ID)
 
-    async def test_render_delta_exception_is_swallowed_and_cursor_advances(
+    async def test_live_render_exception_is_swallowed_and_cursor_advances(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -1463,9 +1466,10 @@ class TestFailureSwallowing:
         broker: Any,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """If rendering a part raises, the exception is logged and the
-        cursor still advances so we don't loop on the bad message — and no
-        progress message is posted for the failed delta."""
+        """If the live renderer raises (here ``_render_live_tool_call_part``),
+        the exception is logged and the cursor still advances so we don't loop
+        on the bad message — and no progress message is posted for the failed
+        delta."""
         original = steps_mod._render_live_tool_call_part
 
         def _raise(_part: Any) -> str:
@@ -1548,9 +1552,10 @@ class TestProgressTruncation:
 
 
 class TestLiveRender:
-    """The compact live renderer (Hybrid style: prose text + inline-code
-    ``tool_name(args)`` / ``⎿ result`` lines) and the tail-window cap that
-    keeps the in-place edit under Discord's 2000-char limit."""
+    """The compact live renderer (Hybrid style: prose text, an inline-code
+    ``tool_name(args)`` call line, and a short fenced ``⎿`` result block of up
+    to a few lines) and the tail-window cap that keeps the in-place edit under
+    Discord's 2000-char limit."""
 
     def test_text_part_kept_as_prose(self) -> None:
         delta = [ModelResponse(parts=[TextPart(content="On it — checking now.")])]
@@ -1593,32 +1598,59 @@ class TestLiveRender:
         ]
         assert steps_mod._render_live_delta(delta) == ['`q(filter={"gte":5,"lt":10}, tags=[1,2])`']
 
-    def test_tool_return_renders_with_corner_prefix(self) -> None:
+    def test_tool_return_renders_short_result_in_fenced_block(self) -> None:
         delta = [ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="t1")])]
-        assert steps_mod._render_live_delta(delta) == ["`⎿ 18C`"]
+        # ``⎿`` first line, wrapped in a fence so a stray ``` can't break out.
+        assert steps_mod._render_live_delta(delta) == ["```\n⎿ 18C\n```"]
 
-    def test_tool_return_collapses_whitespace_to_one_line(self) -> None:
-        delta = [
-            ModelRequest(parts=[ToolReturnPart(tool_name="t", content="line1\n\n  line2\t end", tool_call_id="x")])
-        ]
-        # Newlines/tabs collapsed so the result stays a single inline-code line.
-        assert steps_mod._render_live_delta(delta) == ["`⎿ line1 line2 end`"]
+    def test_tool_return_preserves_real_lines(self) -> None:
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="line1\nline2\nline3", tool_call_id="x")])]
+        # Real lines are PRESERVED (not collapsed): ⎿ first, continuation
+        # aligned two spaces under it.
+        assert steps_mod._render_live_delta(delta) == ["```\n⎿ line1\n  line2\n  line3\n```"]
 
-    def test_backticks_in_content_are_neutralized(self) -> None:
-        # A backtick in tool content would otherwise close the inline-code span.
+    def test_tool_return_keeps_first_lines_and_marks_dropped_lines(self) -> None:
+        content = "\n".join(f"line{i}" for i in range(5))
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=content, tool_call_id="x")])]
+        rendered = steps_mod._render_live_delta(delta)[0]
+        # Only the first _LIVE_RETURN_MAX_LINES lines survive; the DROPPED-lines
+        # marker rides the last kept line and the full result stays on the ⤵ view.
+        assert "⎿ line0" in rendered
+        assert "line2 … (truncated)" in rendered
+        assert "line3" not in rendered
+
+    def test_exactly_max_lines_is_not_marked_truncated(self) -> None:
+        # A result of exactly _LIVE_RETURN_MAX_LINES lines, each short, is
+        # complete — no spurious "(truncated)" marker (guards the > vs >= edge).
+        content = "\n".join(f"line{i}" for i in range(steps_mod._LIVE_RETURN_MAX_LINES))
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=content, tool_call_id="x")])]
+        rendered = steps_mod._render_live_delta(delta)[0]
+        assert "(truncated)" not in rendered
+        assert "…" not in rendered
+
+    def test_single_backticks_in_return_preserved_in_fence(self) -> None:
+        # Inside a code fence single/double backticks render literally — no need
+        # to mangle them the way the old inline-code span did.
         delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="use `code` now", tool_call_id="x")])]
-        rendered = steps_mod._render_live_delta(delta)
-        assert rendered == ["`⎿ use 'code' now`"]
-        assert "`" not in rendered[0][1:-1]  # no backticks inside the span
+        assert steps_mod._render_live_delta(delta) == ["```\n⎿ use `code` now\n```"]
 
-    def test_oversized_tool_line_truncated_and_single_line(self) -> None:
+    def test_triple_backticks_in_return_neutralized(self) -> None:
+        # A run of 3+ backticks would close the fence early; it is woven with
+        # zero-width spaces so only the wrapping fence survives as a raw run.
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="```py", tool_call_id="x")])]
+        rendered = steps_mod._render_live_delta(delta)[0]
+        assert rendered.count("```") == 2  # the wrapping fence only
+        assert "\u200b" in rendered
+
+    def test_oversized_tool_return_line_is_cut_on_that_line(self) -> None:
         delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="x" * 5000, tool_call_id="x")])]
-        line = steps_mod._render_live_delta(delta)[0]
-        # Capped to the per-part tool limit (+2 wrapping backticks), no newline,
-        # ends with the single-line ellipsis inside the span.
-        assert len(line) <= steps_mod._LIVE_TOOL_MAX_CHARS + 2
-        assert "\n" not in line
-        assert line.endswith("…`")
+        rendered = steps_mod._render_live_delta(delta)[0]
+        # A single over-long line is cut with a trailing "…" ON that line (the
+        # cut is marked where it happened); no whole lines were dropped, so
+        # there is NO "(truncated)" marker. The block never carries the payload.
+        assert rendered.count("x") <= steps_mod._LIVE_RETURN_LINE_MAX_CHARS
+        assert rendered.rstrip("`\n").endswith("…")
+        assert "(truncated)" not in rendered
 
     def test_tail_window_drops_oldest_and_marks_elision(self) -> None:
         lines = [f"line{i}" for i in range(100)]
@@ -1640,3 +1672,182 @@ class TestLiveRender:
         # Discord's hard cap.
         assert not content.startswith("⚙ running…")
         assert len(content) <= steps_mod._DISCORD_MESSAGE_LIMIT
+
+
+class TestTreeRender:
+    """The full ``⤵ steps`` transcript renderer (``_render_tree_blocks``):
+    Claude-Code-style ``● tool(args)`` / ``⎿ result`` blocks, one per visual
+    block (a tool call and its result are ONE block), no per-part truncation,
+    paired by ``tool_call_id`` (handles parallel calls); a return whose call is
+    absent from the slice renders standalone."""
+
+    def test_text_then_call_pair_counts_as_two_blocks(self) -> None:
+        delta = [
+            ModelResponse(
+                parts=[
+                    TextPart(content="Let me check."),
+                    ToolCallPart(tool_name="weather", args={"c": "Tokyo"}, tool_call_id="t1"),
+                ]
+            ),
+            ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="t1")]),
+        ]
+        blocks = steps_mod._render_tree_blocks(delta)
+        # Prose block + ONE call/return block — the result is folded into its
+        # call, so a tool use credits a single step.
+        assert blocks == ["Let me check.", '```\n● weather(c="Tokyo")\n  ⎿  18C\n```']
+
+    def test_multiline_result_nests_with_aligned_continuation(self) -> None:
+        delta = [
+            ModelResponse(parts=[ToolCallPart(tool_name="shell", args={"cmd": "ls"}, tool_call_id="t1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="shell", content="a\nb\nc", tool_call_id="t1")]),
+        ]
+        assert steps_mod._render_tree_blocks(delta) == ['```\n● shell(cmd="ls")\n  ⎿  a\n     b\n     c\n```']
+
+    def test_parallel_calls_pair_to_their_own_returns(self) -> None:
+        delta = [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name="weather", args={"c": "Tokyo"}, tool_call_id="a"),
+                    ToolCallPart(tool_name="news", args={"t": "tech"}, tool_call_id="b"),
+                ]
+            ),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(tool_name="weather", content="18C", tool_call_id="a"),
+                    ToolReturnPart(tool_name="news", content="headline", tool_call_id="b"),
+                ]
+            ),
+        ]
+        # Two call/return blocks, each return matched to its call BY ID (not by
+        # position) and rendered in call order.
+        assert steps_mod._render_tree_blocks(delta) == [
+            '```\n● weather(c="Tokyo")\n  ⎿  18C\n```',
+            '```\n● news(t="tech")\n  ⎿  headline\n```',
+        ]
+
+    def test_call_without_return_renders_call_line_alone(self) -> None:
+        delta = [ModelResponse(parts=[ToolCallPart(tool_name="slow", args={"x": 1}, tool_call_id="p")])]
+        assert steps_mod._render_tree_blocks(delta) == ["```\n● slow(x=1)\n```"]
+
+    def test_orphan_return_renders_standalone_not_dropped(self) -> None:
+        # A return whose call predates the slice must NOT be silently dropped —
+        # that would also skew the step count gating the ⤵ button.
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="weather", content="18C", tool_call_id="z")])]
+        assert steps_mod._render_tree_blocks(delta) == ["```\n⎿  18C\n```"]
+
+    def test_no_per_part_truncation_in_full_view(self) -> None:
+        big = "y" * 9000
+        delta = [
+            ModelResponse(parts=[ToolCallPart(tool_name="dump", args={}, tool_call_id="t1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="dump", content=big, tool_call_id="t1")]),
+        ]
+        rendered = steps_mod._render_tree_blocks(delta)[0]
+        # The full payload survives — the only bound is the overall message cap
+        # (enforced by steps_toggle's file-attachment path), not a per-part cap.
+        assert rendered.count("y") == 9000
+
+    def test_triple_backticks_in_result_cannot_break_the_fence(self) -> None:
+        delta = [
+            ModelResponse(parts=[ToolCallPart(tool_name="echo", args={}, tool_call_id="t1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="echo", content="```py\ncode\n```", tool_call_id="t1")]),
+        ]
+        rendered = steps_mod._render_tree_blocks(delta)[0]
+        # Only the wrapping fence survives as a raw triple-backtick run; the
+        # embedded fences are woven with zero-width spaces.
+        assert rendered.count("```") == 2
+        assert "\u200b" in rendered
+
+    def test_skips_prompt_parts(self) -> None:
+        delta = [
+            ModelRequest(
+                parts=[
+                    SystemPromptPart(content="system."),
+                    UserPromptPart(content="hello"),
+                ]
+            ),
+        ]
+        assert steps_mod._render_tree_blocks(delta) == []
+
+    def test_parallel_call_with_one_missing_return(self) -> None:
+        # Two parallel calls, only the first has returned this slice: the
+        # paired call folds its result, the in-flight one renders alone.
+        delta = [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name="a", args={}, tool_call_id="a"),
+                    ToolCallPart(tool_name="b", args={}, tool_call_id="b"),
+                ]
+            ),
+            ModelRequest(parts=[ToolReturnPart(tool_name="a", content="ra", tool_call_id="a")]),
+        ]
+        assert steps_mod._render_tree_blocks(delta) == [
+            "```\n● a()\n  ⎿  ra\n```",
+            "```\n● b()\n```",
+        ]
+
+    def test_return_before_its_call_renders_once_not_twice(self) -> None:
+        # Order-independence: a return that appears BEFORE its call in the
+        # slice must fold into the call exactly once — never render both
+        # standalone AND nested (which would also inflate the step count).
+        delta = [
+            ModelRequest(parts=[ToolReturnPart(tool_name="a", content="EARLY", tool_call_id="x")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="a", args={}, tool_call_id="x")]),
+        ]
+        assert steps_mod._render_tree_blocks(delta) == ["```\n● a()\n  ⎿  EARLY\n```"]
+
+    def test_full_view_preserves_arg_whitespace_fidelity(self) -> None:
+        # collapse=False on the full view keeps inner whitespace in arg values
+        # byte-for-byte (the live preview would collapse "a  b" -> "a b").
+        delta = [ModelResponse(parts=[ToolCallPart(tool_name="run", args={"cmd": "a  b"}, tool_call_id="t1")])]
+        assert steps_mod._render_tree_blocks(delta) == ['```\n● run(cmd="a  b")\n```']
+
+    def test_count_gate_parity_tree_empty_iff_live_empty(self) -> None:
+        # Load-bearing invariant: the tree renderer (whose block count gates the
+        # ⤵ button + transcript row in the outbox) renders zero blocks for
+        # EXACTLY the deltas the live renderer renders nothing for.
+        cases: list[list[ModelMessage]] = [
+            [ModelRequest(parts=[UserPromptPart(content="hi"), SystemPromptPart(content="s")])],
+            [ModelResponse(parts=[TextPart(content="   ")])],
+            [ModelResponse(parts=[TextPart(content="hello")])],
+            [
+                ModelResponse(parts=[ToolCallPart(tool_name="w", args={}, tool_call_id="t")]),
+                ModelRequest(parts=[ToolReturnPart(tool_name="w", content="r", tool_call_id="t")]),
+            ],
+            [
+                ModelResponse(
+                    parts=[
+                        ToolCallPart(tool_name="a", args={}, tool_call_id="a"),
+                        ToolCallPart(tool_name="b", args={}, tool_call_id="b"),
+                    ]
+                ),
+                ModelRequest(
+                    parts=[
+                        ToolReturnPart(tool_name="a", content="ra", tool_call_id="a"),
+                        ToolReturnPart(tool_name="b", content="rb", tool_call_id="b"),
+                    ]
+                ),
+            ],
+            [ModelRequest(parts=[ToolReturnPart(tool_name="w", content="r", tool_call_id="z")])],
+        ]
+        for delta in cases:
+            tree_empty = steps_mod._render_tree_blocks(delta) == []
+            live_empty = steps_mod._render_live_delta(delta) == []
+            assert tree_empty == live_empty, f"count-gate parity broken for {delta!r}"
+
+
+class TestFenceSafe:
+    """``_fence_safe`` neutralizes runs of 3+ backticks (which would close a
+    Discord code fence early regardless of the opening fence length) while
+    leaving 1-2 backtick runs — which render literally inside a block —
+    untouched."""
+
+    def test_single_and_double_backtick_runs_untouched(self) -> None:
+        assert steps_mod._fence_safe("a `b` c") == "a `b` c"
+        assert steps_mod._fence_safe("``x``") == "``x``"
+
+    def test_runs_of_three_or_more_are_woven_with_zwsp(self) -> None:
+        for n in (3, 4, 6):
+            out = steps_mod._fence_safe("`" * n)
+            assert "```" not in out  # no raw 3-run survives to close a fence
+            assert out.count("`") == n  # every backtick preserved, just separated
+            assert out.count("\u200b") == n - 1
