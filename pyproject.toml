@@ -14,7 +14,7 @@ dependencies = [
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
     "python-frontmatter>=1.1.0,<2",
-    "smolagents>=1.25.0",
+    "smolagents[toolkit]>=1.25.0",
     "uuid-utils>=0.15.0",
 ]
 

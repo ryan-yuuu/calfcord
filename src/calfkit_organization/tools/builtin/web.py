@@ -8,9 +8,16 @@ classes pull network adapters on first call.
 * ``web_fetch`` — fetches a URL, converts HTML to markdown, returns the
   text. Smolagents handles encoding, timeout, and markdown conversion.
   No API key needed.
-* ``web_search`` — DuckDuckGo via the ``ddgs`` library smolagents
-  bundles. No API key. If you want richer results (Brave, Tavily,
-  SerpAPI), see ``docs/authoring-tools.md`` for the swap path.
+* ``web_search`` — DuckDuckGo via the ``ddgs`` library. No API key.
+  If you want richer results (Brave, Tavily, SerpAPI), see
+  ``docs/authoring-tools.md`` for the swap path.
+
+Both ``VisitWebpageTool`` (``markdownify``) and ``DuckDuckGoSearchTool``
+(``ddgs``) need third-party packages that smolagents ships ONLY behind
+its optional ``toolkit`` extra — bare ``smolagents`` does not pull them
+in. This project therefore depends on ``smolagents[toolkit]``; without
+the extra, the first ``web_search`` call raises ``ImportError`` ("You
+must install package ``ddgs`` ...") from the tool constructor.
 
 Both wrappers convert smolagents exceptions to ``"error: ..."`` strings
 rather than raising, so the calling LLM can adapt (retry, rephrase
