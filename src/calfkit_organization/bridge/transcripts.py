@@ -130,6 +130,13 @@ class TranscriptStore:
     :class:`RuntimeError`.
     """
 
+    # A live, persistent store: transcripts, replay, and the expand toggle
+    # are all active. The :class:`NullTranscriptStore` substitute reports
+    # ``False`` so callers can gate those features off when the real store
+    # failed to open. A class attribute (not a property) since it is a
+    # fixed truth for every real instance.
+    enabled = True
+
     def __init__(self, db_path: pathlib.Path) -> None:
         """Record the DB path. The connection is NOT opened here — call
         :meth:`connect` (or use the async-context-manager form) so the
@@ -279,3 +286,46 @@ class TranscriptStore:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
+
+
+class NullTranscriptStore:
+    """No-op stand-in substituted when the real store fails to open.
+
+    A failed store open must NOT abort the bridge (which would kill all
+    Discord routing). The gateway degrades to this Null-Object so the
+    bridge keeps running with transcripts, tool-call replay, and the
+    expand toggle DISABLED for the run: ``enabled`` is ``False``, writes
+    are dropped, and reads return empty. Mirrors the read/write surface
+    callers use against :class:`TranscriptStore` so no caller needs to
+    branch on which store it holds (it gates behaviour on
+    :attr:`enabled` instead).
+    """
+
+    enabled = False
+
+    async def write_turn(self, row: TranscriptRow) -> None:
+        """No-op: the failed-open store drops every write."""
+        return None
+
+    async def get_by_final_message_id(self, final_message_id: str) -> TranscriptRow | None:
+        """Always misses — there is nothing persisted to read."""
+        return None
+
+    async def get_by_final_message_ids(self, final_message_ids: Sequence[str]) -> dict[str, TranscriptRow]:
+        """Always empty — no rows to join against (⇒ no replay hydration)."""
+        return {}
+
+    async def prune_older_than(self, cutoff_created_at: int) -> int:
+        """Nothing to prune; reports zero rows deleted."""
+        return 0
+
+    async def close(self) -> None:
+        """No-op: there is no connection to release."""
+        return None
+
+
+# Either the real store or its no-op substitute. Callers type their
+# transcript-store parameters/fields as this union and gate transcript/
+# replay/toggle behaviour on the store's ``enabled`` flag rather than on
+# which concrete class they hold.
+TranscriptStoreLike = TranscriptStore | NullTranscriptStore

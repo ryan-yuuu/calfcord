@@ -42,7 +42,7 @@ from calfkit_organization.bridge.outbox import build_outbox_consumer
 from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.steps_toggle import _TOGGLE_CUSTOM_ID
-from calfkit_organization.bridge.transcripts import TranscriptStore
+from calfkit_organization.bridge.transcripts import NullTranscriptStore, TranscriptStore
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.messages import SentMessage
 
@@ -756,3 +756,35 @@ class TestTranscriptAndToggle:
         assert chunk_calls[0].kwargs["extra_buttons"] is not None
         assert chunk_calls[0].kwargs["extra_buttons"][0].custom_id == _TOGGLE_CUSTOM_ID
         assert chunk_calls[1].kwargs["extra_buttons"] is None
+
+    async def test_disabled_store_attaches_no_toggle_and_writes_no_row(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+    ) -> None:
+        """A failed-open store degrades to a ``NullTranscriptStore``
+        (``enabled=False``). A tool-using terminal reply must then attach NO
+        toggle and write NO row — users never get a dead button with no row
+        behind it. The reply itself still posts."""
+        null_store = NullTranscriptStore()
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=null_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="It's 18 degrees in Tokyo.",
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # Reply posted, but with no toggle (extra_buttons is None) despite
+        # the turn using tools.
+        persona_sender.send.assert_awaited_once()
+        assert persona_sender.send.call_args.kwargs["extra_buttons"] is None
+        # And the Null store recorded nothing — the lookup misses.
+        assert await null_store.get_by_final_message_id("99999") is None

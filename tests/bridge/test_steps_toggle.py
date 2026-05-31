@@ -1,14 +1,17 @@
-"""Unit tests for the inline step-transcript expand/collapse toggle.
+"""Unit tests for the on-demand step-transcript view button.
 
 Covers the three pieces of :mod:`calfkit_organization.bridge.steps_toggle`:
 
 * :func:`render_steps` — round-trips a ``ModelMessagesTypeAdapter`` blob
-  through ``_render_delta`` and truncates at the limit;
+  through ``_render_delta`` and returns the FULL untruncated text + count;
 * :func:`build_toggle_button` — label / custom_id / style of the
-  collapsed-state button;
-* :class:`StepsToggleView._toggle` — the defer-first expand→collapse
-  round-trip against a fake ``discord.Interaction`` and a real in-memory
-  :class:`TranscriptStore`, plus the missing-row ephemeral followup.
+  view-steps button;
+* :class:`StepsToggleView._show_steps` — the defer-then-ephemeral-followup
+  flow against a fake ``discord.Interaction`` and a real in-memory
+  :class:`TranscriptStore`: a present row sends the steps content
+  ephemerally, an oversized transcript attaches a ``discord.File``, and a
+  missing row sends the ephemeral "no longer available" followup. The
+  agent's reply is NEVER edited.
 
 discord.py's gateway, Kafka, and the LLM stack are all mocked out. The
 repo runs under ``asyncio_mode = "auto"`` (see ``pyproject.toml``), so
@@ -31,10 +34,8 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-from calfkit_organization.bridge import steps_toggle
 from calfkit_organization.bridge.steps_toggle import (
-    _EXPANDED_LABEL,
-    _STEPS_SEP,
+    _DISCORD_MESSAGE_LIMIT,
     _TOGGLE_CUSTOM_ID,
     StepsToggleView,
     build_toggle_button,
@@ -64,13 +65,37 @@ def _delta_json() -> str:
     return ModelMessagesTypeAdapter.dump_json(delta).decode()
 
 
+def _big_delta_json(*, parts: int = 4, chars_per_return: int = 1000) -> str:
+    """Serialize a turn slice whose JOINED render exceeds the Discord cap.
+
+    ``_render_delta`` caps each individual part at ``STEP_CONTENT_MAX_CHARS``
+    (1500), so a single oversized return can't push the total over 2000 on
+    its own. We therefore use several tool-call/return pairs whose combined
+    render is well over 2000 chars while each part stays under the per-part
+    cap — exercising the file-attachment branch of the callback. ``X * N``
+    is a recognizable marker we can assert survives in full.
+    """
+    delta: list[object] = []
+    for i in range(parts):
+        delta.append(
+            ModelResponse(parts=[ToolCallPart(tool_name="dump", args={"n": i}, tool_call_id=f"t{i}")]),
+        )
+        delta.append(
+            ModelRequest(
+                parts=[ToolReturnPart(tool_name="dump", content="X" * chars_per_return, tool_call_id=f"t{i}")],
+            ),
+        )
+    return ModelMessagesTypeAdapter.dump_json(delta).decode()
+
+
 # --- render_steps -------------------------------------------------------------
 
 
-def test_render_steps_round_trips_known_delta() -> None:
-    text, count = render_steps(_delta_json(), limit=2000)
+def test_render_steps_returns_full_untruncated_text_and_count() -> None:
+    text, count = render_steps(_delta_json())
     assert count == 3
-    # Each part rendered and joined with a blank line, in order.
+    # Each part rendered and joined with a blank line, in order — nothing
+    # truncated.
     assert "Let me check." in text
     assert "**Calling `weather`**" in text
     assert '{"c":"Tokyo"}' in text
@@ -78,15 +103,22 @@ def test_render_steps_round_trips_known_delta() -> None:
     assert "18C" in text
     # Blank-line join between the three parts.
     assert text.count("\n\n") >= 2
+    # No truncation marker — the full render is returned regardless of size.
+    assert "truncated" not in text
 
 
-def test_render_steps_truncates_at_limit() -> None:
-    # A small limit forces truncation; the result must fit and carry the
-    # marker, while the count still reflects the true number of parts.
-    text, count = render_steps(_delta_json(), limit=40)
-    assert count == 3
-    assert len(text) <= 40
-    assert text.endswith("… (truncated)")
+def test_render_steps_does_not_truncate_large_render() -> None:
+    # render_steps adds NO truncation of its own. Each part stays under the
+    # per-part render cap, so the whole render comes back intact — and the
+    # joined total exceeds the Discord message cap (driving the file branch
+    # in the callback). One render per tool-call part + one per return part.
+    text, count = render_steps(_big_delta_json(parts=4, chars_per_return=1000))
+    assert count == 8
+    # All 4000 marker chars survive (4 returns of 1000, each under the cap).
+    assert text.count("X") == 4000
+    assert len(text) > _DISCORD_MESSAGE_LIMIT
+    # render_steps itself never appends a truncation marker.
+    assert "(truncated)" not in text
 
 
 # --- build_toggle_button ------------------------------------------------------
@@ -125,22 +157,21 @@ async def store(tmp_path: pathlib.Path) -> TranscriptStore:
     return s
 
 
-def _fake_interaction(*, content: str, message_id: int = _FINAL_MESSAGE_ID) -> MagicMock:
+def _fake_interaction(*, message_id: int = _FINAL_MESSAGE_ID) -> MagicMock:
     """Build a fake ``discord.Interaction`` for a component click.
 
-    ``response.defer`` / ``edit_original_response`` / ``followup.send`` are
-    AsyncMocks; ``message.content`` / ``message.id`` carry the current reply
-    state the callback reads.
+    ``response.defer`` / ``followup.send`` are AsyncMocks; ``message.id``
+    carries the clicked reply's id the callback looks the row up by. The
+    callback never reads ``message.content`` (the reply is never edited),
+    so it isn't set.
     """
     interaction = MagicMock(spec=discord.Interaction)
     interaction.response = MagicMock()
     interaction.response.defer = AsyncMock(return_value=None)
-    interaction.edit_original_response = AsyncMock(return_value=None)
     interaction.followup = MagicMock()
     interaction.followup.send = AsyncMock(return_value=None)
     interaction.message = MagicMock()
     interaction.message.id = message_id
-    interaction.message.content = content
     return interaction
 
 
@@ -151,51 +182,70 @@ def _button(view: StepsToggleView) -> discord.ui.Button:
     return items[0]
 
 
-async def test_callback_expands_then_collapses_round_trip(store: TranscriptStore) -> None:
+async def test_callback_sends_steps_as_ephemeral_message(store: TranscriptStore) -> None:
+    """A present row → ephemeral defer, then an ephemeral followup carrying
+    the rendered steps content. The reply message is never edited."""
     try:
         view = StepsToggleView(store)
         button = _button(view)
+        interaction = _fake_interaction()
+        await button.callback(interaction)
 
-        # --- First click: EXPAND (content starts collapsed = just the reply).
-        expand_it = _fake_interaction(content=_REPLY_TEXT)
-        await button.callback(expand_it)
+        # Component defer must carry BOTH thinking=True and ephemeral=True;
+        # ephemeral alone is silently dropped by discord.py 2.7.1.
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
 
-        # Defer was called first, exactly once, as a component update (no
-        # thinking spinner).
-        expand_it.response.defer.assert_awaited_once_with()
-        expand_it.edit_original_response.assert_awaited_once()
-        expand_kwargs = expand_it.edit_original_response.call_args.kwargs
-        expanded_content = expand_kwargs["content"]
-        # Content is reply + sep + steps.
-        assert expanded_content.startswith(_REPLY_TEXT + _STEPS_SEP)
-        assert "**Calling `weather`**" in expanded_content
-        # Button relabelled to the hide form.
-        expand_view = expand_kwargs["view"]
-        expand_btn = _button_from_plain_view(expand_view)
-        assert expand_btn.label == _EXPANDED_LABEL
-        assert expand_btn.custom_id == _TOGGLE_CUSTOM_ID
-
-        # --- Second click: COLLAPSE (feed the expanded content back in).
-        collapse_it = _fake_interaction(content=expanded_content)
-        await button.callback(collapse_it)
-
-        collapse_it.response.defer.assert_awaited_once_with()
-        collapse_it.edit_original_response.assert_awaited_once()
-        collapse_kwargs = collapse_it.edit_original_response.call_args.kwargs
-        # Collapsed back to exactly the original reply.
-        assert collapse_kwargs["content"] == _REPLY_TEXT
-        collapse_btn = _button_from_plain_view(collapse_kwargs["view"])
-        # Relabelled to the collapsed N-steps form (3 parts in the seed).
-        assert collapse_btn.label == "⤵ 3 steps"
-        assert collapse_btn.custom_id == _TOGGLE_CUSTOM_ID
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        # The steps content is inlined (no file) since it fits the cap.
+        assert kwargs["file"] is discord.utils.MISSING
+        content = kwargs["content"]
+        assert "**Calling `weather`**" in content
+        assert "18C" in content
     finally:
         await store.close()
 
 
-def _button_from_plain_view(view: discord.ui.View) -> discord.ui.Button:
-    buttons = [item for item in view.children if isinstance(item, discord.ui.Button)]
-    assert len(buttons) == 1
-    return buttons[0]
+async def test_callback_attaches_file_when_transcript_too_long(tmp_path: pathlib.Path) -> None:
+    """A >2000-char render → the FULL transcript is attached as a
+    ``discord.File`` (nothing truncated), still ephemeral."""
+    s = TranscriptStore(tmp_path / "state" / "transcripts.sqlite3")
+    await s.connect()
+    big_message_id = 70707
+    await s.write_turn(
+        TranscriptRow(
+            correlation_id="corr-big",
+            conversation_key="chan-100",
+            agent_id="scheduler",
+            final_message_id=str(big_message_id),
+            delta_json=_big_delta_json(parts=4, chars_per_return=1000),
+            created_at=1000,
+        )
+    )
+    try:
+        view = StepsToggleView(s)
+        button = _button(view)
+        interaction = _fake_interaction(message_id=big_message_id)
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        # File attached; content omitted (left at MISSING).
+        attached = kwargs["file"]
+        assert isinstance(attached, discord.File)
+        assert attached.filename == "steps.md"
+        assert kwargs["content"] is discord.utils.MISSING
+        # The attached bytes are the FULL render — all four 1000-char
+        # returns are present in their entirety, not truncated.
+        attached.fp.seek(0)
+        payload = attached.fp.read()
+        assert payload.count(b"X") == 4000
+        assert len(payload) > _DISCORD_MESSAGE_LIMIT
+    finally:
+        await s.close()
 
 
 async def test_callback_missing_row_sends_ephemeral_followup(tmp_path: pathlib.Path) -> None:
@@ -206,60 +256,45 @@ async def test_callback_missing_row_sends_ephemeral_followup(tmp_path: pathlib.P
         button = _button(view)
 
         # No row seeded → the lookup misses for any message id.
-        interaction = _fake_interaction(content=_REPLY_TEXT, message_id=42)
+        interaction = _fake_interaction(message_id=42)
         await button.callback(interaction)
 
-        # Deferred first, then the ephemeral "no longer available" followup;
-        # the message is never edited.
-        interaction.response.defer.assert_awaited_once_with()
+        # Deferred ephemerally first, then the "no longer available"
+        # ephemeral followup.
+        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
         interaction.followup.send.assert_awaited_once()
-        followup_kwargs = interaction.followup.send.call_args.kwargs
-        assert followup_kwargs["ephemeral"] is True
-        assert "no longer available" in interaction.followup.send.call_args.args[0]
-        interaction.edit_original_response.assert_not_awaited()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert kwargs["content"] == "Step details are no longer available."
     finally:
         await store.close()
 
 
-async def test_callback_swallows_edit_http_exception(store: TranscriptStore) -> None:
-    """A failed edit is logged and swallowed, never raised out of the callback."""
+async def test_callback_swallows_followup_http_exception(store: TranscriptStore) -> None:
+    """A failed followup is logged and swallowed, never raised out of the callback."""
     try:
         view = StepsToggleView(store)
         button = _button(view)
-        interaction = _fake_interaction(content=_REPLY_TEXT)
+        interaction = _fake_interaction()
         response = MagicMock(status=500, reason="boom")
-        interaction.edit_original_response = AsyncMock(side_effect=discord.HTTPException(response, "edit failed"))
+        interaction.followup.send = AsyncMock(side_effect=discord.HTTPException(response, "send failed"))
         # Must not raise.
         await button.callback(interaction)
-        interaction.edit_original_response.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
     finally:
         await store.close()
 
 
-async def test_callback_expand_too_long_reply_shows_placeholder(store: TranscriptStore) -> None:
-    """When the reply nearly fills the cap, the steps block degrades to a
-    short placeholder rather than an empty/garbled render — and the final
-    expanded content is hard-clamped to the Discord 2000-char limit so the
-    edit never 400s.
-
-    A 1990-char reply is the chunked-first-chunk scenario: ``reply + sep +
-    placeholder`` is 2043 chars, which overflows 2000. Without the clamp the
-    ``edit_original_response`` payload would exceed the cap and Discord would
-    reject it (and the callback swallows the HTTPException), so the toggle
-    would silently fail to expand.
-    """
+async def test_callback_aborts_when_defer_fails(store: TranscriptStore) -> None:
+    """A failed defer aborts the callback before any store read / followup —
+    and never raises."""
     try:
         view = StepsToggleView(store)
         button = _button(view)
-        long_reply = "x" * 1990  # leaves < _MIN_STEPS_BUDGET room after the sep
-        interaction = _fake_interaction(content=long_reply)
+        interaction = _fake_interaction()
+        response = MagicMock(status=500, reason="boom")
+        interaction.response.defer = AsyncMock(side_effect=discord.HTTPException(response, "defer failed"))
         await button.callback(interaction)
-        content = interaction.edit_original_response.call_args.kwargs["content"]
-        # The reply text itself survives intact at the head; the separator +
-        # placeholder tail is what the clamp cuts when the total overflows.
-        assert content.startswith(long_reply)
-        # The load-bearing invariant: the edited content NEVER exceeds the
-        # Discord message cap (would fail before the clamp at 2043 chars).
-        assert len(content) <= steps_toggle._DISCORD_MESSAGE_LIMIT
+        interaction.followup.send.assert_not_awaited()
     finally:
         await store.close()

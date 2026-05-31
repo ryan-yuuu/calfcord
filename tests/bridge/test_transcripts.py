@@ -14,7 +14,11 @@ import sqlite3
 
 import pytest
 
-from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStore
+from calfkit_organization.bridge.transcripts import (
+    NullTranscriptStore,
+    TranscriptRow,
+    TranscriptStore,
+)
 
 # A realistic ModelMessagesTypeAdapter-style blob: the structured slice
 # of a turn's message_history with a tool call + return, JSON-escaped
@@ -297,3 +301,39 @@ async def test_async_context_manager_opens_and_closes(tmp_path: pathlib.Path) ->
     # After the context exits the connection is released; methods now raise.
     with pytest.raises(RuntimeError):
         await store.get_by_final_message_id("msg-9001")
+
+
+def test_real_store_reports_enabled_true(tmp_path: pathlib.Path) -> None:
+    # The real store is always enabled — transcripts, replay, and the toggle
+    # are active for it. (No connection needed; ``enabled`` is a class-level
+    # truth.)
+    store = TranscriptStore(_db_path(tmp_path))
+    assert store.enabled is True
+
+
+def test_null_store_reports_enabled_false() -> None:
+    # The Null-Object substitute reports disabled so callers gate transcript/
+    # replay/toggle behaviour off.
+    assert NullTranscriptStore().enabled is False
+
+
+async def test_null_store_write_is_noop_and_reads_empty() -> None:
+    store = NullTranscriptStore()
+    # write_turn is a no-op (returns None, persists nothing).
+    assert await store.write_turn(_row()) is None
+    # Reads always miss — a single lookup returns None and a batch returns {}.
+    assert await store.get_by_final_message_id("msg-9001") is None
+    assert await store.get_by_final_message_ids(["msg-9001", "msg-2"]) == {}
+    # A prior write left nothing behind to read.
+    assert await store.get_by_final_message_id("msg-9001") is None
+
+
+async def test_null_store_prune_returns_zero() -> None:
+    assert await NullTranscriptStore().prune_older_than(999_999) == 0
+
+
+async def test_null_store_close_is_noop() -> None:
+    # No connection to release; close is a harmless no-op (idempotent).
+    store = NullTranscriptStore()
+    assert await store.close() is None
+    assert await store.close() is None

@@ -36,6 +36,8 @@ import os
 import signal
 import time
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import discord
 from calfkit.client import Client
@@ -59,7 +61,11 @@ from calfkit_organization.bridge.steps import build_steps_consumer
 from calfkit_organization.bridge.steps_state import StepsState
 from calfkit_organization.bridge.steps_toggle import StepsToggleView
 from calfkit_organization.bridge.synthesized import build_synthesized_consumer
-from calfkit_organization.bridge.transcripts import TranscriptStore
+from calfkit_organization.bridge.transcripts import (
+    NullTranscriptStore,
+    TranscriptStore,
+    TranscriptStoreLike,
+)
 
 # NOTE: ``calfkit_organization.control_plane.state_consumer`` imports
 # :class:`AgentRegistry`, which in turn triggers ``bridge.__init__`` (which
@@ -79,6 +85,37 @@ _REPLY_TOPIC = "discord.outbox"
 _SEEN_MESSAGE_IDS_CAPACITY = 1024
 
 
+@asynccontextmanager
+async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[TranscriptStoreLike]:
+    """Open the transcript store, degrading to a no-op store on failure.
+
+    Constructs the real :class:`TranscriptStore` and connects it. If the
+    open fails (bad path, disk error, corrupt DB, …) the bridge MUST NOT
+    abort — a crash here would take down all Discord routing, not just
+    transcripts. Instead we log a loud ERROR and substitute a
+    :class:`NullTranscriptStore` so the run continues with transcripts,
+    tool-call replay, and the expand toggle disabled. Yields whichever
+    store is in effect; the real store's connection (if any) is closed on
+    exit, and ``NullTranscriptStore.close`` is a harmless no-op.
+    """
+    store = TranscriptStore(settings.transcript_db_path)
+    yielded: TranscriptStoreLike = store
+    try:
+        try:
+            await store.connect()
+        except Exception:
+            logger.error(
+                "transcript store failed to open at %s — step transcripts, "
+                "tool-call replay, and the expand toggle are DISABLED for this run",
+                settings.transcript_db_path,
+                exc_info=True,
+            )
+            yielded = NullTranscriptStore()
+        yield yielded
+    finally:
+        await yielded.close()
+
+
 class DiscordIngressGateway:
     """Long-lived gateway daemon. Translates Discord events into agent invocations."""
 
@@ -88,7 +125,7 @@ class DiscordIngressGateway:
         ingress: BridgeIngress,
         registry: AgentRegistry,
         calfkit_client: Client,
-        transcript_store: TranscriptStore,
+        transcript_store: TranscriptStoreLike,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -399,7 +436,7 @@ def main() -> None:
                 # expand toggle. Opened/closed as an async context so the
                 # single long-lived aiosqlite connection's lifetime brackets
                 # the consumer setup and the gateway run loop.
-                async with TranscriptStore(settings.transcript_db_path) as transcript_store:
+                async with _open_transcript_store(settings) as transcript_store:
                     # Inject the now-open store into the ingress so the
                     # slash-history builder can splice each agent's prior
                     # tool calls/returns into its reconstructed

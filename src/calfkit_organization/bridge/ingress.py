@@ -88,7 +88,7 @@ from calfkit_organization.bridge.history import (
 )
 from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.transcripts import TranscriptStore
+from calfkit_organization.bridge.transcripts import TranscriptStoreLike
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.router.roster import build_router_temp_instructions
 from calfkit_organization.topics import (
@@ -236,7 +236,7 @@ class BridgeIngress:
         # builder degrades to today's no-replay projection when the store
         # isn't set yet, so a Discord event arriving before the store opens
         # never crashes the invocation path. Mirrors :attr:`_fetcher`.
-        self._transcript_store: TranscriptStore | None = None
+        self._transcript_store: TranscriptStoreLike | None = None
         # Validate every agent's provider at boot so a typo'd
         # CALFKIT_AGENT_DEFAULT_PROVIDER surfaces here (fail-fast) rather
         # than as an uncaught ValueError inside every targeted invocation.
@@ -283,7 +283,7 @@ class BridgeIngress:
         """
         self._fetcher = fetcher
 
-    def set_transcript_store(self, store: TranscriptStore) -> None:
+    def set_transcript_store(self, store: TranscriptStoreLike) -> None:
         """Inject the bridge-local transcript store for tool-call replay.
 
         Called by the gateway's ``main()`` once the store's SQLite

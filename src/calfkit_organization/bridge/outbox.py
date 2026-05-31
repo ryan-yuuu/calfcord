@@ -60,7 +60,7 @@ from calfkit_organization.bridge.pending_wires import PendingEntry, PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.steps import _render_delta
 from calfkit_organization.bridge.steps_toggle import build_toggle_button
-from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStore
+from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import (
@@ -105,7 +105,7 @@ def build_outbox_consumer(
     pending_wires: PendingWires,
     calfkit_client: Client,
     *,
-    transcript_store: TranscriptStore,
+    transcript_store: TranscriptStoreLike,
     subscribe_topic: str = DEFAULT_OUTBOX_TOPIC,
     node_id: str = DEFAULT_CONSUMER_NODE_ID,
 ) -> ConsumerNodeDef[str]:
@@ -133,10 +133,13 @@ def build_outbox_consumer(
         transcript_store: Bridge-local SQLite store and the SOLE
             transcript writer. On the terminal hop, when the turn used
             tools (the structured slice ``message_history[initial_len:-1]``
-            renders to at least one step), the consumer attaches the
-            expand toggle to the reply and — *after* a successful post —
-            writes the complete transcript row keyed on
-            ``correlation_id``. Pure-text turns write no row.
+            renders to at least one step) AND the store is ``enabled``,
+            the consumer attaches the expand toggle to the reply and —
+            *after* a successful post — writes the complete transcript row
+            keyed on ``correlation_id``. Pure-text turns write no row. When
+            the store failed to open (a :class:`NullTranscriptStore` with
+            ``enabled=False``), neither the toggle nor the write happens —
+            so users never get a dead button with no row behind it.
         subscribe_topic: Topic the consumer listens on. Defaults to
             the project-wide ``discord.outbox``. Overridable for tests.
         node_id: Identifier the Worker uses as the Kafka consumer
@@ -205,10 +208,15 @@ def build_outbox_consumer(
         # step, the turn used tools / emitted interim text → attach the
         # expand toggle and (after a successful post) write the durable
         # transcript. A pure-text turn renders to an empty list and
-        # behaves exactly as before (no toggle, no row).
+        # behaves exactly as before (no toggle, no row). The
+        # ``transcript_store.enabled`` gate suppresses both when the store
+        # failed to open (a NullTranscriptStore) — no dead button users
+        # could click with no row behind it.
         delta = _turn_delta(result, entry)
         rendered = _render_step_count(delta, wire)
-        extra_buttons: list[discord.ui.Button[Any]] | None = [build_toggle_button(rendered)] if rendered else None
+        extra_buttons: list[discord.ui.Button[Any]] | None = (
+            [build_toggle_button(rendered)] if rendered and transcript_store.enabled else None
+        )
 
         persona = Persona(name=spec.display_name, avatar_url=spec.avatar_url)
         try:
@@ -241,16 +249,18 @@ def build_outbox_consumer(
                 registry=registry,
                 transcript_store=transcript_store,
                 correlation_id=result.correlation_id,
-                turn_delta=delta if rendered else None,
+                turn_delta=delta if rendered and transcript_store.enabled else None,
             )
             return
 
-        # Successful post. If the turn used tools, persist the transcript
-        # row keyed on correlation_id (idempotent on outbox retries). This
-        # is the single success point — a turn that dropped / stayed
-        # retry-pending writes no row, so the toggle on its (never-posted)
-        # reply has nothing to read, which is the documented degradation.
-        if rendered:
+        # Successful post. If the turn used tools (and the store is
+        # enabled), persist the transcript row keyed on correlation_id
+        # (idempotent on outbox retries). This is the single success
+        # point — a turn that dropped / stayed retry-pending writes no
+        # row, so the toggle on its (never-posted) reply has nothing to
+        # read, which is the documented degradation. A disabled store
+        # (NullTranscriptStore) writes nothing and got no toggle above.
+        if rendered and transcript_store.enabled:
             await _write_transcript(
                 transcript_store,
                 correlation_id=result.correlation_id,
@@ -392,7 +402,7 @@ def _render_step_count(delta: list[ModelMessage], wire: WireMessage) -> int:
 
 
 async def _write_transcript(
-    transcript_store: TranscriptStore,
+    transcript_store: TranscriptStoreLike,
     *,
     correlation_id: str,
     wire: WireMessage,
@@ -450,7 +460,7 @@ async def _handle_post_failure(
     persona_sender: DiscordPersonaSender,
     pending_wires: PendingWires,
     registry: AgentRegistry,
-    transcript_store: TranscriptStore,
+    transcript_store: TranscriptStoreLike,
     correlation_id: str,
     turn_delta: list[ModelMessage] | None,
 ) -> None:
@@ -776,7 +786,7 @@ async def _post_chunked_fallback(
     wire: WireMessage,
     text: str,
     *,
-    transcript_store: TranscriptStore,
+    transcript_store: TranscriptStoreLike,
     correlation_id: str,
     agent_id: str,
     turn_delta: list[ModelMessage] | None,
@@ -817,11 +827,14 @@ async def _post_chunked_fallback(
         )
         return
 
-    # Toggle rides the first chunk only when the turn used tools. The step
-    # count is recomputed via the same defensive guard as the main path so a
-    # malformed-args turn can't crash the fallback.
+    # Toggle rides the first chunk only when the turn used tools AND the
+    # store is enabled (a disabled NullTranscriptStore gets no toggle and
+    # no row — same gate as the main path). The step count is recomputed
+    # via the same defensive guard as the main path so a malformed-args
+    # turn can't crash the fallback.
+    write_transcript = bool(turn_delta) and transcript_store.enabled
     first_chunk_buttons: list[discord.ui.Button[Any]] | None = (
-        [build_toggle_button(_render_step_count(turn_delta, wire))] if turn_delta else None
+        [build_toggle_button(_render_step_count(turn_delta, wire))] if write_transcript else None
     )
 
     total = len(chunks)
@@ -845,10 +858,10 @@ async def _post_chunked_fallback(
                 sent.id,
                 wire.channel_id,
             )
-            if i == 0 and turn_delta:
-                # First chunk delivered and the turn used tools: persist
-                # the transcript against this chunk's id so its toggle can
-                # expand.
+            if i == 0 and write_transcript and turn_delta:
+                # First chunk delivered and the turn used tools (store
+                # enabled): persist the transcript against this chunk's id
+                # so its toggle can expand.
                 await _write_transcript(
                     transcript_store,
                     correlation_id=correlation_id,
