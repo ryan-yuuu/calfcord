@@ -14,7 +14,8 @@ hop's ``state.message_history`` delta and renders the new
 entries into one transient progress message posted under the agent's
 persona in the user's original channel — streaming the agent's ACTUAL
 work as it happens: model text as prose, tool calls as
-``tool_name(args)`` lines, and tool returns as ``⎿ result`` lines — the
+``tool_name(args)`` lines, and tool returns as a short fenced ``⎿ result``
+block (the first few lines) — the
 message IS the trace, with no header/counter line. It is a bounded *tail
 window* (the most recent lines that fit Discord's 2000-char cap); the full
 untruncated transcript stays on the reply's ``⤵ steps`` button.
@@ -316,7 +317,7 @@ def _tool_tree_block(call: ToolCallPart, ret: ToolReturnPart | None) -> str:
 
 
 def _return_tree_block(ret: ToolReturnPart) -> str:
-    """Render an orphan tool return (its call isn't in the slice) standalone.
+    """Render an orphan tool return (no call with its id in the slice) standalone.
 
     Practically unreachable — a tool call and its return live in the same
     agent run, after the history cursor, so they're sliced together. Rendered
@@ -346,20 +347,34 @@ def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
 
     Skips the same parts as the live renderer (``ThinkingPart``, ``FilePart``,
     ``BuiltinTool*Part``, ``UserPromptPart`` / ``SystemPromptPart``,
-    ``RetryPromptPart`` — see the original v1 rationale). A return whose call
-    predates the slice renders standalone so nothing is dropped.
+    ``RetryPromptPart`` — see the original v1 rationale).
+
+    Pairing is purely by id and independent of message order: a return is
+    folded into its call iff a call with that id exists anywhere in the slice;
+    a return whose call is absent renders standalone (so nothing is dropped,
+    and the orphan path can't double-render a return that arrives before its
+    call). Output order follows message order. Duplicate ``tool_call_id``s
+    don't occur in well-formed pydantic-ai history; on a collision the last
+    return for an id wins.
 
     Caller wraps this in a try/except — ``args_as_json_str`` /
     ``model_response_str`` can raise on malformed payloads.
     """
+    # Two index passes (order-independent): which ids have a call in the
+    # slice, and the return for each id. A return is then an orphan iff its id
+    # has no call here — decided without relying on walk order.
+    call_ids: set[str] = set()
     returns_by_id: dict[str, ToolReturnPart] = {}
     for msg in messages:
-        if isinstance(msg, ModelRequest):
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart):
+                    call_ids.add(part.tool_call_id)
+        elif isinstance(msg, ModelRequest):
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart):
                     returns_by_id[part.tool_call_id] = part
 
-    paired: set[str] = set()
     out: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelResponse):
@@ -369,13 +384,10 @@ def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
                     if rendered is not None:
                         out.append(rendered)
                 elif isinstance(part, ToolCallPart):
-                    ret = returns_by_id.get(part.tool_call_id)
-                    if ret is not None:
-                        paired.add(part.tool_call_id)
-                    out.append(_tool_tree_block(part, ret))
+                    out.append(_tool_tree_block(part, returns_by_id.get(part.tool_call_id)))
         elif isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, ToolReturnPart) and part.tool_call_id not in paired:
+                if isinstance(part, ToolReturnPart) and part.tool_call_id not in call_ids:
                     out.append(_return_tree_block(part))
     return out
 
@@ -423,6 +435,14 @@ def _format_call_args(part: ToolCallPart, *, collapse: bool = True) -> str:
     ``collapse=False`` to keep byte fidelity — JSON already escapes real
     newlines, so the signature stays one line either way, but inner spacing in
     string values is preserved.
+
+    NEVER raises: a deeply-malformed args object that even ``args_as_json_str``
+    can't serialize renders as ``…`` so the live preview (and the durable
+    transcript, which also routes through here) shows *something* rather than
+    losing the whole turn. That total failure IS logged so the dropped args are
+    diagnosable — historically the transcript path raised here and degraded
+    loudly via the outbox guard; the swallow keeps the rest of the trace, but
+    must not be silent about the loss.
     """
     try:
         args = part.args_as_dict()
@@ -441,6 +461,15 @@ def _format_call_args(part: ToolCallPart, *, collapse: bool = True) -> str:
         try:
             raw = part.args_as_json_str()
         except Exception:
+            # Both arg accessors failed — the args are unrenderable. Render a
+            # placeholder but log so this isn't a SILENT data loss in the
+            # durable transcript (the full view routes here too).
+            logger.exception(
+                "steps: tool-call args unrenderable for tool=%s call_id=%s; "
+                "rendering '…' (args omitted from this step)",
+                part.tool_name,
+                part.tool_call_id,
+            )
             return "…"
         return _collapse_ws(raw) if collapse else raw
     if not args:
@@ -466,25 +495,26 @@ def _render_live_tool_return_part(part: ToolReturnPart) -> str:
     """Compact fenced result: ``⎿`` first line + up to a few aligned more.
 
     Keeps the first :data:`_LIVE_RETURN_MAX_LINES` real lines of the result so
-    multi-line output stays readable in the live stream, but bounded — each
-    line capped at :data:`_LIVE_RETURN_LINE_MAX_CHARS`, with a
-    ``… (truncated)`` marker appended to the last kept line when anything was
-    dropped (more lines, or a line cut). Wrapped in a fence (embedded ``` is
-    neutralized) so a stray triple-backtick can't break the progress message;
-    the full, untruncated result lives on the ⤵ transcript.
+    multi-line output stays readable in the live stream, but bounded. The two
+    kinds of truncation are marked where they happen: a line longer than
+    :data:`_LIVE_RETURN_LINE_MAX_CHARS` is cut with a trailing ``…`` ON THAT
+    line, and when whole lines are dropped beyond the kept few a
+    ``… (truncated)`` marker is appended to the last kept line. Wrapped in a
+    fence (embedded ``` is neutralized) so a stray triple-backtick can't break
+    the progress message; the full, untruncated result lives on the ⤵ transcript.
     """
     lines = part.model_response_str().split("\n")
-    more = len(lines) > _LIVE_RETURN_MAX_LINES
     kept: list[str] = []
     for line in lines[:_LIVE_RETURN_MAX_LINES]:
         line = line.rstrip()
         if len(line) > _LIVE_RETURN_LINE_MAX_CHARS:
-            line = line[:_LIVE_RETURN_LINE_MAX_CHARS].rstrip()
-            more = True
+            # Mark the cut on the line that was actually cut, not elsewhere.
+            line = line[: _LIVE_RETURN_LINE_MAX_CHARS - 1].rstrip() + "…"
         kept.append(line)
     if not kept:
         kept = [""]
-    if more:
+    if len(lines) > _LIVE_RETURN_MAX_LINES:
+        # Whole lines were dropped — flag it at the end of the block.
         kept[-1] = f"{kept[-1]} … (truncated)".strip()
     first, *rest = kept
     tree = [f"{_TREE_RETURN_MARKER} {first}"]
