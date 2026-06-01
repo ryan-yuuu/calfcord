@@ -181,6 +181,7 @@ from calfkit_organization.discord.persona import (
     DiscordPersonaSender,
     Persona,
 )
+from calfkit_organization.discord.typing import TypingNotifier
 from calfkit_organization.topics import AGENT_STEPS_TOPIC
 
 logger = logging.getLogger(__name__)
@@ -637,6 +638,7 @@ def build_steps_consumer(
     pending_wires: PendingWires,
     steps_state: StepsState,
     *,
+    typing_notifier: TypingNotifier | None = None,
     subscribe_topic: str = AGENT_STEPS_TOPIC,
     node_id: str = DEFAULT_STEPS_CONSUMER_NODE_ID,
 ) -> ConsumerNodeDef[str]:
@@ -657,6 +659,12 @@ def build_steps_consumer(
         steps_state: Per-correlation cursor + progress-message-id cache
             plus the "already-completed" set that suppresses outbox-retry
             hops.
+        typing_notifier: Optional best-effort typing-indicator firer. When
+            provided, a Discord typing indicator is fired (fire-and-forget)
+            on each non-terminal hop carrying new work, in the channel/thread
+            the conversation lives in. ``None`` disables typing — the default
+            keeps existing callers/tests untouched; the bridge wires a real
+            one in production.
         subscribe_topic: Defaults to :data:`AGENT_STEPS_TOPIC`. Override
             for tests.
         node_id: Stable identifier; the Worker uses it as the Kafka
@@ -826,6 +834,16 @@ def build_steps_consumer(
         # a publish hop the agent loop didn't grow history on.
         if not new_messages and not is_terminal:
             return
+
+        # Fire a typing indicator for genuine, non-terminal work. Skipped on
+        # the terminal hop (the outbox posts the answer there) and on empty
+        # peer mirrors (filtered by the guard above). Fire-and-forget, so it
+        # never blocks this serial consumer. Targets the thread the wire
+        # originated in, else the parent channel — the surface the user is
+        # reading. (Typing addresses that id directly, unlike the webhook
+        # progress post, which addresses the parent and routes into the thread.)
+        if typing_notifier is not None and new_messages and not is_terminal:
+            typing_notifier.fire(entry.thread_id or entry.parent_channel_id)
 
         try:
             rendered = _render_live_delta(new_messages)

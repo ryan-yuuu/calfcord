@@ -39,7 +39,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -1851,3 +1851,179 @@ class TestFenceSafe:
             assert "```" not in out  # no raw 3-run survives to close a fence
             assert out.count("`") == n  # every backtick preserved, just separated
             assert out.count("\u200b") == n - 1
+
+
+class TestTypingIndicator:
+    """The steps consumer fires a best-effort typing indicator on each
+    non-terminal hop carrying new work \u2014 never on the terminal reply, and
+    never for empty peer mirrors, non-agent emitters, or already-completed
+    correlations. It targets the channel (or thread) the conversation lives
+    in. ``fire`` is synchronous, so a plain ``MagicMock`` records calls."""
+
+    async def test_non_terminal_hop_fires_typing(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="weather?")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="w", args={"city": "Tokyo"}, tool_call_id="t1")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_called_once_with(_CHANNEL_ID)
+
+    async def test_terminal_hop_does_not_fire(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="hi")]),
+            ModelResponse(parts=[TextPart(content="hello!")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history, final_text="hello!"),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_not_called()
+
+    async def test_thread_originated_wire_fires_into_thread(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        thread_id = 555
+        pending_wires = PendingWires()
+        pending_wires.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=thread_id)))
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="weather?")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="w", args={}, tool_call_id="t1")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_called_once_with(thread_id)
+
+    async def test_fires_even_when_delta_renders_empty(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        """Typing reflects that work happened, independent of whether the delta
+        renders to anything visible: a whitespace-only model turn still fires
+        typing even though no progress message is posted."""
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="x")]),
+            ModelResponse(parts=[TextPart(content="   ")]),  # renders to nothing
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_called_once_with(_CHANNEL_ID)
+        persona_sender.send.assert_not_called()  # nothing renderable → no progress post
+
+    async def test_empty_peer_mirror_does_not_fire(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        """A non-terminal hop with no new history (a gated-out peer mirror) is
+        skipped by the no-delta guard before the typing fire."""
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_not_called()
+
+    async def test_non_agent_emitter_does_not_fire(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="x")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="w", args={}, tool_call_id="t1")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter_kind="router"),
+            broker=broker,
+        )
+        notifier.fire.assert_not_called()
+
+    async def test_completed_correlation_does_not_fire(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        """Outbox-retry hops (correlation already marked completed) must not
+        re-fire typing."""
+        steps_state.pop_and_mark_completed(_CORRELATION_ID)
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="x")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="w", args={}, tool_call_id="t1")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_not_called()
