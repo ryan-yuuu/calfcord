@@ -41,11 +41,40 @@ from calfkit_organization.agents.routing import (
 )
 from calfkit_organization.router import prompt as prompt_module
 from calfkit_organization.router.config import RouterConfig
-from calfkit_organization.router.prompt import SYSTEM_PROMPT, load_router_md
+from calfkit_organization.router.prompt import load_router_md
+
+
+@pytest.fixture(autouse=True)
+def _isolate_router_loader(monkeypatch: pytest.MonkeyPatch):
+    """Pin every test in this module to the *bundled* router.md.
+
+    ``load_router_md`` caches the parsed ``(config, prompt)`` on a module global
+    and is eagerly populated at import. A developer with
+    ``CALFKIT_ROUTER_PROMPT_PATH`` exported would otherwise have this suite read
+    their override file (spurious failures). Clear the override + reset the cache
+    before each test so ``load_router_md()`` reads the bundled file; reset again
+    on teardown so a test that plants an override can't leak its cache into later
+    tests or files.
+    """
+    monkeypatch.delenv(prompt_module._PROMPT_PATH_ENV, raising=False)
+    prompt_module._reset_cache_for_tests()
+    yield
+    prompt_module._reset_cache_for_tests()
+
+
+@pytest.fixture
+def rendered_prompt() -> str:
+    """The freshly-rendered system prompt from the bundled router.md.
+
+    Used instead of the import-time ``SYSTEM_PROMPT`` module global so the
+    coupling assertions are immune to a stray override env var present at import
+    (the ``_isolate_router_loader`` autouse fixture guarantees this reads the
+    bundled file)."""
+    return load_router_md()[1]
 
 
 class TestSystemPromptCoupling:
-    def test_prompt_contains_tool_name_literal(self) -> None:
+    def test_prompt_contains_tool_name_literal(self, rendered_prompt: str) -> None:
         """The prompt instructs the LLM to call the structured-output
         tool by name. Pin the literal value (not the constant
         reference) so a rename of :data:`ROUTER_OUTPUT_TOOL_NAME`
@@ -56,7 +85,7 @@ class TestSystemPromptCoupling:
         without a coordinated update would propagate — this test serves as
         a contract anchor in case the placeholder is ever inlined as a
         literal in the Markdown."""
-        assert ROUTER_OUTPUT_TOOL_NAME in SYSTEM_PROMPT, (
+        assert ROUTER_OUTPUT_TOOL_NAME in rendered_prompt, (
             f"prompt missing tool name {ROUTER_OUTPUT_TOOL_NAME!r}; "
             f"if ROUTER_OUTPUT_TOOL_NAME was renamed, update the "
             f"{{{{ROUTER_OUTPUT_TOOL}}}} placeholder/constant in router/prompt.py"
@@ -67,7 +96,7 @@ class TestSystemPromptCoupling:
         # string by name).
         assert ROUTER_OUTPUT_TOOL_NAME == "dispatch"
 
-    def test_prompt_contains_every_routing_decision_field(self) -> None:
+    def test_prompt_contains_every_routing_decision_field(self, rendered_prompt: str) -> None:
         """Every :class:`RoutingDecision` field name must appear in the
         prompt so the LLM is instructed to populate it.
 
@@ -82,7 +111,7 @@ class TestSystemPromptCoupling:
         missing = [
             field_name
             for field_name in RoutingDecision.model_fields
-            if field_name not in SYSTEM_PROMPT
+            if field_name not in rendered_prompt
         ]
         assert not missing, (
             f"RoutingDecision fields {missing!r} are not referenced in "
@@ -90,7 +119,7 @@ class TestSystemPromptCoupling:
             f"and update router/prompt.py to match"
         )
 
-    def test_prompt_mandates_exactly_one_agent(self) -> None:
+    def test_prompt_mandates_exactly_one_agent(self, rendered_prompt: str) -> None:
         """The router's policy is that every ambient message gets
         exactly one respondent — the addressee. The schema enforces
         single-cardinality at the type boundary (``agent_id`` is a
@@ -109,7 +138,7 @@ class TestSystemPromptCoupling:
             "single agent",
             "single addressee",
         )
-        present = [p for p in required_phrases if p in SYSTEM_PROMPT]
+        present = [p for p in required_phrases if p in rendered_prompt]
         assert present, (
             f"prompt no longer contains any of the canonical "
             f"exactly-one phrasings {required_phrases!r}. The "
@@ -135,7 +164,7 @@ class TestSystemPromptCoupling:
             "several agents",
             "list of agent_ids",
         )
-        regressed = [p for p in forbidden_phrases if p in SYSTEM_PROMPT]
+        regressed = [p for p in forbidden_phrases if p in rendered_prompt]
         assert not regressed, (
             f"prompt contains phrase(s) {regressed!r} that re-permit "
             f"multi-agent fan-out. The router must route every ambient "
@@ -147,7 +176,7 @@ class TestSystemPromptCoupling:
             f"tuple field on RoutingDecision and update this test."
         )
 
-    def test_prompt_instructs_use_of_message_history(self) -> None:
+    def test_prompt_instructs_use_of_message_history(self, rendered_prompt: str) -> None:
         """The router agent is configured with ``history_turns`` from the
         ``router.md`` front matter (default 10) so recent channel turns are
         projected into its ``message_history`` on every invocation — see
@@ -165,7 +194,7 @@ class TestSystemPromptCoupling:
         Pin two anchors: the literal ``message_history`` (so the LLM
         knows what to look at) and a continuity word so the prompt
         actually instructs the LLM to follow the thread."""
-        assert "message_history" in SYSTEM_PROMPT, (
+        assert "message_history" in rendered_prompt, (
             "prompt no longer references ``message_history`` — the "
             "router receives recent channel history under that field "
             "name and must be told to use it for conversation "
@@ -180,7 +209,7 @@ class TestSystemPromptCoupling:
             "follow up",
             "continuity",
         )
-        present = [a for a in continuity_anchors if a in SYSTEM_PROMPT]
+        present = [a for a in continuity_anchors if a in rendered_prompt]
         assert present, (
             f"prompt no longer contains any continuity-cue word "
             f"{continuity_anchors!r}. The rule that says 'pick the "
@@ -190,7 +219,7 @@ class TestSystemPromptCoupling:
             f"deliberately changing."
         )
 
-    def test_prompt_mentions_private_chat_collaboration(self) -> None:
+    def test_prompt_mentions_private_chat_collaboration(self, rendered_prompt: str) -> None:
         """The single-agent policy depends on the LLM understanding
         that cross-agent collaboration is the addressee's job, not the
         router's. The addressee has a ``private_chat`` tool it can use
@@ -202,7 +231,7 @@ class TestSystemPromptCoupling:
 
         Pin the ``private_chat`` literal so the collaboration carve-out
         isn't accidentally lost in a future prompt rewrite."""
-        assert "private_chat" in SYSTEM_PROMPT, (
+        assert "private_chat" in rendered_prompt, (
             "prompt no longer mentions ``private_chat`` — without "
             "telling the LLM that the chosen agent can pull in peers "
             "out-of-band, the LLM is liable to regress toward "
@@ -213,7 +242,7 @@ class TestSystemPromptCoupling:
             "if the architecture has deliberately changed."
         )
 
-    def test_prompt_does_not_contain_misleading_drop_phrase(self) -> None:
+    def test_prompt_does_not_contain_misleading_drop_phrase(self, rendered_prompt: str) -> None:
         """Rule about invalid agent ids was rewritten to remove the
         misleading "silently dropped downstream" phrase.
 
@@ -231,7 +260,7 @@ class TestSystemPromptCoupling:
         the message will go unanswered") is more accurate and helps
         the LLM understand the consequence: pick from the roster, not
         invent ids."""
-        assert "silently dropped downstream" not in SYSTEM_PROMPT, (
+        assert "silently dropped downstream" not in rendered_prompt, (
             "rule about invalid agent ids used to say they would be "
             "'silently dropped downstream' — that was rewritten to "
             "'the targeted agent will not exist and the message will "
@@ -242,7 +271,7 @@ class TestSystemPromptCoupling:
         # Positive anchor for the corrected wording — a future
         # rewrite that loses this guidance should fail this test
         # rather than silently regress the LLM's understanding.
-        assert "go unanswered" in SYSTEM_PROMPT, (
+        assert "go unanswered" in rendered_prompt, (
             "the no-such-agent rule should describe the failure "
             "consequence as the message going unanswered; the current "
             "wording 'the targeted agent will not exist and the "
@@ -261,30 +290,23 @@ class TestBundledRouterMd:
         assert config.model == "gpt-5.4-mini"
         assert config.thinking_effort == "low"
 
-    def test_no_placeholder_leaks_into_rendered_prompt(self) -> None:
+    def test_no_placeholder_leaks_into_rendered_prompt(self, rendered_prompt: str) -> None:
         """Every ``{{...}}`` placeholder must be substituted at load time; a
         surviving brace pair would reach the LLM verbatim."""
-        assert "{{" not in SYSTEM_PROMPT
-        assert "}}" not in SYSTEM_PROMPT
+        assert "{{" not in rendered_prompt
+        assert "}}" not in rendered_prompt
 
-    def test_rendered_prompt_substitutes_field_names(self) -> None:
+    def test_rendered_prompt_substitutes_field_names(self, rendered_prompt: str) -> None:
         for field_name in RoutingDecision.model_fields:
-            assert field_name in SYSTEM_PROMPT
+            assert field_name in rendered_prompt
 
 
 class TestRouterMdLoader:
     """Error handling + the ``CALFKIT_ROUTER_PROMPT_PATH`` override.
 
-    The loader caches on a module global, so every test resets it before and
-    after (the override env var is cleared on teardown too).
+    Cache + override-env isolation is provided by the module-level
+    ``_isolate_router_loader`` autouse fixture (reset before + after each test).
     """
-
-    @pytest.fixture(autouse=True)
-    def _isolate_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(prompt_module._PROMPT_PATH_ENV, raising=False)
-        prompt_module._reset_cache_for_tests()
-        yield
-        prompt_module._reset_cache_for_tests()
 
     def _override(self, monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
         monkeypatch.setenv(prompt_module._PROMPT_PATH_ENV, str(path))
@@ -363,3 +385,74 @@ class TestRouterMdLoader:
         self._override(monkeypatch, path)
         with pytest.raises(ValueError, match="unsubstituted placeholder"):
             load_router_md()
+
+    def test_no_front_matter_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A file with no ``---`` fences yields empty metadata; the loader must
+        reject it rather than silently boot on all-default config with the raw
+        config text leaked into the prompt body."""
+        path = tmp_path / "router.md"
+        path.write_text("provider: openai\nmodel: gpt-5-nano\nNo fences here.\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="no YAML front matter"):
+            load_router_md()
+
+    def test_non_utf8_override_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A non-UTF-8 override file surfaces as a contextful ValueError, not a
+        bare UnicodeDecodeError (UnicodeError is a ValueError subclass, hence
+        the explicit catch)."""
+        path = tmp_path / "router.md"
+        path.write_bytes(b"---\nprovider: openai\n---\n\xff\xfe not utf-8\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="cannot read router prompt"):
+            load_router_md()
+
+    def test_expanduser_in_override_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``~`` in the override path is expanded so operators can mount at a
+        home-relative path."""
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "router.md").write_text("---\nprovider: anthropic\n---\nHome body.\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv(prompt_module._PROMPT_PATH_ENV, "~/router.md")
+        prompt_module._reset_cache_for_tests()
+        config, body = load_router_md()
+        assert config.provider == "anthropic"
+        assert body == "Home body."
+
+    def test_caches_after_first_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A cache hit must NOT re-read the file. After the first read, pointing
+        the override at a now-missing path and calling again returns the cached
+        tuple unchanged (the router fires on every ambient message, so re-reading
+        each call would be a real regression)."""
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: openai\n---\nBody.\n")
+        self._override(monkeypatch, path)
+        first = load_router_md()
+        monkeypatch.setenv(prompt_module._PROMPT_PATH_ENV, str(tmp_path / "gone.md"))
+        assert load_router_md() is first  # cache short-circuit, no re-read/raise
+
+    def test_reset_cache_forces_reread(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``_reset_cache_for_tests`` clears the cache so the next call re-reads
+        the (possibly changed) file."""
+        first = tmp_path / "first.md"
+        first.write_text("---\nprovider: openai\n---\nFirst body.\n")
+        self._override(monkeypatch, first)
+        assert load_router_md()[0].provider == "openai"
+
+        second = tmp_path / "second.md"
+        second.write_text("---\nprovider: anthropic\n---\nSecond body.\n")
+        monkeypatch.setenv(prompt_module._PROMPT_PATH_ENV, str(second))
+        prompt_module._reset_cache_for_tests()
+        config, body = load_router_md()
+        assert config.provider == "anthropic"
+        assert body == "Second body."

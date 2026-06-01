@@ -108,12 +108,13 @@ def load_router_md() -> tuple[RouterConfig, str]:
 
     Raises:
         ValueError: if the file cannot be read (e.g. a configured override
-            path that doesn't exist), its YAML front matter is malformed or
-            invalid (unknown / reserved key, bad enum, out-of-range
-            ``history_turns``), the body is empty, or a ``{{...}}`` placeholder
-            survives substitution (a typo'd placeholder that would otherwise
-            reach the LLM verbatim). The path is included in the message so the
-            error is self-describing in container logs.
+            path that doesn't exist), has no YAML front matter (missing /
+            mistyped ``---`` fences), its front matter is malformed or invalid
+            (unknown / reserved key, bad enum, out-of-range ``history_turns``),
+            the body is empty, or a ``{{...}}`` placeholder survives
+            substitution (a typo'd placeholder that would otherwise reach the
+            LLM verbatim). The path is included in the message so the error is
+            self-describing in container logs.
     """
     global _cached
     if _cached is not None:
@@ -137,8 +138,22 @@ def load_router_md() -> tuple[RouterConfig, str]:
         # path is self-describing and callers that catch ``ValueError`` cover it.
         raise ValueError(f"{path}: malformed YAML frontmatter: {e}") from e
 
+    metadata = dict(post.metadata)
+    if not metadata:
+        # No (or unclosed / BOM-prefixed / mistyped) ``---`` fences: frontmatter
+        # returns empty metadata and folds the whole file — config lines
+        # included — into the body. Fail loudly (mirrors ``parse_agent_md``)
+        # rather than silently booting on all-default config with the raw config
+        # text leaked into the prompt. Every bundled/override router.md must
+        # carry front matter.
+        raise ValueError(
+            f"{path}: no YAML front matter found ({_PROMPT_PATH_ENV}={override!r}); "
+            f"the router config (provider/model/thinking_effort/history_turns) must "
+            f"appear between '---' fences at the top of the file"
+        )
+
     try:
-        config = RouterConfig(**dict(post.metadata))
+        config = RouterConfig(**metadata)
     except ValidationError as e:
         # Wrap the pydantic error with the file path so operators see which
         # file the validation failed against. Pydantic's own message lists

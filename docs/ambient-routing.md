@@ -224,6 +224,7 @@ Loader behavior at boot:
 |-----------------------------------------------------|------------------------------------------------------------|
 | No override set                                     | Read the bundled `router.md` (always present in the image). |
 | `CALFKIT_ROUTER_PROMPT_PATH` set, file missing      | **Boot error** — operator pointed at a path explicitly.    |
+| No `---` fences (missing/mistyped front matter)     | Boot error — config must be between `---` fences (else it would silently leak into the prompt). |
 | Body empty / whitespace-only after substitution     | Boot error — the router would have no instructions.        |
 | Malformed YAML front matter                         | Boot error with file path and parse-error location.        |
 | Unknown front-matter key (e.g. typo `provder:`)     | Boot error from pydantic `extra="forbid"`.                 |
@@ -828,8 +829,10 @@ the tool call, one to produce a final output after the tool result).
 - **Audit projection.** Routing decisions are logged at INFO inside
   the router process. No Discord-side audit channel mirrors the
   decisions.
-- **Hot-reload of the router definition.** Env-var changes require
-  `calfkit-router` restart.
+- **Hot-reload of the router definition.** Edits to `router.md` (or the
+  file pointed at by `CALFKIT_ROUTER_PROMPT_PATH`) require a
+  `calfkit-router` restart — the loader caches the parsed config + prompt
+  at boot.
 
 ## Files
 
@@ -846,10 +849,12 @@ src/calfkit_organization/
 │   ├── registry.py            (modified — auto-append router, router() accessor)
 │   └── synthesized.py         (new — build_synthesized_consumer)
 ├── router/                    (new package — built-in routing agent)
+│   ├── config.py              (RouterConfig — router.md front-matter schema)
 │   ├── definition.py          (build_router_definition + ROUTER_AGENT_ID)
 │   ├── fanout.py              (build_fanout_consumer)
-│   ├── prompt.py              (SYSTEM_PROMPT)
+│   ├── prompt.py              (load_router_md + SYSTEM_PROMPT)
 │   ├── roster.py              (build_router_temp_instructions)
+│   ├── router.md              (bundled config front matter + prompt body)
 │   └── runner.py              (calfkit-router CLI entry)
 └── _compat/                   (new package — temporary SDK workarounds)
     └── invoke.py              (invoke_node_with_metadata helper)

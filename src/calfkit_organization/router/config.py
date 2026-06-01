@@ -39,6 +39,10 @@ class RouterConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: Provider | None = None
-    model: str | None = None
+    # ``min_length=1`` so an empty ``model: ""`` fails at the boundary rather
+    # than being silently swallowed by the ``config.model or _DEFAULT_MODEL``
+    # fallback in ``definition.py`` — matches the non-empty constraints on every
+    # other operator-supplied string in the project (e.g. ``publish_topic``).
+    model: str | None = Field(default=None, min_length=1)
     thinking_effort: ThinkingEffort | None = None
     history_turns: int | None = Field(default=None, ge=0, le=100)

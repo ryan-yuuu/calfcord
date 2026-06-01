@@ -181,17 +181,14 @@ class TestConfigResolution:
         )
         assert build_router_definition().system_prompt == "Custom router instructions."
 
-    def test_no_front_matter_uses_all_defaults(
+    def test_no_front_matter_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """An override file with no front matter (empty config) resolves every
-        field to the in-code default; the whole file becomes the prompt."""
+        """An override file with no ``---`` fences is rejected. Silently booting
+        on all-default config (with the raw config text leaking into the prompt)
+        would be a hard-to-diagnose footgun, so the loader fails loudly."""
         path = tmp_path / "router.md"
         path.write_text("Just a prompt, no front matter.\n")
         _use_override(monkeypatch, path)
-        d = build_router_definition()
-        assert d.provider == "openai"
-        assert d.model == "gpt-5-nano"
-        assert d.thinking_effort == "none"
-        assert d.history_turns == 10
-        assert d.system_prompt == "Just a prompt, no front matter."
+        with pytest.raises(ValueError, match="no YAML front matter"):
+            build_router_definition()

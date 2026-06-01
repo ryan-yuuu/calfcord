@@ -46,7 +46,7 @@ class TestRouterConfigSchema:
     def test_unknown_field_rejected(self) -> None:
         """A typo (``provder:`` for ``provider:``) surfaces at boot rather
         than silently using the wrong default."""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="provder"):
             RouterConfig(provder="openai")  # type: ignore[call-arg]
 
     @pytest.mark.parametrize(
@@ -57,23 +57,29 @@ class TestRouterConfigSchema:
     def test_reserved_field_rejected(self, reserved_key: str) -> None:
         """Router identity fields are project infrastructure, not
         operator-tunable. ``extra="forbid"`` makes any such key an error."""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match=reserved_key):
             RouterConfig(**{reserved_key: "something"})
 
     def test_invalid_provider_rejected(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="provider"):
             RouterConfig(provider="cohere")  # type: ignore[arg-type]
 
     def test_invalid_thinking_effort_rejected(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="thinking_effort"):
             RouterConfig(thinking_effort="extreme")  # type: ignore[arg-type]
 
+    def test_empty_model_rejected(self) -> None:
+        """An empty ``model: ""`` must fail at the boundary rather than be
+        silently swallowed by the ``config.model or _DEFAULT_MODEL`` fallback."""
+        with pytest.raises(ValidationError, match="model"):
+            RouterConfig(model="")
+
     def test_history_turns_out_of_range_rejected(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="history_turns"):
             RouterConfig(history_turns=999)
 
     def test_history_turns_negative_rejected(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="history_turns"):
             RouterConfig(history_turns=-1)
 
     def test_history_turns_zero_accepted(self) -> None:
@@ -83,5 +89,5 @@ class TestRouterConfigSchema:
     def test_frozen(self) -> None:
         """A parsed config is immutable — no in-place mutation."""
         config = RouterConfig(provider="openai")
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="frozen"):
             config.provider = "anthropic"  # type: ignore[misc]
