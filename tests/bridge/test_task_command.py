@@ -69,13 +69,18 @@ def _registry() -> AgentRegistry:
     )
 
 
-def _gateway(ingress: MagicMock | None = None) -> tuple[DiscordIngressGateway, MagicMock]:
+def _gateway(
+    ingress: MagicMock | None = None, typing_notifier: MagicMock | None = None
+) -> tuple[DiscordIngressGateway, MagicMock]:
     """Build a gateway with a real :class:`MessageNormalizer` and mock ingress.
 
     Returns ``(gateway, ingress)``. The gateway is constructed offline (the
     ``discord.Client`` constructor is sync and does not connect), and we set
     the post-``_on_ready`` state (``_bot_user_id``, ``_message_normalizer``)
     by hand so ``_maybe_handle_task`` runs against a real normalizer.
+
+    ``typing_notifier`` defaults to ``None`` (typing disabled); typing tests
+    pass a ``MagicMock`` to assert ``fire``.
     """
     registry = _registry()
     ingress = ingress or MagicMock(spec=BridgeIngress)
@@ -86,6 +91,7 @@ def _gateway(ingress: MagicMock | None = None) -> tuple[DiscordIngressGateway, M
         registry=registry,
         calfkit_client=MagicMock(),
         transcript_store=MagicMock(),
+        typing_notifier=typing_notifier,
     )
     gateway._bot_user_id = _BOT_USER_ID
     gateway._message_normalizer = MessageNormalizer(
@@ -307,6 +313,30 @@ class TestMaybeHandleTaskHappyPath:
         assert wire.content == "/task do the thing"
         # No error/usage reply on the happy path.
         message.reply.assert_not_awaited()
+
+    async def test_fires_typing_into_thread(self) -> None:
+        notifier = MagicMock()
+        gateway, _ingress = _gateway(typing_notifier=notifier)
+        message = _message(content="/task do the thing")
+
+        owned = await gateway._maybe_handle_task(message)
+
+        assert owned is True
+        # source_channel_id is the new thread, so typing shows in the thread.
+        notifier.fire.assert_called_once_with(_THREAD_ID)
+
+    async def test_does_not_fire_typing_on_roster_empty(self) -> None:
+        notifier = MagicMock()
+        gateway, ingress = _gateway(typing_notifier=notifier)
+        ingress.handle = AsyncMock(
+            side_effect=AmbientRosterEmptyError(event_id="evt", channel_id=_PARENT_CHANNEL_ID)
+        )
+        message = _message(content="/task do the thing")
+
+        owned = await gateway._maybe_handle_task(message)
+
+        assert owned is True
+        notifier.fire.assert_not_called()
 
 
 class TestMaybeHandleTaskPassThrough:

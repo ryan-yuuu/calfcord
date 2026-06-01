@@ -76,4 +76,5 @@ right-click to **Copy ID**:
 | Bot is online but never replies | Confirm Message Content intent (step 2); check it can **View Channel** + **Send Messages** in that channel. |
 | Agent can't post / `Forbidden` on a webhook | Bot needs **Manage Webhooks** in that channel. |
 | `/task` does nothing | Bot needs **Create Public Threads** in that channel — a channel override can block it even when the invite granted it. |
+| "typing…" indicator never shows | The bot **user** needs **Send Messages** (and **Send Messages in Threads** for `/task` threads) in that channel — this is separate from Manage Webhooks, and a channel override can deny it. Typing is cosmetic, so it fails silently; the first denial is logged at WARNING. |
 | Slash commands don't appear | Set `DISCORD_GUILD_ID` for instant sync (global takes ~1 h). |

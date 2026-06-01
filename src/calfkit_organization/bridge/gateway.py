@@ -78,6 +78,7 @@ from calfkit_organization.bridge.transcripts import (
 from calfkit_organization.control_plane.publish import publish_discovery_ping
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.settings import DiscordSettings
+from calfkit_organization.discord.typing import TypingNotifier
 from calfkit_organization.router.definition import build_router_definition
 
 logger = logging.getLogger(__name__)
@@ -204,12 +205,14 @@ class DiscordIngressGateway:
         registry: AgentRegistry,
         calfkit_client: Client,
         transcript_store: TranscriptStoreLike,
+        typing_notifier: TypingNotifier | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
         self._ingress = ingress
         self._calfkit_client = calfkit_client
         self._transcript_store = transcript_store
+        self._typing_notifier = typing_notifier
         self._client = _GatewayClient(self)
 
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
@@ -346,6 +349,12 @@ class DiscordIngressGateway:
             return
         try:
             await self._ingress.handle(wire)
+            if self._typing_notifier is not None:
+                # Show "typing…" the moment we accept the message — the only
+                # signal that covers a pure-text reply (whose sole hop is
+                # terminal) and the window before the first agent.steps hop.
+                # Sync + fire-and-forget, so it can't trip the except clauses.
+                self._typing_notifier.fire(wire.source_channel_id or wire.channel_id)
         except AmbientRosterEmptyError:
             # Deployment misconfiguration (no assistants registered).
             # Surface to the user via an inline reply so the missing
@@ -471,6 +480,10 @@ class DiscordIngressGateway:
         wire = self._message_normalizer.normalize_task(message, thread_id=thread.id)
         try:
             await self._ingress.handle(wire)
+            if self._typing_notifier is not None:
+                # source_channel_id is the new thread here, so typing shows in
+                # the task thread. Fire-and-forget; can't trip the except below.
+                self._typing_notifier.fire(wire.source_channel_id or wire.channel_id)
         except AmbientRosterEmptyError:
             logger.info(
                 "task: created thread but roster empty channel_id=%s thread_id=%s event_id=%s",
@@ -717,7 +730,14 @@ def main() -> None:
                     # state consumer's callbacks must point at
                     # slash.schedule_resync so first-seen / departure events
                     # trigger debounced slash re-registration.
-                    gateway = DiscordIngressGateway(settings, ingress, registry, calfkit_client, transcript_store)
+                    # One typing-indicator firer shared by the gateway (ingress
+                    # fire) and the steps consumer (per-hop fire). Built from the
+                    # persona sender's started REST client; fire-and-forget so it
+                    # never blocks the serial steps consumer. See discord/typing.py.
+                    typing_notifier = TypingNotifier(persona_sender.client)
+                    gateway = DiscordIngressGateway(
+                        settings, ingress, registry, calfkit_client, transcript_store, typing_notifier
+                    )
                     consumer_node = build_outbox_consumer(
                         persona_sender=persona_sender,
                         registry=registry,
@@ -746,6 +766,7 @@ def main() -> None:
                         registry=registry,
                         pending_wires=pending_wires,
                         steps_state=steps_state,
+                        typing_notifier=typing_notifier,
                     )
 
                     # Register the consumer's handler on the broker *before*
@@ -812,6 +833,7 @@ def main() -> None:
                         for t in (gateway_task, stop_task):
                             if not t.done():
                                 t.cancel()
+                        await typing_notifier.aclose()
                         await gateway.close()
 
     asyncio.run(_run())
