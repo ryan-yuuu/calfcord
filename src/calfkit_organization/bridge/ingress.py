@@ -74,7 +74,7 @@ from calfkit_organization._compat.invoke import (
 )
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
-from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY, load_memory_prompt
+from calfkit_organization.agents.memory import memory_prompt_deps_for_registry
 from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.phonebook import (
     PhonebookEntry,
@@ -872,10 +872,8 @@ class BridgeIngress:
           restart needed); the recovery is logged once and the one-shot error
           log re-arms.
         """
-        if not any(spec.memory for spec in self._registry.all()):
-            return {}
         try:
-            template = load_memory_prompt()
+            deps = memory_prompt_deps_for_registry(self._registry.all())
         except ValueError as exc:
             if not self._memory_prompt_load_failed:
                 self._memory_prompt_load_failed = True
@@ -887,10 +885,12 @@ class BridgeIngress:
                     exc_info=True,
                 )
             return {}
-        if self._memory_prompt_load_failed:
+        # ``deps`` is empty when no agent opted into memory: nothing was loaded, so
+        # leave the one-shot error state untouched (there is no recovery to report).
+        if deps and self._memory_prompt_load_failed:
             self._memory_prompt_load_failed = False
             logger.info("memory prompt loaded successfully; memory instructions restored")
-        return {MEMORY_PROMPT_DEPS_KEY: template}
+        return deps
 
     def _resolve_temp_instructions(
         self,

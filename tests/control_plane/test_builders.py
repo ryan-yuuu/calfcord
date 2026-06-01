@@ -45,6 +45,7 @@ def test_build_state_event_projects_all_visible_fields() -> None:
     assert event.history_turns == 20
     assert event.thinking_effort == "high"
     assert event.provider == "anthropic"
+    assert event.memory is False
     assert event.cause == "startup"
     assert event.emitted_at is not None
 
@@ -111,6 +112,47 @@ def test_round_trip_definition_to_event_to_definition() -> None:
     assert rebuilt.history_turns == original.history_turns
     assert rebuilt.thinking_effort == original.thinking_effort
     assert rebuilt.provider == original.provider
+    assert rebuilt.memory == original.memory
+
+
+def test_round_trip_preserves_memory_opt_in() -> None:
+    """Regression: a ``memory: true`` agent must still read as memory-enabled
+    after the definition -> event -> definition control-plane round trip.
+
+    The bridge gates shipping the memory-prompt template in ``deps`` on
+    ``any(spec.memory ...)`` over its registry, and that registry is rebuilt
+    from these state events. If ``memory`` is dropped on either projection,
+    the bridge never ships the template and memory silently no-ops for every
+    agent — the bug this test guards against.
+    """
+    original = _make_definition(memory=True)
+    event = build_state_event(original, "startup")
+    assert event.memory is True
+
+    rebuilt = state_event_to_definition(event)
+    assert rebuilt.memory is True
+
+
+def test_state_event_to_definition_defaults_memory_off_when_absent() -> None:
+    """An event from an agent predating the ``memory`` field (it simply omits
+    the key on the wire) must deserialize as memory-off rather than erroring —
+    the backward-compatibility the defaulted field buys us without a
+    schema_version bump."""
+    from datetime import datetime
+
+    event = AgentStateEvent.model_validate(
+        {
+            "agent_id": "scribe",
+            "display_name": "Scribe",
+            "description": "d",
+            "role": "assistant",
+            "history_turns": 10,
+            "emitted_at": datetime(2026, 5, 25, tzinfo=UTC),
+            "cause": "startup",
+        }
+    )
+    assert event.memory is False
+    assert state_event_to_definition(event).memory is False
 
 
 def test_state_event_to_definition_assistant_has_no_publish_topic() -> None:
