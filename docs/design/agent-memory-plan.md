@@ -82,7 +82,8 @@ one readable place (the bridge); everything downstream receives or forwards it.
 | `pyproject.toml` | **No change** — hatchling ships the package-dir `.md` by default (verified). |
 | Tests | `tests/agents/test_memory.py` (loader/render/hook); `+` memory cases in `test_definition.py`, `test_factory.py` (guard); `tests/bridge/test_ingress.py::TestMemoryPromptInjection` (gated injection, raw template); `tests/tools/builtin/test_private_chat.py` (deps projection across A2A). |
 
-No new tools, no tools-process change, no scope/enforcement helper, no agent-side file read.
+No *new* tools and no tools-process infrastructure change beyond `private_chat`'s deps
+forwarding (in the table above); no scope/enforcement helper; agents never read the file.
 
 ## 3. The mechanism in detail
 
@@ -91,9 +92,12 @@ No new tools, no tools-process change, no scope/enforcement helper, no agent-sid
 only when `any(spec.memory for spec in registry.all())`, else `{}`. Consequences:
 zero memory agents → byte-identical to today (no read, no wire cost); ≥1 memory agent
 → the **raw** template rides in every assistant invocation's `deps`, guaranteeing it
-reaches any memory agent through any path (including A2A from a non-memory caller). A
-bad `CALFCORD_MEMORY_PROMPT_PATH` is logged once and skipped — memory agents degrade
-to no block rather than the bridge failing every message.
+reaches any memory agent through any path (including A2A from a non-memory caller). The
+injection lives on the slash-branch publish only; the ambient/router publish omits it (the
+router isn't memory-enabled, and its fan-out re-enters via the slash branch, which carries
+the template). A bad `CALFCORD_MEMORY_PROMPT_PATH` is logged once and skipped — memory agents
+degrade to no block rather than the bridge failing every message; the loader re-reads on
+failure, so a fixed path self-heals on the next invocation (recovery logged, error log re-armed).
 
 ### 3.2 A2A propagation (`private_chat`)
 `deps` is reconstructed at the A2A hop, so `private_chat` spreads the caller's

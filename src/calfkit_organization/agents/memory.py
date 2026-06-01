@@ -69,7 +69,10 @@ def load_memory_prompt() -> str:
     path = Path(override).expanduser() if override else _DEFAULT_PROMPT_PATH
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
+        # ``UnicodeError`` (covers ``UnicodeDecodeError``) is a ``ValueError``
+        # subclass, not an ``OSError`` — a readable-but-non-UTF-8 override file
+        # would otherwise escape as a bare, context-less ``ValueError``.
         raise ValueError(
             f"cannot read memory prompt at {path} ({_PROMPT_PATH_ENV}={override!r}): {e}"
         ) from e

@@ -492,7 +492,9 @@ async def private_chat(
                 # survives the A2A hop. The explicit keys below override the
                 # forwarded values — the target must see the A2A-forwarded
                 # wire and this hop's caller_agent_id, not the caller's.
-                **(ctx.deps.provided_deps or {}),
+                # ``provided_deps`` is always a dict (calfkit constructs it as
+                # ``deps or {}``), matching the unguarded ``.get`` reads above.
+                **ctx.deps.provided_deps,
                 "discord": forwarded_wire.model_dump(mode="json"),
                 "caller_agent_id": caller_agent_id,
                 # Propagate the phonebook so the target (if it chains into

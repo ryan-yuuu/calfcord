@@ -8,6 +8,7 @@ so no provider client is constructed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -17,6 +18,7 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider
 from calfkit_organization.agents.factory import AgentFactory, resolve_provider
+from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY
 from calfkit_organization.agents.state import AgentRuntimeState
 
 
@@ -980,3 +982,42 @@ class TestMemoryFlag:
             MagicMock(),
         )
         assert worker._nodes[0].system_prompt == "You are a test agent."
+
+    def test_memory_agent_registers_the_instructions_hook(self) -> None:
+        """The factory wires the runtime hook onto memory agents — not just the
+        guard. Registered dynamic-instructions functions land in pydantic-ai's
+        ``_agent_loop._instructions`` (alongside the literal system prompt). Without
+        this, the template would reach ``deps`` but never be injected — a silent
+        no-op the guard alone can't catch."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        node = factory.build_node(
+            _memory_definition(agent_id="scribe", tools=("read_file", "write_file")),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        hooks = [i for i in node._agent_loop._instructions if callable(i)]
+        assert len(hooks) == 1, "memory agent should register exactly one instructions hook"
+        # The registered hook localizes the bridge-shipped template for THIS agent.
+        ctx = SimpleNamespace(deps={MEMORY_PROMPT_DEPS_KEY: "block {{MEMORY_DIR}}"})
+        assert hooks[0](ctx) == "block memory/scribe/"
+
+    def test_non_memory_agent_registers_no_instructions_hook(self) -> None:
+        """A memory=False agent must NOT carry the hook — only the literal
+        system prompt is in ``_instructions``."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        node = factory.build_node(
+            _definition(tools=("read_file",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert [i for i in node._agent_loop._instructions if callable(i)] == []

@@ -661,3 +661,27 @@ class TestMemoryPromptInjection:
         # The bridge ships the RAW template; per-agent localization is the
         # agent-side instructions hook's job, not the bridge's.
         assert "{{MEMORY_DIR}}" in deps[MEMORY_PROMPT_DEPS_KEY]
+
+    async def test_degrades_and_logs_once_on_load_failure(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A bad CALFCORD_MEMORY_PROMPT_PATH must not crash the bridge: the
+        invocation still publishes (without the key), and the error is logged
+        once across multiple invocations rather than on every message."""
+        _reset_memory_cache()
+        monkeypatch.setenv("CALFCORD_MEMORY_PROMPT_PATH", "/nonexistent/memory.md")
+        ingress = BridgeIngress(client, self._memory_registry(), pending_wires)
+        with caplog.at_level(logging.ERROR):
+            await ingress.handle(_wire(slash_target="scheduler"))
+            await ingress.handle(_wire(slash_target="scheduler"))
+        # Published despite the load failure; deps simply omits the key.
+        assert client.invoke_node.called
+        assert MEMORY_PROMPT_DEPS_KEY not in client.invoke_node.call_args.kwargs["deps"]
+        # Logged exactly once across the two invocations (the one-shot latch).
+        errs = [r for r in caplog.records if "failed to load the memory prompt" in r.getMessage()]
+        assert len(errs) == 1
+        _reset_memory_cache()

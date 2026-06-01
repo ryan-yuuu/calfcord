@@ -321,8 +321,11 @@ class AgentFactory:
                 or if the resolved provider isn't one of
                 :data:`_PROVIDER_DEFAULT_MODELS` (typically only
                 reachable via env-var override with an unknown
-                value), or if a router definition violates
-                router-specific invariants.
+                value), or if ``definition.memory`` is set but the
+                agent lacks the ``read_file``/``write_file`` tools
+                memory requires (see :meth:`_require_memory_tools`),
+                or if a router definition violates router-specific
+                invariants.
         """
         if definition.role == "router":
             return self._build_router_node(definition)

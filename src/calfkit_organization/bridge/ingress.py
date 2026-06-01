@@ -237,6 +237,11 @@ class BridgeIngress:
         # isn't set yet, so a Discord event arriving before the store opens
         # never crashes the invocation path. Mirrors :attr:`_fetcher`.
         self._transcript_store: TranscriptStoreLike | None = None
+        # Whether the memory-prompt load has already failed once this process —
+        # gates the one-shot error log in :meth:`_memory_prompt_deps` (re-armed
+        # on a later successful load). Same late-bound-state idiom as the two
+        # fields above.
+        self._memory_prompt_load_failed = False
         # Validate every agent's provider at boot so a typo'd
         # CALFKIT_AGENT_DEFAULT_PROVIDER surfaces here (fail-fast) rather
         # than as an uncaught ValueError inside every targeted invocation.
@@ -861,22 +866,31 @@ class BridgeIngress:
         * no agent opts into memory (existing deployments stay byte-identical,
           no template read, no wire cost); or
         * the template can't be loaded (a bad ``CALFCORD_MEMORY_PROMPT_PATH``);
-          logged once, and memory agents degrade to no memory block rather than
-          the bridge failing every invocation.
+          the error is logged once and memory agents degrade to no memory block
+          rather than the bridge failing every invocation. The loader re-reads
+          on failure, so a fixed path self-heals on the next invocation (no
+          restart needed); the recovery is logged once and the one-shot error
+          log re-arms.
         """
-        if not any(getattr(spec, "memory", False) for spec in self._registry.all()):
+        if not any(spec.memory for spec in self._registry.all()):
             return {}
         try:
-            return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
-        except ValueError:
-            if not getattr(self, "_memory_prompt_load_failed", False):
+            template = load_memory_prompt()
+        except ValueError as exc:
+            if not self._memory_prompt_load_failed:
                 self._memory_prompt_load_failed = True
                 logger.error(
-                    "failed to load the memory prompt; memory-enabled agents will "
-                    "run without their memory instructions until it is fixed",
+                    "failed to load the memory prompt (%s); memory-enabled agents "
+                    "will run without their memory instructions until it loads "
+                    "successfully",
+                    exc,
                     exc_info=True,
                 )
             return {}
+        if self._memory_prompt_load_failed:
+            self._memory_prompt_load_failed = False
+            logger.info("memory prompt loaded successfully; memory instructions restored")
+        return {MEMORY_PROMPT_DEPS_KEY: template}
 
     def _resolve_temp_instructions(
         self,
