@@ -345,7 +345,13 @@ class ChannelHistoryFetcher:
             limit: Maximum records to return. Clamped to
                 :data:`_DISCORD_HISTORY_MAX_LIMIT`. ``0`` is treated as
                 "history disabled" and short-circuits without a Discord
-                call.
+                call. Exception: for a message-started thread the recovered
+                starter message is prepended *after* the ``limit``-bounded
+                fetch, so the returned list can hold ``limit + 1`` records
+                (the starter plus ``limit`` in-thread messages). Callers
+                that need a hard cap re-trim with ``records[-N:]`` — which
+                drops the oldest, i.e. the starter, first (see
+                :meth:`_do_fetch` and the prepend comment there).
             bypass_cache: When ``True`` (default ``False``), skip the
                 read-side LRU lookup AND the write-back. The fetch
                 always goes to Discord (subject to single-flight) and
@@ -581,11 +587,14 @@ class ChannelHistoryFetcher:
 
         Recovery order:
 
-        1. ``channel.starter_message`` — a read of discord.py's in-memory
-           message cache (the ``max_messages`` deque, populated from
-           ``MESSAGE_CREATE`` gateway events). Opportunistic: usually a miss
-           on follow-up turns or after a bridge restart, in which case we
-           fall through to the REST path.
+        1. ``channel.starter_message`` — a read of discord.py's
+           **client-wide** in-memory message cache (the single
+           ``max_messages``-bounded deque in ``ConnectionState``, default
+           1000, shared across every channel and populated from
+           ``MESSAGE_CREATE`` gateway events). Opportunistic: on a busy bot
+           the global buffer evicts the starter quickly, so this is usually
+           a miss on follow-up turns (and always after a bridge restart), in
+           which case we fall through to the REST path.
         2. ``parent.fetch_message(channel.id)`` — one REST call, the
            realistic common path (the starter id equals the thread id).
 
@@ -612,7 +621,7 @@ class ChannelHistoryFetcher:
         parent_id = getattr(channel, "parent_id", None)
         if parent_id is None:
             return None  # not a thread
-        # discord.py's in-memory message cache (the ``max_messages`` deque).
+        # discord.py's client-wide in-memory message cache — see docstring.
         # Opportunistic — usually a miss on later turns / after a restart, in
         # which case we fall to the REST fetch below.
         starter = getattr(channel, "starter_message", None)
@@ -631,6 +640,16 @@ class ChannelHistoryFetcher:
         except discord.NotFound:
             # Standalone thread (not created from a message) or the starter
             # was deleted — not an error; there is simply no anchor to add.
+            # DEBUG (not WARN) so the common "this thread has no message
+            # starter" case never spams logs, while still leaving a trail an
+            # operator can switch on to distinguish it from the rare
+            # "starter was deleted" case when chasing "the agent forgot the
+            # task statement".
+            logger.debug(
+                "channel_id=%d: no fetchable thread starter (standalone "
+                "thread or starter deleted); skipping anchor prepend",
+                channel.id,
+            )
             return None
         except discord.Forbidden:
             self._log_forbidden_once(parent_id)

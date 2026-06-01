@@ -1565,3 +1565,113 @@ class TestThreadStarterMessage:
         )
 
         assert [r.message_id for r in records] == [1001]
+
+    @pytest.mark.asyncio
+    async def test_starter_http_exception_degrades(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A non-Forbidden/non-NotFound 5xx from parent.fetch_message must be
+        # caught (WARN) and degrade to thread-only history — NOT escape into
+        # _do_fetch's defensive sweep (which would drop the whole thread).
+        parent = SimpleNamespace(
+            fetch_message=AsyncMock(side_effect=_httpexception(500))
+        )
+        thread = _FakeThread(
+            [_fake_discord_message(message_id=1001, content="followup")],
+            thread_id=_THREAD_ID,
+            parent_id=_PARENT_ID,
+            starter_message=None,
+            parent=parent,
+        )
+        fetcher = _fetcher_for(thread)
+
+        records = await fetcher.fetch(
+            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
+        )
+
+        # In-thread message survives (graceful degrade), not empty history.
+        assert [r.message_id for r in records] == [1001]
+        assert any(
+            "starter-message fetch failed" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_starter_after_before_window_excluded(self) -> None:
+        # Pins the OTHER side of the strict `<` gate: when the anchor is the
+        # same age as or newer than before_message_id it must be excluded.
+        # Here before_message_id is BELOW the thread/starter id, so the
+        # starter is outside the exclusive `before=` window — no prepend.
+        # (A `<=` mutation of the gate would wrongly include it and fail.)
+        starter = _fake_discord_message(message_id=_THREAD_ID, content="do the task")
+        parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter))
+        thread = _FakeThread(
+            [],
+            thread_id=_THREAD_ID,
+            parent_id=_PARENT_ID,
+            starter_message=None,
+            parent=parent,
+        )
+        fetcher = _fetcher_for(thread)
+
+        records = await fetcher.fetch(
+            source_channel_id=_THREAD_ID,
+            before_message_id=_THREAD_ID - 1,
+            limit=10,
+        )
+
+        assert records == []
+
+    @pytest.mark.asyncio
+    async def test_followup_empty_thread_returns_only_starter(self) -> None:
+        # A /task thread whose only follow-up is the (excluded) triggering
+        # message: in-thread history is empty, so the recovered starter is
+        # the sole record. Exercises insert(0, ...) into an empty list.
+        starter = _fake_discord_message(message_id=_THREAD_ID, content="do the task")
+        parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter))
+        thread = _FakeThread(
+            [],
+            thread_id=_THREAD_ID,
+            parent_id=_PARENT_ID,
+            starter_message=None,
+            parent=parent,
+        )
+        fetcher = _fetcher_for(thread)
+
+        records = await fetcher.fetch(
+            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
+        )
+
+        assert [r.message_id for r in records] == [_THREAD_ID]
+
+    @pytest.mark.asyncio
+    async def test_overflow_returns_limit_plus_one(self) -> None:
+        # Contract pin: the prepend happens AFTER the limit-bounded fetch, so
+        # when in-thread messages already fill `limit` the fetcher returns
+        # `limit + 1` records (starter + limit in-thread). Callers (ingress)
+        # re-trim with records[-N:]; this test documents the fetcher side of
+        # that contract so a future change to the limit handling is caught.
+        starter = _fake_discord_message(message_id=_THREAD_ID, content="do the task")
+        parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter))
+        thread = _FakeThread(
+            # Discord newest-first; three in-thread messages, all newer than
+            # the starter and older than before_message_id.
+            [
+                _fake_discord_message(message_id=1003, content="c"),
+                _fake_discord_message(message_id=1002, content="b"),
+                _fake_discord_message(message_id=1001, content="a"),
+            ],
+            thread_id=_THREAD_ID,
+            parent_id=_PARENT_ID,
+            starter_message=None,
+            parent=parent,
+        )
+        fetcher = _fetcher_for(thread)
+
+        records = await fetcher.fetch(
+            source_channel_id=_THREAD_ID, before_message_id=1004, limit=3
+        )
+
+        # limit=3 in-thread messages + the prepended starter == 4 (limit + 1),
+        # starter first. The caller's [-N:] re-trim would drop the starter.
+        assert [r.message_id for r in records] == [_THREAD_ID, 1001, 1002, 1003]
+        assert len(records) == 4

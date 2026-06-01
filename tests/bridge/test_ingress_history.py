@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -568,3 +569,194 @@ class TestAmbientHistory:
         last = router_msgs[-1].parts[0].content
         assert "msg-20" in first
         assert "msg-29" in last
+
+
+# ---------------------------------------------------------------------------
+# /task thread starter — end-to-end through a REAL ChannelHistoryFetcher
+# ---------------------------------------------------------------------------
+#
+# The tests above inject a MagicMock fetcher, so they never exercise the real
+# _do_fetch → _thread_starter_message → prepend path. These compose a real
+# ChannelHistoryFetcher (backed by lightweight discord fakes) with
+# ``ingress.handle`` to prove the /task follow-up scenario works end-to-end:
+# the thread's parent-resident starter message is recovered and projected
+# into ``message_history`` as the oldest entry.
+
+
+def _fake_discord_msg(
+    *,
+    message_id: int,
+    content: str,
+    author_display_name: str,
+    author_id: int,
+    webhook_id: int | None = None,
+) -> Any:
+    """A ``discord.Message`` look-alike for the real fetcher to project."""
+    author = SimpleNamespace(
+        display_name=author_display_name,
+        name=author_display_name,
+        id=author_id,
+    )
+    return SimpleNamespace(
+        id=message_id,
+        content=content,
+        webhook_id=webhook_id,
+        author=author,
+        created_at=datetime.now(UTC),
+    )
+
+
+class _FakeThreadChannel:
+    """A ``discord.Thread`` look-alike: in-thread ``history()`` plus the
+    starter-recovery attributes the fetcher duck-types on (``parent_id``,
+    ``id``, ``starter_message``, ``parent``)."""
+
+    def __init__(
+        self,
+        in_thread: list[Any],
+        *,
+        thread_id: int,
+        parent_id: int,
+        parent: Any,
+    ) -> None:
+        self._in_thread = list(in_thread)  # newest-first, like Discord
+        self.id = thread_id
+        self.parent_id = parent_id
+        self.starter_message = None  # force the REST recovery path
+        self.parent = parent
+
+    def history(self, *, limit: int, before: Any) -> Any:
+        captured = self._in_thread[:limit]
+
+        class _AIter:
+            def __init__(self, items: list[Any]) -> None:
+                self._items = items
+                self._i = 0
+
+            def __aiter__(self) -> Any:
+                return self
+
+            async def __anext__(self) -> Any:
+                if self._i >= len(self._items):
+                    raise StopAsyncIteration
+                v = self._items[self._i]
+                self._i += 1
+                return v
+
+        return _AIter(captured)
+
+
+class TestTaskThreadStarterEndToEnd:
+    async def test_followup_projects_starter_as_oldest_request(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """A /task follow-up turn: the parent-resident starter is recovered by
+        the real fetcher and projected as the oldest ``ModelRequest`` in the
+        target agent's ``message_history``."""
+        thread_id = 500
+        parent_id = 200
+        bot_id = 777
+
+        # The /task anchor (starter) lives in the parent; its id == thread id.
+        starter = _fake_discord_msg(
+            message_id=thread_id,
+            content="do the task",
+            author_display_name="ryan",
+            author_id=111,
+        )
+        parent = SimpleNamespace(
+            fetch_message=AsyncMock(return_value=starter),
+        )
+        # One prior in-thread reply by the scribe persona (webhook author whose
+        # display_name matches the registered agent, so it self-classifies).
+        scribe_reply = _fake_discord_msg(
+            message_id=9000,
+            content="on it",
+            author_display_name="Scribe",
+            author_id=222,
+            webhook_id=333,
+        )
+        thread = _FakeThreadChannel(
+            [scribe_reply],  # newest-first; the triggering msg is excluded
+            thread_id=thread_id,
+            parent_id=parent_id,
+            parent=parent,
+        )
+
+        discord_client = MagicMock()
+        discord_client.user = SimpleNamespace(id=bot_id)
+        discord_client.get_channel.return_value = thread
+
+        registry = _registry_with_router()
+        real_fetcher = ChannelHistoryFetcher(discord_client, registry)
+        ingress = BridgeIngress(client, registry, pending_wires)
+        ingress.set_fetcher(real_fetcher)
+
+        # Slash wire shaped like a /task follow-up: source_channel_id is the
+        # thread, message_id is the follow-up trigger (a snowflake > thread id).
+        wire = _slash_wire(
+            slash_target="scribe",
+            channel_id=parent_id,
+            source_channel_id=thread_id,
+            message_id=12345,
+        )
+        await ingress.handle(wire)
+
+        # The starter was recovered via the parent REST fetch...
+        parent.fetch_message.assert_awaited_once_with(thread_id)
+        # ...and projected as the OLDEST entry: a ModelRequest carrying the
+        # task statement, ahead of scribe's own prior reply.
+        kw = client.invoke_node.call_args.kwargs
+        message_history: list[ModelMessage] = kw["message_history"]
+        assert len(message_history) == 2
+        assert isinstance(message_history[0], ModelRequest)
+        assert message_history[0].parts[0].content == "<ryan> do the task"
+        assert isinstance(message_history[1], ModelResponse)
+        assert message_history[1].parts[0].content == "on it"
+
+    async def test_first_task_turn_excludes_starter(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """On the first /task turn the trigger IS the anchor (message_id ==
+        thread id == starter id); it must NOT appear in history (it arrives as
+        the user_prompt instead). Empty thread + excluded starter ⇒ empty."""
+        thread_id = 500
+        parent_id = 200
+
+        starter = _fake_discord_msg(
+            message_id=thread_id,
+            content="do the task",
+            author_display_name="ryan",
+            author_id=111,
+        )
+        parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter))
+        thread = _FakeThreadChannel(
+            [],  # brand-new thread: nothing posted inside it yet
+            thread_id=thread_id,
+            parent_id=parent_id,
+            parent=parent,
+        )
+
+        discord_client = MagicMock()
+        discord_client.user = SimpleNamespace(id=777)
+        discord_client.get_channel.return_value = thread
+
+        registry = _registry_with_router()
+        ingress = BridgeIngress(client, registry, pending_wires)
+        ingress.set_fetcher(ChannelHistoryFetcher(discord_client, registry))
+
+        # First turn: before_message_id == thread id == starter id.
+        wire = _slash_wire(
+            slash_target="scribe",
+            channel_id=parent_id,
+            source_channel_id=thread_id,
+            message_id=thread_id,
+        )
+        await ingress.handle(wire)
+
+        kw = client.invoke_node.call_args.kwargs
+        assert kw["message_history"] == []
