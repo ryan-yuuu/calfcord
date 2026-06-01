@@ -205,14 +205,12 @@ class DiscordIngressGateway:
         registry: AgentRegistry,
         calfkit_client: Client,
         transcript_store: TranscriptStoreLike,
-        typing_notifier: TypingNotifier | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
         self._ingress = ingress
         self._calfkit_client = calfkit_client
         self._transcript_store = transcript_store
-        self._typing_notifier = typing_notifier
         self._client = _GatewayClient(self)
 
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
@@ -349,12 +347,6 @@ class DiscordIngressGateway:
             return
         try:
             await self._ingress.handle(wire)
-            if self._typing_notifier is not None:
-                # Show "typing…" the moment we accept the message — the only
-                # signal that covers a pure-text reply (whose sole hop is
-                # terminal) and the window before the first agent.steps hop.
-                # Sync + fire-and-forget, so it can't trip the except clauses.
-                self._typing_notifier.fire(wire.source_channel_id or wire.channel_id)
         except AmbientRosterEmptyError:
             # Deployment misconfiguration (no assistants registered).
             # Surface to the user via an inline reply so the missing
@@ -480,10 +472,6 @@ class DiscordIngressGateway:
         wire = self._message_normalizer.normalize_task(message, thread_id=thread.id)
         try:
             await self._ingress.handle(wire)
-            if self._typing_notifier is not None:
-                # source_channel_id is the new thread here, so typing shows in
-                # the task thread. Fire-and-forget; can't trip the except below.
-                self._typing_notifier.fire(wire.source_channel_id or wire.channel_id)
         except AmbientRosterEmptyError:
             logger.info(
                 "task: created thread but roster empty channel_id=%s thread_id=%s event_id=%s",
@@ -730,13 +718,16 @@ def main() -> None:
                     # state consumer's callbacks must point at
                     # slash.schedule_resync so first-seen / departure events
                     # trigger debounced slash re-registration.
-                    # One typing-indicator firer shared by the gateway (ingress
-                    # fire) and the steps consumer (per-hop fire). Built from the
-                    # persona sender's started REST client; fire-and-forget so it
-                    # never blocks the serial steps consumer. See discord/typing.py.
+                    # Typing-indicator firer for the steps consumer's per-hop
+                    # fire. Built from the persona sender's started REST client;
+                    # fire-and-forget so it never blocks the serial steps
+                    # consumer. The gateway deliberately does NOT fire typing —
+                    # only genuine, non-terminal agent work (a steps hop) raises
+                    # the indicator, so it never lingers past the final reply.
+                    # See discord/typing.py.
                     typing_notifier = TypingNotifier(persona_sender.client)
                     gateway = DiscordIngressGateway(
-                        settings, ingress, registry, calfkit_client, transcript_store, typing_notifier
+                        settings, ingress, registry, calfkit_client, transcript_store
                     )
                     consumer_node = build_outbox_consumer(
                         persona_sender=persona_sender,

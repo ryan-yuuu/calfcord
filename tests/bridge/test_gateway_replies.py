@@ -38,7 +38,7 @@ def _settings() -> DiscordSettings:
     )
 
 
-def _gateway(typing_notifier: MagicMock | None = None) -> DiscordIngressGateway:
+def _gateway() -> DiscordIngressGateway:
     """Construct a gateway with mocked ingress + registry.
 
     Note: ``DiscordIngressGateway.__init__`` instantiates a
@@ -50,8 +50,8 @@ def _gateway(typing_notifier: MagicMock | None = None) -> DiscordIngressGateway:
     paths is being passed to the :class:`SlashCommandManager` (which
     stores it but doesn't invoke it during constructor wiring).
 
-    ``typing_notifier`` defaults to ``None`` (typing disabled) so existing
-    tests are unaffected; typing tests pass a ``MagicMock`` to assert ``fire``.
+    The gateway does not fire typing indicators — that lives entirely in
+    the steps consumer — so there is no typing notifier to inject here.
     """
     return DiscordIngressGateway(
         settings=_settings(),
@@ -59,7 +59,6 @@ def _gateway(typing_notifier: MagicMock | None = None) -> DiscordIngressGateway:
         registry=MagicMock(),
         calfkit_client=MagicMock(),
         transcript_store=MagicMock(),
-        typing_notifier=typing_notifier,
     )
 
 
@@ -212,76 +211,6 @@ class TestOnMessageEmptyRosterWiring:
         await gateway._on_message(message)
 
         reply_spy.assert_not_called()
-
-
-class TestOnMessageTypingIndicator:
-    """``_on_message`` fires a typing indicator after a successful
-    ``ingress.handle`` (the only signal covering pure-text replies and the
-    pre-first-hop window), and does NOT fire when ingress raises (e.g. empty
-    roster), since the fire sits after ``handle`` inside the same ``try``."""
-
-    def _message(self) -> MagicMock:
-        message = MagicMock(spec=discord.Message)
-        message.id = 77
-        message.content = "hello there"
-        message.guild = MagicMock()
-        message.guild.id = 5678  # matches settings.guild_id
-        message.author = MagicMock()
-        message.author.id = 99999  # not the bot user
-        message.webhook_id = None
-        return message
-
-    def _wire(self) -> MagicMock:
-        wire = MagicMock()
-        wire.event_id = "evt-typing"
-        wire.channel_id = 6789
-        wire.source_channel_id = None  # top-level channel → effective id is channel_id
-        return wire
-
-    async def test_fires_typing_on_success(self) -> None:
-        notifier = MagicMock()
-        gateway = _gateway(typing_notifier=notifier)
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=self._wire())
-        gateway._bot_user_id = 0
-        gateway._ingress.handle = AsyncMock(return_value=None)
-
-        await gateway._on_message(self._message())
-
-        notifier.fire.assert_called_once_with(6789)
-
-    async def test_fires_typing_into_thread_when_wire_in_thread(self) -> None:
-        """A message that originated inside a thread fires typing into the
-        thread (source_channel_id), not the flattened parent channel."""
-        notifier = MagicMock()
-        gateway = _gateway(typing_notifier=notifier)
-        wire = self._wire()
-        wire.source_channel_id = 4242  # thread id, distinct from channel_id
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=wire)
-        gateway._bot_user_id = 0
-        gateway._ingress.handle = AsyncMock(return_value=None)
-
-        await gateway._on_message(self._message())
-
-        notifier.fire.assert_called_once_with(4242)
-
-    async def test_does_not_fire_on_roster_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from calfkit_organization.bridge.ingress import AmbientRosterEmptyError
-
-        notifier = MagicMock()
-        gateway = _gateway(typing_notifier=notifier)
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=self._wire())
-        gateway._bot_user_id = 0
-        gateway._ingress.handle = AsyncMock(
-            side_effect=AmbientRosterEmptyError(event_id="evt-typing", channel_id=6789)
-        )
-        monkeypatch.setattr(gateway, "_reply_empty_roster", AsyncMock())
-
-        await gateway._on_message(self._message())
-
-        notifier.fire.assert_not_called()
 
 
 class TestOnMessageIngressFailureWiring:

@@ -70,7 +70,7 @@ def _registry() -> AgentRegistry:
 
 
 def _gateway(
-    ingress: MagicMock | None = None, typing_notifier: MagicMock | None = None
+    ingress: MagicMock | None = None,
 ) -> tuple[DiscordIngressGateway, MagicMock]:
     """Build a gateway with a real :class:`MessageNormalizer` and mock ingress.
 
@@ -79,8 +79,8 @@ def _gateway(
     the post-``_on_ready`` state (``_bot_user_id``, ``_message_normalizer``)
     by hand so ``_maybe_handle_task`` runs against a real normalizer.
 
-    ``typing_notifier`` defaults to ``None`` (typing disabled); typing tests
-    pass a ``MagicMock`` to assert ``fire``.
+    The gateway does not fire typing indicators — that lives entirely in the
+    steps consumer — so there is no typing notifier to inject here.
     """
     registry = _registry()
     ingress = ingress or MagicMock(spec=BridgeIngress)
@@ -91,7 +91,6 @@ def _gateway(
         registry=registry,
         calfkit_client=MagicMock(),
         transcript_store=MagicMock(),
-        typing_notifier=typing_notifier,
     )
     gateway._bot_user_id = _BOT_USER_ID
     gateway._message_normalizer = MessageNormalizer(
@@ -313,30 +312,6 @@ class TestMaybeHandleTaskHappyPath:
         assert wire.content == "/task do the thing"
         # No error/usage reply on the happy path.
         message.reply.assert_not_awaited()
-
-    async def test_fires_typing_into_thread(self) -> None:
-        notifier = MagicMock()
-        gateway, _ingress = _gateway(typing_notifier=notifier)
-        message = _message(content="/task do the thing")
-
-        owned = await gateway._maybe_handle_task(message)
-
-        assert owned is True
-        # source_channel_id is the new thread, so typing shows in the thread.
-        notifier.fire.assert_called_once_with(_THREAD_ID)
-
-    async def test_does_not_fire_typing_on_roster_empty(self) -> None:
-        notifier = MagicMock()
-        gateway, ingress = _gateway(typing_notifier=notifier)
-        ingress.handle = AsyncMock(
-            side_effect=AmbientRosterEmptyError(event_id="evt", channel_id=_PARENT_CHANNEL_ID)
-        )
-        message = _message(content="/task do the thing")
-
-        owned = await gateway._maybe_handle_task(message)
-
-        assert owned is True
-        notifier.fire.assert_not_called()
 
 
 class TestMaybeHandleTaskPassThrough:
