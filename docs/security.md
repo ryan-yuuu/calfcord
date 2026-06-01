@@ -19,31 +19,43 @@ no per-call confirmation prompt. The shipped builtins
 `web_fetch`, `web_search`) lean directly into that posture; any tool a
 contributor adds inherits it.
 
-The default `docker-compose.yml` bind-mounts the **entire project root**
-into the `tools` container at `/workspace`, read-write:
+The shipped `docker-compose.yml` confines the `tools` container's
+filesystem to a **dedicated `./workspace` scratch directory**,
+read-write — *not* the project root:
 
 ```yaml
 services:
   tools:
+    environment:
+      CALFCORD_WORKSPACE_DIR: /workspace
     volumes:
-      - .:/workspace
+      - ./workspace:/workspace        # a scratch dir, NOT the project root
 ```
 
-Concretely, any agent with `shell`, `read_file`, `write_file`, or
-`edit_file` declared in its `.md` frontmatter can:
+This is deliberately narrow. By default, an agent with `read_file`,
+`write_file`, `edit_file`, `grep`, or `glob` sees only `./workspace` — it
+**cannot** read `agents/*.md`, `state/`, `src/`, or a root-level `.env`,
+because none of those are mounted into the tools container. (Running
+natively instead of in Docker, the default workspace is
+`<cwd>/state/workspace/`; see § 3.3.)
 
-- Read `agents/*.md` (every agent's identity, system prompt, and tool list).
-- Read `state/agents/*.json` (every agent's channel subscriptions).
-- Read `src/` (the application source — including any secrets a
-  contributor accidentally committed).
-- Read `.env` if it lives in the project root (Docker bind-mounts
-  follow symlinks too).
-- Edit any of the above.
-- Shell out to any binary on the container's `$PATH`.
+Two things that narrow mount does *not* contain — they define the real
+default blast radius:
 
-All agents on a single deployment share the same workspace. This is the
-"trusted shared workspace" model the README documents, and it is the
-default disposition.
+- **`shell` runs arbitrary binaries.** The `shell` tool executes against
+  the container's `$PATH`, so an agent with `shell` can run any binary
+  the image ships, reach the network, and do anything the container's
+  user can. The `./workspace` confinement bounds the *filesystem*, not
+  code execution.
+- **All agents share the one `./workspace`.** There is no per-agent
+  subdirectory or isolation: every agent on the deployment reads and
+  writes the same tree. Treat it as shared scratch space, not private
+  storage.
+
+This is the "trusted shared workspace" model the README documents, and
+it is the default disposition. Widening the mount to the project root or
+`$HOME` — an explicit opt-in covered in § 3.2 — re-exposes the source
+tree, `agents/*.md`, `state/`, and `.env`.
 
 The boundary the model trusts is the **deployment**: every agent the
 operator deployed, every tool wired into the registry, every Discord
@@ -127,48 +139,60 @@ the function bodies and their imports.
 
 ## 3. Deployment patterns
 
-Four patterns, in order of increasing isolation. Pick the one whose
-trust model matches your deployment.
+Four patterns. The default (§ 3.1) is the most filesystem-isolated;
+§ 3.2 and § 3.3 progressively widen what the tools can reach. Pick the
+one whose trust model matches your deployment.
 
 ### 3.1 Trusted single-tenant (default)
 
 **Best for:** Solo dev, small team, internal Discord server where every
 agent author, every operator, and every Discord user is trusted.
 
-This is what `docker compose up` gives you out of the box. Workspace =
-project root, all agents share it, no extra config needed.
+This is what `docker compose up` gives you out of the box: filesystem
+tools are confined to the shared `./workspace` scratch dir (§ 1), and all
+agents share it with no per-agent isolation. No extra config needed.
 
-Sample threat realistic for this pattern: agent A's `shell` tool
-accidentally clobbers agent B's `.md` file ("clean up old agent files"
-prompt → `rm agents/scribe.md`). There is no isolation between agents,
-so this is a recoverable mistake (git restore), not a security
-incident — but it illustrates the lack of any boundary.
+Sample threat realistic for this pattern: agent A's `shell` tool, acting
+on a careless prompt, deletes or overwrites a file another agent left in
+`./workspace` ("clean up old scratch files" → `rm -rf /workspace/*`).
+Because there is no boundary between agents *inside* the workspace, this
+is a recoverable mistake (it's a scratch dir), not a security incident —
+but it illustrates the absence of any inter-agent boundary. With the
+default mount the blast radius stops at `./workspace`: agent A cannot
+reach `agents/scribe.md` or `src/` to clobber them.
 
-### 3.2 Narrower workspace
+### 3.2 Wider workspace (give agents the source tree)
 
-**Best for:** A deployment where the agents shouldn't see the source
-tree at all. Useful when you want filesystem tools (`read_file`,
-`write_file`, `grep`, `glob`) but only against a scratch directory.
+**Best for:** A coding-assistant deployment where you *want* agents to
+read and edit the repository — agents that triage code, open PRs, or
+operate on `agents/*.md` themselves.
 
-Drop a `compose.override.yml` next to `docker-compose.yml`:
+The default mount (§ 1) is a scratch dir, so the source tree is
+off-limits. To widen it, drop a `compose.override.yml` next to
+`docker-compose.yml`:
 
 ```yaml
 services:
   tools:
     volumes:
-      - ./state/workspace:/workspace
+      - .:/workspace        # mount the whole project root
 ```
 
-Compose merges this on top of the base file. Now the tools container
-sees only `./state/workspace` as `/workspace`. Agents can still
-read/write within that subtree but cannot reach `agents/`, `src/`,
-`.env`, or anything else in the project root.
+Compose merges this on top of the base file. Now any agent with `shell`,
+`read_file`, `write_file`, or `edit_file` can:
 
-Trade-off: the `shell` tool's working directory is `/workspace`, so any
-agent workflow that assumed it could `cd` to the repo root or read the
-codebase will break. This is what you want for an A2A-only or
-chat-only deployment; it's not what you want for a coding-assistant
-deployment.
+- Read `agents/*.md` (every agent's identity, system prompt, and tool list).
+- Read `state/agents/*.json` (every agent's channel subscriptions).
+- Read `src/` (the application source — including any secrets a
+  contributor accidentally committed).
+- Read a root-level `.env` (Docker bind-mounts follow symlinks too).
+- Edit any of the above, and shell out to any binary on `$PATH`.
+
+That is a deliberate trade: full repo access in exchange for the
+exposure above. Only widen the mount on a deployment where you trust
+every agent definition and every Discord user with `@mention` access.
+For something in between — e.g. exactly one subdirectory — point the
+override at that path (`- ./some/subdir:/workspace`) instead of `.`.
 
 ### 3.3 Tools native, broker + others in Docker
 
@@ -242,9 +266,9 @@ authoring guide:
   workspace — that's the trusted-workspace contract. A more restrictive
   tool should do better.
 - **Don't write secrets to the workspace.** Any agent on the
-  deployment can read what's in `state/workspace/`. If your tool needs
-  a secret at runtime, pull it from the environment and don't echo it
-  into a return value or a written file.
+  deployment can read what's in the shared workspace (`/workspace`). If
+  your tool needs a secret at runtime, pull it from the environment and
+  don't echo it into a return value or a written file.
 - **Validate templated strings.** SQL, shell, format strings — anything
   forwarded into a downstream interpreter needs the same hygiene you'd
   apply on a public web endpoint.
@@ -264,8 +288,9 @@ matters in practice.
 - **Keep `.env` out of git.** The shipped `.gitignore` excludes it;
   don't override that.
 - **Don't commit `agents/*.md` files that hard-code secrets in the
-  system prompt.** Agents read each other's frontmatter and body
-  through `read_file` on the workspace.
+  system prompt.** Anyone with repo or deployment-host access can read
+  them, and if you widen the tools workspace to include `agents/`
+  (§ 3.2), peer agents can `read_file` them directly.
 - **Rotate the Discord bot token on suspected compromise.** Discord's
   bot token is the single secret that, if leaked, gives an attacker
   full control of the bot's actions in every guild it's in. Rotate
