@@ -544,8 +544,7 @@ class AgentFactory:
         """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.
 
         A memory-enabled agent manages its notepad with the general-purpose
-        ``read_file`` / ``write_file`` tools (see
-        ``docs/design/agent-memory-plan.md``); without them the injected memory
+        ``read_file`` / ``write_file`` tools; without them the injected memory
         instructions are a silent no-op, so fail loud at build time instead.
         Agents that omit ``tools:`` get every registered tool and pass
         automatically — only an explicitly-restricted ``tools:`` list can trip

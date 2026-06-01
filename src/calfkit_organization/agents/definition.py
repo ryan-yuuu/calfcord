@@ -188,8 +188,7 @@ class AgentDefinition(BaseModel):
 
     Default ``False`` so existing agents are unchanged. A memory-enabled agent
     must have the ``read_file`` and ``write_file`` tools — the factory enforces
-    this at build time. See :doc:`docs/authoring-agents` and
-    ``docs/design/agent-memory-plan.md``."""
+    this at build time. See :doc:`docs/authoring-agents`."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by

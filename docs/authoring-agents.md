@@ -185,8 +185,7 @@ The explanation text is **not** bundled into agent deployments. The
 `CALFCORD_MEMORY_PROMPT_PATH` on the bridge); it ships the template to agents
 in `deps`, and a per-agent instructions hook localizes it to that agent's
 `memory/<name>/` directory. So a memory-prompt change propagates from one
-place (the bridge) without rebuilding agents. Full design:
-`docs/design/agent-memory-plan.md`.
+place (the bridge) without rebuilding agents.
 
 ### 3.5 Reserved (do not set)
 

@@ -23,8 +23,6 @@ forward it over Kafka. The text lives in an editable Markdown file
 ``CALFCORD_MEMORY_PROMPT_PATH`` on the bridge host). Substitution is a plain
 :meth:`str.replace` so the literal braces in the template's YAML-frontmatter
 example survive untouched.
-
-See ``docs/design/agent-memory-plan.md`` for the full design.
 """
 
 from __future__ import annotations
