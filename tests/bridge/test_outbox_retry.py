@@ -46,6 +46,10 @@ from calfkit.models.session_context import (
 )
 
 from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.agents.memory import (
+    MEMORY_PROMPT_DEPS_KEY,
+    _reset_cache_for_tests,
+)
 from calfkit_organization.bridge.outbox import (
     _handle_post_failure,
     _post_chunked_fallback,
@@ -499,6 +503,54 @@ class TestPublishRetry:
         # Phonebook excludes the router; the registry has scribe + router.
         ids = {e["agent_id"] for e in kw["deps"]["phonebook"]}
         assert ids == {"scribe"}
+
+    async def test_envelope_includes_memory_prompt_when_agent_opted_in(
+        self, calfkit_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A memory-enabled agent must keep its memory block on the corrective
+        retry turn: the bridge re-ships the template in ``deps`` exactly as the
+        ingress does on the first attempt. Regression guard for the outbox retry
+        path that previously dropped ``memory_prompt`` — leaving the agent to run
+        the fix-it turn with no memory context."""
+        monkeypatch.delenv("CALFCORD_MEMORY_PROMPT_PATH", raising=False)
+        _reset_cache_for_tests()
+        registry = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scribe",
+                    display_name="Scribe",
+                    description="Scribe agent.",
+                    avatar_url="https://example.com/scribe.png",
+                    memory=True,
+                    system_prompt="You are Scribe.",
+                ),
+                build_router_definition(),
+            ]
+        )
+        entry = _entry()
+        err = _http_exc(discord.HTTPException, 400, code=50035)
+
+        await _publish_retry(calfkit_client, registry, entry, "scribe", "fail", err)
+
+        deps = calfkit_client.invoke_node.call_args.kwargs["deps"]
+        assert MEMORY_PROMPT_DEPS_KEY in deps
+        # The bridge ships the RAW (un-localized) template; the agent's hook
+        # localizes ``{{MEMORY_DIR}}``, so the placeholder must survive on the wire.
+        assert "{{MEMORY_DIR}}" in deps[MEMORY_PROMPT_DEPS_KEY]
+
+    async def test_envelope_omits_memory_prompt_when_no_memory_agent(
+        self, calfkit_client: MagicMock
+    ) -> None:
+        """No memory-enabled agent in the registry → no template shipped, so the
+        retry deps stay byte-identical to the pre-feature shape (no wire cost).
+        The default ``_registry()`` fixture's scribe has memory off."""
+        entry = _entry()
+        err = _http_exc(discord.HTTPException, 400, code=50035)
+
+        await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
+
+        deps = calfkit_client.invoke_node.call_args.kwargs["deps"]
+        assert MEMORY_PROMPT_DEPS_KEY not in deps
 
     async def test_envelope_preserves_temp_instructions(self, calfkit_client: MagicMock) -> None:
         entry = _entry(temp_instructions="peer roster here")

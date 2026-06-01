@@ -52,6 +52,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesType
 from calfkit.client import Client
 from calfkit.models import SessionRunContext
 
+from calfkit_organization.agents.memory import memory_prompt_deps_for_registry
 from calfkit_organization.agents.phonebook import (
     phonebook_from_registry,
     phonebook_to_deps,
@@ -782,6 +783,25 @@ async def _publish_retry(
     # registry's entries).
     phonebook = phonebook_from_registry(registry)
 
+    # Re-ship the memory-prompt template on the retry, exactly as the ingress
+    # does on the first attempt (see ``BridgeIngress._memory_prompt_deps``).
+    # Without this a memory-enabled agent would run the corrective turn with no
+    # memory block — its instructions hook would find no template in ``deps`` and
+    # silently return None, dropping its memory context on precisely the turn it
+    # is being asked to fix a reply. This retry path is rare (only on an
+    # LLM-fixable Discord post failure), so a load failure is logged per
+    # occurrence rather than deduped to a one-shot like the hot ingress path.
+    try:
+        memory_deps = memory_prompt_deps_for_registry(registry.all())
+    except ValueError:
+        logger.error(
+            "failed to load the memory prompt for retry of agent=%s; the retry "
+            "will run without its memory block",
+            agent_id,
+            exc_info=True,
+        )
+        memory_deps = {}
+
     handle = await client.invoke_node(
         user_prompt=reminder,
         topic=_AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=agent_id),
@@ -789,6 +809,7 @@ async def _publish_retry(
         deps={
             "discord": wire.model_dump(mode="json"),
             "phonebook": phonebook_to_deps(phonebook),
+            **memory_deps,
         },
         output_type=str,
         temp_instructions=entry.temp_instructions,

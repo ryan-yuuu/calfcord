@@ -33,6 +33,7 @@ def build_state_event(
         history_turns=definition.history_turns,
         thinking_effort=definition.thinking_effort,
         provider=definition.provider,
+        memory=definition.memory,
         emitted_at=datetime.now(UTC),
         cause=cause,
     )
@@ -67,6 +68,11 @@ def state_event_to_definition(event: AgentStateEvent) -> AgentDefinition:
         publish_topic=None,   # state events come from assistants only; bridge
                               # doesn't receive router announcements
         history_turns=event.history_turns,
+        memory=event.memory,  # the bridge reads this to decide whether to ship the
+                              # memory-prompt template in deps. Safe to set even though
+                              # tools is stubbed to (): the factory's memory-needs-fs-tools
+                              # guard runs only in build_node (agent-runner side), and the
+                              # bridge never builds nodes from these reconstituted defs.
         system_prompt=_BRIDGE_STUB_SYSTEM_PROMPT,
         source_path=None,
     )

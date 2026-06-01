@@ -28,10 +28,12 @@ example survive untouched.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from calfkit._vendor.pydantic_ai import RunContext
+
+from calfkit_organization.agents.definition import AgentDefinition
 
 _PROMPT_PATH_ENV = "CALFCORD_MEMORY_PROMPT_PATH"
 _DEFAULT_PROMPT_PATH = Path(__file__).with_name("memory_prompt.md")
@@ -112,6 +114,33 @@ def memory_instructions(agent_id: str) -> Callable[[RunContext[dict]], str | Non
         return render_memory_block(template, agent_id)
 
     return _hook
+
+
+def memory_prompt_deps_for_registry(specs: Iterable[AgentDefinition]) -> dict[str, str]:
+    """Build the ``deps`` entry that ships the memory-prompt template, or ``{}``.
+
+    The bridge is the single reader of the template (:func:`load_memory_prompt`).
+    It ships the raw (un-localized) text under :data:`MEMORY_PROMPT_DEPS_KEY` on
+    every agent invocation it originates **whenever the deployment has at least
+    one memory-enabled agent** — so the template reaches every agent and, because
+    ``private_chat`` forwards ``deps`` wholesale, propagates through A2A chains;
+    each memory-enabled agent's instructions hook then localizes it.
+
+    Returns ``{}`` when no agent in ``specs`` opted into memory (existing
+    deployments stay byte-identical — no template read, no wire cost). Raises
+    :class:`ValueError` (propagated from :func:`load_memory_prompt`) when a memory
+    agent exists but the template can't be loaded; the **caller** decides how to
+    log and degrade — the high-frequency bridge-ingress path dedups the error to a
+    single log, while rarer call sites (e.g. the outbox retry) log per occurrence.
+
+    Shared by every bridge path that originates an agent invocation
+    (:meth:`~calfkit_organization.bridge.ingress.BridgeIngress._memory_prompt_deps`
+    and the outbox retry-with-feedback publish) so the "is memory enabled +
+    load the template" decision lives in exactly one place.
+    """
+    if not any(spec.memory for spec in specs):
+        return {}
+    return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
 
 
 def _reset_cache_for_tests() -> None:

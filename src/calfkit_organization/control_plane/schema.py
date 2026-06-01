@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit_organization.agents.definition import AgentRole, Provider, ThinkingEffort
 
@@ -55,6 +55,14 @@ StateEventCause = Literal["startup", "command_applied", "discovery_response"]
 
 
 class AgentStateEvent(BaseModel):
+    # Explicit ``extra="ignore"`` (pydantic's default, made load-bearing on
+    # purpose): a NEW agent may add wire fields (as ``memory`` was added) without
+    # bumping CONTROL_PLANE_SCHEMA_VERSION, and an OLD bridge that predates the
+    # field must silently ignore it rather than reject the event. Do NOT change
+    # this to ``extra="forbid"`` for "consistency" with AgentDefinition — that
+    # would break backward compatibility for mixed-version rolling deploys.
+    model_config = ConfigDict(extra="ignore")
+
     kind: Literal["state"] = "state"
     schema_version: int = CONTROL_PLANE_SCHEMA_VERSION
     agent_id: str
@@ -67,6 +75,13 @@ class AgentStateEvent(BaseModel):
     provider: Provider | None = None      # nullable: required at the AgentDefinition
                                           # level only for non-bridge use; bridge needs
                                           # it for tier-3 model_settings resolution
+    memory: bool = False                  # whether the agent opted into persistent
+                                          # memory; the bridge gates shipping the
+                                          # memory-prompt template in deps on this
+                                          # (ingress._memory_prompt_deps). Defaulted
+                                          # so events from an older agent that predates
+                                          # this field deserialize as memory-off rather
+                                          # than failing the schema_version gate.
     emitted_at: datetime
     cause: StateEventCause
 
