@@ -119,12 +119,15 @@ def _ctx(
     caller: str = "alice",
     wire: WireMessage | None = None,
     phonebook: list[PhonebookEntry] | None = None,
+    extra_deps: dict[str, Any] | None = None,
 ) -> ToolContext:
     """Construct a ToolContext mirroring what calfkit's dispatch builds.
 
     The bridge ingress populates ``deps["phonebook"]`` on every invocation;
     tests do the same so the tool reads the same shape it would in
-    production.
+    production. ``extra_deps`` adds further ambient keys the bridge may seed
+    at the root (e.g. the memory-prompt template) to verify they project
+    forward across A2A.
     """
     if wire is None:
         wire = _wire()
@@ -136,6 +139,7 @@ def _ctx(
             provided_deps={
                 "discord": wire.model_dump(mode="json"),
                 "phonebook": phonebook_to_deps(phonebook),
+                **(extra_deps or {}),
             },
         ),
         agent_name=caller,
@@ -528,6 +532,21 @@ class TestNewThreadPath:
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # Format pinned: <thread_id>NNN</thread_id>\n{response}.
         assert out == f"<thread_id>{_NEW_THREAD_ID}</thread_id>\nbob's reply"
+
+    async def test_projects_caller_deps_forward_to_target(self, deps: dict[str, Any]) -> None:
+        """Ambient deps the bridge seeds at the root (e.g. the memory-prompt
+        template) project forward to the A2A target, so a memory agent reached
+        via A2A still receives its memory instructions — while the A2A-specific
+        keys remain overrides, not the caller's forwarded values."""
+        deps["client"].execute_node.return_value = _result("ok")
+        ctx = _ctx(caller="alice", extra_deps={"memory_prompt": "TEMPLATE {{MEMORY_DIR}}"})
+        await pc.private_chat(ctx, "bob", "hello")
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]
+        assert forwarded["memory_prompt"] == "TEMPLATE {{MEMORY_DIR}}"
+        # A2A-owned keys are overridden after the spread (this hop's caller,
+        # the forwarded wire, the refreshed roster) — not the caller's copies.
+        assert forwarded["caller_agent_id"] == "alice"
+        assert "phonebook" in forwarded and "discord" in forwarded
 
     async def test_first_send_to_unified_channel_without_thread_id(
         self, deps: dict[str, Any]

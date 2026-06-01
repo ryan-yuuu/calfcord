@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY
+from calfkit_organization.agents.memory import _reset_cache_for_tests as _reset_memory_cache
 from calfkit_organization.bridge.ingress import BridgeIngress
 from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
@@ -613,3 +615,49 @@ class TestTempInstructions:
             await ingress.handle(_wire(slash_target="ghost"))
         assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
         assert any("missing from phonebook" in r.message for r in caplog.records)
+
+
+class TestMemoryPromptInjection:
+    """The bridge ships the raw memory-prompt template in ``deps`` only when the
+    registry holds at least one memory-enabled agent — so existing deployments
+    are byte-identical and memory deployments get full (incl. A2A) coverage."""
+
+    @staticmethod
+    def _memory_registry() -> AgentRegistry:
+        return AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    display_name="Aksel (Scheduler)",
+                    description="Calendar.",
+                    avatar_url="https://example.com/aksel.png",
+                    provider="anthropic",
+                    memory=True,
+                    system_prompt="Scheduler with memory.",
+                ),
+            ]
+        )
+
+    async def test_omitted_when_no_memory_agent(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        _reset_memory_cache()
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire())
+        assert MEMORY_PROMPT_DEPS_KEY not in client.invoke_node.call_args.kwargs["deps"]
+
+    async def test_injected_raw_when_memory_agent_present(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        _reset_memory_cache()
+        ingress = BridgeIngress(client, self._memory_registry(), pending_wires)
+        await ingress.handle(_wire(slash_target="scheduler"))
+        deps = client.invoke_node.call_args.kwargs["deps"]
+        assert MEMORY_PROMPT_DEPS_KEY in deps
+        # The bridge ships the RAW template; per-agent localization is the
+        # agent-side instructions hook's job, not the bridge's.
+        assert "{{MEMORY_DIR}}" in deps[MEMORY_PROMPT_DEPS_KEY]

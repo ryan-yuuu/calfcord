@@ -233,10 +233,6 @@ state/
 /workspace/*
 !/workspace/.gitkeep
 
-# Local memory dir for in-flight agent context. Populated at runtime;
-# never source-controlled.
-agent-memory/
-
 # Operator-specific Docker Compose overrides (extra mounts, env tweaks,
 # alternate broker images). docker-compose.yml ships as the shared
 # default; this file is each operator's local-only delta.

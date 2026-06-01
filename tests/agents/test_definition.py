@@ -115,6 +115,12 @@ class TestAgentDefinitionValidators:
         assert dumped["name"] == "scheduler"
         assert "agent_id" not in dumped
 
+    def test_memory_defaults_to_false(self) -> None:
+        assert _make_definition().memory is False
+
+    def test_memory_accepts_true(self) -> None:
+        assert _make_definition(memory=True).memory is True
+
     def test_thinking_effort_defaults_to_none(self) -> None:
         assert _make_definition().thinking_effort is None
 
@@ -186,6 +192,12 @@ class TestParseAgentMd:
         self._write_md(path, thinking_effort="high")
         d = parse_agent_md(path)
         assert d.thinking_effort == "high"
+
+    def test_parses_memory_frontmatter_field(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, memory="true")
+        d = parse_agent_md(path)
+        assert d.memory is True
 
     def test_filename_must_match_name(self, tmp_path: Path) -> None:
         path = tmp_path / "scheduler.md"

@@ -74,6 +74,7 @@ from calfkit_organization._compat.invoke import (
 )
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
+from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY, load_memory_prompt
 from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.phonebook import (
     PhonebookEntry,
@@ -468,6 +469,7 @@ class BridgeIngress:
                     deps={
                         "discord": wire.model_dump(mode="json"),
                         "phonebook": phonebook_to_deps(phonebook),
+                        **self._memory_prompt_deps(),
                     },
                     output_type=str,
                     model_settings=model_settings,
@@ -844,6 +846,37 @@ class BridgeIngress:
                 exc,
             )
             return 0
+
+    def _memory_prompt_deps(self) -> dict[str, str]:
+        """Return the memory-prompt ``deps`` entry, or ``{}`` when not applicable.
+
+        The bridge is the single reader of the memory-prompt template. It ships
+        the raw (un-localized) template under
+        :data:`~calfkit_organization.agents.memory.MEMORY_PROMPT_DEPS_KEY`
+        whenever the registry holds at least one memory-enabled agent — so it
+        reaches every agent and propagates through A2A (``private_chat``
+        forwards ``deps``), and each memory agent's instructions hook localizes
+        it. Returns ``{}`` when:
+
+        * no agent opts into memory (existing deployments stay byte-identical,
+          no template read, no wire cost); or
+        * the template can't be loaded (a bad ``CALFCORD_MEMORY_PROMPT_PATH``);
+          logged once, and memory agents degrade to no memory block rather than
+          the bridge failing every invocation.
+        """
+        if not any(getattr(spec, "memory", False) for spec in self._registry.all()):
+            return {}
+        try:
+            return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
+        except ValueError:
+            if not getattr(self, "_memory_prompt_load_failed", False):
+                self._memory_prompt_load_failed = True
+                logger.error(
+                    "failed to load the memory prompt; memory-enabled agents will "
+                    "run without their memory instructions until it is fixed",
+                    exc_info=True,
+                )
+            return {}
 
     def _resolve_temp_instructions(
         self,

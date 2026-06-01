@@ -40,6 +40,22 @@ def _definition(
     )
 
 
+def _memory_definition(
+    *,
+    agent_id: str = "scribe",
+    tools: tuple[str, ...] | None = (),
+) -> AgentDefinition:
+    """A ``memory: true`` definition (built against the real TOOL_REGISTRY)."""
+    return AgentDefinition(
+        agent_id=agent_id,
+        display_name=f"Test ({agent_id})",
+        description="A test agent.",
+        tools=tools,
+        memory=True,
+        system_prompt="You are a test agent.",
+    )
+
+
 def _model_factory_spy() -> tuple[list[tuple[str, str]], Any]:
     """Return ``(calls, factory)`` where ``calls`` collects ``(provider, model)`` tuples."""
     calls: list[tuple[str, str]] = []
@@ -885,3 +901,82 @@ class TestRouterDefinitionValidation:
                 publish_topic="",
                 system_prompt="x",
             )
+
+
+class TestMemoryFlag:
+    """``memory: true`` requires the filesystem tools the memory block tells the
+    agent to use; the factory's guard enforces this at build time. These tests
+    use the real TOOL_REGISTRY (no override) so read_file/write_file resolve."""
+
+    def test_memory_agent_with_explicit_fs_tools_builds(self) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _memory_definition(tools=("read_file", "write_file")),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].node_id == "scribe"
+
+    def test_memory_agent_with_all_tools_builds(self) -> None:
+        """``tools`` omitted (None) grants every builtin — includes the fs
+        tools, so the guard passes."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _memory_definition(tools=None),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].node_id == "scribe"
+
+    def test_memory_true_without_tools_raises(self) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        with pytest.raises(ValueError, match="memory: true"):
+            factory.build(
+                _memory_definition(tools=()),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
+    def test_memory_true_missing_write_file_raises(self) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        with pytest.raises(ValueError, match="write_file"):
+            factory.build(
+                _memory_definition(tools=("read_file",)),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
+    def test_non_memory_agent_unaffected_by_guard(self) -> None:
+        """A ``memory=False`` agent with no tools builds fine (guard skipped)."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(tools=()),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].system_prompt == "You are a test agent."

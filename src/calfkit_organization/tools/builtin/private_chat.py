@@ -487,6 +487,12 @@ async def private_chat(
             user_prompt=content,
             topic=target_topic,
             deps={
+                # Project the caller's deps forward so ambient context the
+                # bridge seeds at the root (e.g. the memory-prompt template)
+                # survives the A2A hop. The explicit keys below override the
+                # forwarded values — the target must see the A2A-forwarded
+                # wire and this hop's caller_agent_id, not the caller's.
+                **(ctx.deps.provided_deps or {}),
                 "discord": forwarded_wire.model_dump(mode="json"),
                 "caller_agent_id": caller_agent_id,
                 # Propagate the phonebook so the target (if it chains into
@@ -541,6 +547,7 @@ async def private_chat(
         conversation_thread_id=conversation_thread_id,
         initial_response_text=response_text,
         caller_agent_id=caller_agent_id,
+        caller_deps=ctx.deps.provided_deps,
         correlation_id=result.correlation_id,
     )
 
@@ -568,6 +575,7 @@ async def _post_response_with_feedback_retries(
     initial_response_text: str,
     caller_agent_id: str,
     correlation_id: str,
+    caller_deps: dict | None = None,
 ) -> str:
     """Project the target's reply to the audit thread, retrying the
     target with system-reminder feedback when Discord rejects content
@@ -696,6 +704,7 @@ async def _post_response_with_feedback_retries(
                     forwarded_wire_dict=forwarded_wire_dict,
                     phonebook=phonebook,
                     caller_agent_id=caller_agent_id,
+                    caller_deps=caller_deps,
                 )
             except Exception:
                 # Catches ``TimeoutError`` and everything else the RPC
@@ -730,6 +739,7 @@ async def _execute_retry_with_feedback(
     forwarded_wire_dict: dict,
     phonebook: Sequence[PhonebookEntry],
     caller_agent_id: str,
+    caller_deps: dict | None = None,
 ) -> str:
     """Re-invoke the target with a ``<system-reminder>``-tagged prompt
     plus the failed reply appended to history.
@@ -751,6 +761,9 @@ async def _execute_retry_with_feedback(
         user_prompt=reminder,
         topic=target_topic,
         deps={
+            # Same forward-then-override as the primary A2A invocation, so the
+            # retry carries the bridge-seeded ambient context (memory prompt).
+            **(caller_deps or {}),
             "discord": forwarded_wire_dict,
             "caller_agent_id": caller_agent_id,
             "phonebook": phonebook_to_deps(phonebook),

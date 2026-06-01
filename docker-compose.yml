@@ -151,12 +151,6 @@ services:
       # under state/agents/). Read-write so the agent service can
       # persist updates.
       - ./state:/app/state
-      # Per-agent persistent memory. Pre-wired here so future memory
-      # features write to a host-visible path instead of the
-      # ephemeral container filesystem. The directory is created on
-      # first write; .gitignore excludes its contents from source
-      # control.
-      - ./agent-memory:/app/agent-memory
       # Codex subscription OAuth tokens. Shared with the host CLI
       # (``uv run calfkit-auth codex ...``) so token rotation that
       # happens inside the container writes back through the bind

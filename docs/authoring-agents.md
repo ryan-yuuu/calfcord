@@ -157,6 +157,7 @@ Omit `tools` (or set `tools: []`) for an LLM-only agent.
 | Field           | Type | Default | Range  | Effect                                                                      |
 | --------------- | ---- | ------- | ------ | --------------------------------------------------------------------------- |
 | `history_turns` | int  | `30`    | 0-100  | Number of recent channel messages the bridge projects into `message_history`. |
+| `memory`        | bool | `false` | —      | Opt in to a persistent per-agent notepad (see below).                          |
 
 `history_turns: 0` disables history entirely — no Discord REST call,
 agent runs with only the system prompt and the user prompt. Useful for
@@ -167,6 +168,25 @@ The upper bound of 100 is Discord's per-call REST cap for
 `channel.history(limit=...)`. The default of 30 (~3K input tokens at
 ~100 tokens per message) is the v1 balance between context quality and
 cost.
+
+`memory: true` opts the agent into a persistent notepad. At runtime the agent
+gets a "how memory works" block appended to its instructions, telling it to
+keep one-fact-per-file memories plus a `MEMORY.md` index under `memory/<name>/`
+in the shared workspace, managed with the ordinary `read_file` / `write_file` /
+`edit_file` tools — there are no dedicated memory tools. Because of that, a
+`memory: true` agent **must** have at least `read_file` and `write_file` (omit
+`tools:` to grant all, or list them explicitly); the factory raises at build
+time otherwise. Memory lives in the same shared workspace as everything else,
+so per-agent directories are a convention for tidiness, not a sandbox.
+
+The explanation text is **not** bundled into agent deployments. The
+`calfkit-bridge` process is the single reader of the editable
+`src/calfkit_organization/agents/memory_prompt.md` (override via
+`CALFCORD_MEMORY_PROMPT_PATH` on the bridge); it ships the template to agents
+in `deps`, and a per-agent instructions hook localizes it to that agent's
+`memory/<name>/` directory. So a memory-prompt change propagates from one
+place (the bridge) without rebuilding agents. Full design:
+`docs/design/agent-memory-plan.md`.
 
 ### 3.5 Reserved (do not set)
 

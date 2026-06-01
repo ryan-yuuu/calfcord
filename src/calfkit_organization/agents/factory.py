@@ -89,6 +89,7 @@ from calfkit.worker import Worker
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider
 from calfkit_organization.agents.gates import make_addressable_gate, make_addressed_to_me_gate
+from calfkit_organization.agents.memory import memory_instructions
 from calfkit_organization.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.agents.thinking import build_model_settings
@@ -332,6 +333,7 @@ class AgentFactory:
                 "an assistant must subscribe to at least one channel"
             )
         tools = self._resolve_tools(definition)
+        self._require_memory_tools(definition, tools)
 
         provider = self._resolve_provider(definition)
         model_name = self._resolve_model(definition, provider)
@@ -386,6 +388,16 @@ class AgentFactory:
         )
         agent.gate(make_addressable_gate(definition.agent_id))
         agent.gate(make_addressed_to_me_gate(definition.agent_id))
+
+        # Memory-enabled agents carry a dynamic-instructions hook. It reads
+        # the bridge-injected template from ``deps`` at runtime, localizes it
+        # to this agent's ``memory/<agent_id>/`` dir, and appends it to the
+        # instructions. The agent process never reads the prompt file — only
+        # the bridge does (see ``agents/memory.py``). ``_require_memory_tools``
+        # above already guaranteed the agent has the fs tools the block tells
+        # it to use.
+        if definition.memory:
+            agent.instructions(memory_instructions(definition.agent_id))
 
         # ``store`` is accepted for forward compatibility but unused;
         # see module docstring on why runtime channel changes aren't
@@ -522,3 +534,28 @@ class AgentFactory:
                 f"{unknown!r}; known tools: {known or '<none registered>'}"
             )
         return resolved
+
+    def _require_memory_tools(
+        self, definition: AgentDefinition, tools: list[ToolNodeDef]
+    ) -> None:
+        """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.
+
+        A memory-enabled agent manages its notepad with the general-purpose
+        ``read_file`` / ``write_file`` tools (see
+        ``docs/design/agent-memory-plan.md``); without them the injected memory
+        instructions are a silent no-op, so fail loud at build time instead.
+        Agents that omit ``tools:`` get every registered tool and pass
+        automatically — only an explicitly-restricted ``tools:`` list can trip
+        this. Operates on the resolved :class:`ToolNodeDef` list (not the raw
+        names) so the "all tools" expansion is reflected correctly.
+        """
+        if not definition.memory:
+            return
+        available = {t.tool_schema.name for t in tools}
+        missing = sorted({"read_file", "write_file"} - available)
+        if missing:
+            raise ValueError(
+                f"agent {definition.agent_id!r} sets memory: true but is missing "
+                f"required filesystem tool(s) {missing}; memory needs read_file and "
+                f"write_file. Add them to the agent's tools:, or omit tools: to grant all."
+            )
