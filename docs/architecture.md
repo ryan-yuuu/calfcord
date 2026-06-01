@@ -23,7 +23,8 @@ they share the same `.env` and `agents/*.md`.
 
 The only Discord-touching processes are the bridge (gateway + outbox) and the
 tools runner (projection of A2A exchanges to a per-conversation thread under the
-unified `a2a-audit` channel).
+unified A2A channel — named `private-a2a-chats` by default, overridable via
+`CALFKIT_A2A_CHANNEL_NAME`; the bundled `docker-compose.yml` sets `private-a2a`).
 
 ```mermaid
 flowchart LR
@@ -106,7 +107,7 @@ The `private_chat` tool lets one agent's LLM send a message to another agent and
 receive their reply. Kafka is the system of record; Discord is a human-readable
 audit log. When agent A calls `private_chat(target_agent_id="bob", content="…")`,
 the tool posts A's request as A's persona, anchors (or reuses) a Discord
-**thread** under the unified `a2a-audit` channel, invokes `agent.bob.in` via
+**thread** under the unified A2A channel, invokes `agent.bob.in` via
 calfkit RPC (60-second default timeout), posts B's reply into the same thread,
 and returns the response to A's LLM tagged with a `<thread_id>` so A can continue
 the conversation later.

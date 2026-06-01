@@ -7,9 +7,8 @@
 persona, each defined in a single Markdown file, all able to talk to you *and to
 each other*.
 
-<!-- TODO: replace with a real capture. Best shot: a channel showing
-     `@scribe hello` and the reply rendered under the agent's persona name +
-     avatar. Save under docs/assets/ and swap the line below in. -->
+<!-- Demo image: capture a channel where `@scribe hello` gets a reply under the
+     agent's persona, save to docs/assets/demo.gif, then uncomment the line below. -->
 <!-- ![Calfcord demo](docs/assets/demo.gif) -->
 > _📸 Demo coming soon — a Discord channel where you `@mention` an agent and it
 > replies under its own persona._
@@ -18,14 +17,14 @@ each other*.
 
 - 🎭 **Agents as Discord personas.** Each agent replies under its own display
   name and avatar via webhooks — not a single shared bot voice.
-- 📝 **One file per agent.** Frontmatter is the agent's identity; the body is its
-  system prompt. Drop the file in `agents/`, and `/<name>` works in Discord.
+- 📝 **One file per agent.** The file's header declares its identity; the body
+  is its system prompt. Drop it in `agents/`, and `/<name>` works in Discord.
 - 🤝 **Agents collaborate.** They can call each other with `private_chat`, and
-  every exchange is audited in a Discord thread you can read.
+  every exchange is logged in a readable Discord thread.
 - 🧠 **Bring your own model.** Anthropic, OpenAI, or a ChatGPT Plus/Pro
   subscription (via Codex) — set it per agent.
-- 🛠️ **Built-in tools.** Shell, files, web search/fetch, todos, and more —
-  opt-in per agent, so you control each one's reach.
+- 🛠️ **Built-in tools.** Shell, files, web search/fetch, todos, and more.
+  Agents get them all by default; scope an agent down with a `tools:` list.
 
 ## Quick start
 
@@ -55,8 +54,8 @@ ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY
 docker compose up --build
 ```
 
-This starts five services: a Kafka broker (Redpanda), the bridge, an agent
-worker, the router, and the tools runner.
+This starts the four Calfcord processes plus a Kafka broker (Redpanda) — five
+containers in total. The first build takes a minute or two.
 
 **4. Say hello.** In any channel the bot can see:
 
@@ -80,7 +79,7 @@ display_name: Scribe
 description: Friendly assistant that answers concisely.
 avatar_url: https://api.dicebear.com/9.x/glass/png?seed=scribe
 provider: openai
-model: gpt-5-nano
+model: gpt-5-mini
 tools: [private_chat]
 thinking_effort: medium
 ---
@@ -88,20 +87,24 @@ thinking_effort: medium
 You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sentences).
 ```
 
-The frontmatter declares identity and runtime hints; the body is the LLM's
-system prompt. The filename must match `name`, and the Discord slash command is
-always `/<name>`. Drop the file in, restart the agent, and it's live.
+The frontmatter declares identity and runtime hints; the body is the system
+prompt. The filename must match `name`, and the slash command is always
+`/<name>`. Drop the file in, restart `calfkit-bridge` and `calfkit-agent`, and
+it's live.
 
 Full field reference (providers, models, tool scoping, thinking effort) →
 [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 
 ## How it works
 
-Calfcord is **four independent processes** wired together over Kafka:
-`calfkit-bridge` (the Discord gateway), `calfkit-agent` (runs the agents),
-`calfkit-router` (decides who answers un-mentioned messages), and
-`calfkit-tools` (runs the tools and the agent-to-agent channel). Kafka is the
-only contract between them, so any process can run anywhere.
+Calfcord is **four independent processes**, wired together over Kafka:
+
+- **`calfkit-bridge`** — the Discord gateway.
+- **`calfkit-agent`** — runs the agents.
+- **`calfkit-router`** — decides who answers un-mentioned messages.
+- **`calfkit-tools`** — runs the tools and the agent-to-agent channel.
+
+Kafka is the only contract between them, so any process can run anywhere.
 
 ```mermaid
 flowchart LR
@@ -118,19 +121,22 @@ Full process model, the decoupled-deployment access matrix, and project layout �
 
 ## Configuration
 
-`cp .env.example .env` and fill in the four values shown in the
-[quick start](#quick-start). `.env.example` is fully commented; the complete
-environment-variable reference lives in
-[`docs/configuration.md`](./docs/configuration.md).
+`.env.example` is fully commented — the [quick start](#quick-start) covers the
+four essentials, and [`docs/configuration.md`](./docs/configuration.md) is the
+complete environment-variable reference.
 
 ## ⚠️ Security
 
-By default, Docker Compose **bind-mounts the project root** into the tools
-container read-write. Any agent with `shell` / file tools can therefore read or
-edit anything in the checkout. This is the intended "trusted shared workspace"
-model — so **don't expose Calfcord to untrusted users**, and only grant each
-agent the tools it actually needs. Details and hardening →
-[`docs/security.md`](./docs/security.md).
+Agents run real code. By default an agent gets **every** built-in tool
+(including `shell`) unless you narrow its `tools:` list, and those tools execute
+in the `calfkit-tools` container against a shared, read-write `./workspace`
+directory. Widening that mount — or running the tools natively — gives agents
+broader access to the host.
+
+- **Don't expose Calfcord to untrusted users.**
+- **Scope each agent to only the tools it needs.**
+
+Details and hardening → [`docs/security.md`](./docs/security.md).
 
 ## Documentation
 
