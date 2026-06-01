@@ -31,11 +31,12 @@ read a body that may eventually contain proprietary upstream content.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -230,7 +231,7 @@ class PromptCache:
         tmp_path = target.parent / tmp_name
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         if hasattr(os, "O_BINARY"):  # pragma: no cover - Windows only
-            flags |= os.O_BINARY
+            flags |= os.O_BINARY  # pyright: ignore[reportAttributeAccessIssue]
         fd = os.open(tmp_path, flags, 0o600)
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -239,16 +240,13 @@ class PromptCache:
                 os.fsync(fh.fileno())
         except BaseException:
             # Best-effort cleanup on failure; don't mask the original error.
-            try:
+            with contextlib.suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
             raise
         os.replace(tmp_path, target)
 
 
 def _utc():
     """Indirection so the timezone import is centralised in one place."""
-    from datetime import timezone
 
-    return timezone.utc
+    return UTC

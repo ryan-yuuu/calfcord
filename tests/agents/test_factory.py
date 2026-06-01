@@ -785,9 +785,9 @@ class TestRouterRole:
         the prompt-coupling tests today (the literal value is
         unchanged) but the symbolic coupling would silently break: a
         future rename of the constant would skip this site."""
-        from calfkit._vendor.pydantic_ai import ToolOutput  # noqa: PLC0415
+        from calfkit._vendor.pydantic_ai import ToolOutput
 
-        from calfkit_organization.agents.routing import (  # noqa: PLC0415
+        from calfkit_organization.agents.routing import (
             ROUTER_OUTPUT_TOOL_NAME,
             RoutingDecision,
         )
@@ -835,7 +835,7 @@ class TestRouterDefinitionValidation:
     """
 
     def test_router_with_tools_raises(self) -> None:
-        from pydantic import ValidationError  # noqa: PLC0415
+        from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="must declare no tools"):
             AgentDefinition(
@@ -849,7 +849,7 @@ class TestRouterDefinitionValidation:
             )
 
     def test_router_without_publish_topic_raises(self) -> None:
-        from pydantic import ValidationError  # noqa: PLC0415
+        from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="must declare a publish_topic"):
             AgentDefinition(
@@ -876,7 +876,7 @@ class TestRouterDefinitionValidation:
         callback_topic; setting ``publish_topic`` on them would be a
         silent no-op. Reject at validation so the misconfiguration is
         visible."""
-        from pydantic import ValidationError  # noqa: PLC0415
+        from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="publish_topic is reserved for routers"):
             AgentDefinition(
@@ -892,7 +892,7 @@ class TestRouterDefinitionValidation:
         BEFORE the model_validator runs — pydantic's field validation
         runs first, so the error mentions the field constraint rather
         than the router-specific message."""
-        from pydantic import ValidationError  # noqa: PLC0415
+        from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
             AgentDefinition(

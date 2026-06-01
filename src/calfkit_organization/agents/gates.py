@@ -72,9 +72,7 @@ def make_addressable_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
         author = discord.get("author", {})
         if author.get("agent_id") == agent_id:
             return False
-        if author.get("is_bot", False) and not author.get("agent_id"):
-            return False
-        return True
+        return not (author.get("is_bot", False) and not author.get("agent_id"))
 
     addressable.__name__ = f"addressable_{agent_id}"
     return addressable

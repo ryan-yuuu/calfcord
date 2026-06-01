@@ -74,6 +74,7 @@ from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.agents.factory import AgentFactory, resolve_provider
 from calfkit_organization.agents.loader import load_agents_dir
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
+
 # NOTE: ``calfkit_organization.control_plane.*`` modules are NOT imported
 # at top level. ``control_plane.schema`` imports
 # ``calfkit_organization.agents.definition``, which triggers
@@ -501,70 +502,69 @@ async def _amain(args: argparse.Namespace) -> None:
     settings = DiscordSettings()  # type: ignore[call-arg]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    async with DiscordPersonaSender(settings) as persona_sender:
-        async with Client.connect(server_urls) as calfkit_client:
-            factory = AgentFactory(persona_sender, calfkit_client)
-            nodes = []
-            definition_refs: list[AgentDefinitionRef] = []
-            for definition, state, store in specs:
-                node = _build_node_or_bootstrap_error(
-                    factory, definition, state, store,
-                )
-                nodes.append(node)
-                ref = AgentDefinitionRef(current=definition)
-                definition_refs.append(ref)
-                # Must run before ``worker.register_handlers`` + ``broker.start``
-                # below — once FastStream is consuming, new subscribers on the
-                # same broker are not supported. Broker is connected the moment
-                # ``Client.connect`` enters, so registration here is valid.
-                register_control_sink(calfkit_client, ref)
+    async with DiscordPersonaSender(settings) as persona_sender, Client.connect(server_urls) as calfkit_client:
+        factory = AgentFactory(persona_sender, calfkit_client)
+        nodes = []
+        definition_refs: list[AgentDefinitionRef] = []
+        for definition, state, store in specs:
+            node = _build_node_or_bootstrap_error(
+                factory, definition, state, store,
+            )
+            nodes.append(node)
+            ref = AgentDefinitionRef(current=definition)
+            definition_refs.append(ref)
+            # Must run before ``worker.register_handlers`` + ``broker.start``
+            # below — once FastStream is consuming, new subscribers on the
+            # same broker are not supported. Broker is connected the moment
+            # ``Client.connect`` enters, so registration here is valid.
+            register_control_sink(calfkit_client, ref)
 
-            worker = Worker(calfkit_client, nodes)
-            worker.register_handlers()
+        worker = Worker(calfkit_client, nodes)
+        worker.register_handlers()
 
-            # Start the broker BEFORE publishing initial state events.
-            # ``Client.connect`` opens the underlying transport but does NOT
-            # initialize FastStream's producer — only ``broker.start()`` does.
-            # Without this call, ``publish_state_event`` below raises
-            # ``IncorrectState: You can't use producer here, please connect
-            # broker first.`` on every agent boot. The guard mirrors
-            # ``bridge/gateway.py``'s ``if not broker.running`` because
-            # faststream's ``KafkaSubscriber.start`` is not idempotent.
-            #
-            # Decomposing ``Worker.run`` into ``register_handlers`` +
-            # ``broker.start`` (rather than calling ``worker.run()`` from
-            # ``_run_worker``) also avoids a second FastStream signal-handler
-            # set that would overlap with the one ``_run_worker`` installs —
-            # the same reason the bridge decomposes ``Worker.run`` manually.
-            if not calfkit_client.broker.running:
-                await calfkit_client.broker.start()
+        # Start the broker BEFORE publishing initial state events.
+        # ``Client.connect`` opens the underlying transport but does NOT
+        # initialize FastStream's producer — only ``broker.start()`` does.
+        # Without this call, ``publish_state_event`` below raises
+        # ``IncorrectState: You can't use producer here, please connect
+        # broker first.`` on every agent boot. The guard mirrors
+        # ``bridge/gateway.py``'s ``if not broker.running`` because
+        # faststream's ``KafkaSubscriber.start`` is not idempotent.
+        #
+        # Decomposing ``Worker.run`` into ``register_handlers`` +
+        # ``broker.start`` (rather than calling ``worker.run()`` from
+        # ``_run_worker``) also avoids a second FastStream signal-handler
+        # set that would overlap with the one ``_run_worker`` installs —
+        # the same reason the bridge decomposes ``Worker.run`` manually.
+        if not calfkit_client.broker.running:
+            await calfkit_client.broker.start()
 
+        logger.info(
+            "starting worker with %d agent(s): %s",
+            len(nodes),
+            ", ".join(n.node_id for n in nodes),
+        )
+
+        # Announce initial state. Subscribers are now consuming, so any
+        # peer agent already running will see this and add us to its
+        # roster, and the bridge's state-consumer projects us into its
+        # registry for slash-command re-registration.
+        for ref in definition_refs:
+            event = build_state_event(ref.current, cause="startup")
+            await publish_state_event(calfkit_client, event)
             logger.info(
-                "starting worker with %d agent(s): %s",
-                len(nodes),
-                ", ".join(n.node_id for n in nodes),
+                "announced startup for agent=%s", ref.current.agent_id,
             )
 
-            # Announce initial state. Subscribers are now consuming, so any
-            # peer agent already running will see this and add us to its
-            # roster, and the bridge's state-consumer projects us into its
-            # registry for slash-command re-registration.
-            for ref in definition_refs:
-                event = build_state_event(ref.current, cause="startup")
-                await publish_state_event(calfkit_client, event)
-                logger.info(
-                    "announced startup for agent=%s", ref.current.agent_id,
-                )
-
-            async def _on_shutdown() -> None:
-                await _publish_departures_best_effort(
-                    calfkit_client, definition_refs,
-                )
-
-            await _run_worker(
-                num_agents=len(nodes),
-                on_shutdown_signal=_on_shutdown,
+        async def _on_shutdown() -> None:
+            await _publish_departures_best_effort(
+                calfkit_client, definition_refs,
             )
+
+        await _run_worker(
+            num_agents=len(nodes),
+            on_shutdown_signal=_on_shutdown,
+        )
 
 
 def main() -> None:

@@ -58,7 +58,7 @@ class RoutingDecision(BaseModel):
       misbehaving LLM cannot fan out to multiple agents even by
       accident — the schema enforces "exactly one addressee" at the
       type boundary.
-    * ``reasoning`` is bounded to 1–2000 chars (a misbehaving model
+    * ``reasoning`` is bounded to 1-2000 chars (a misbehaving model
       could otherwise emit a multi-kilobyte rationale that floods
       log files).
 
@@ -108,9 +108,7 @@ class RoutingDecision(BaseModel):
         if v is None:
             return v
         if not AGENT_ID_PATTERN.fullmatch(v):
-            raise ValueError(
-                f"agent_id {v!r} must match [a-z0-9_-]{{1,32}}"
-            )
+            raise ValueError(f"agent_id {v!r} must match [a-z0-9_-]{{1,32}}")
         return v
 
     @field_validator("reasoning")

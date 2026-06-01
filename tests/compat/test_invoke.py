@@ -180,7 +180,7 @@ class TestMetadataEnvelope:
     (typed-in, JSON-out, typed-back-in) and the error paths."""
 
     def test_wire_only_round_trips(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -196,7 +196,7 @@ class TestMetadataEnvelope:
         assert round_tripped.phonebook is None
 
     def test_wire_and_phonebook_round_trips(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -217,7 +217,7 @@ class TestMetadataEnvelope:
         field (this is how the consumer side recovers from the
         on-the-wire JSON encoding produced by
         ``model_dump(mode="json")`` at publish)."""
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -227,7 +227,7 @@ class TestMetadataEnvelope:
         assert envelope.wire.event_id == "abc"
 
     def test_extract_rejects_non_dict(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -239,7 +239,7 @@ class TestMetadataEnvelope:
             MetadataEnvelope.extract([1, 2, 3])
 
     def test_extract_rejects_missing_wire(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -252,7 +252,7 @@ class TestMetadataEnvelope:
         envelope construction now that ``wire`` is typed — consumers
         used to repeat ``WireMessage.model_validate`` themselves and
         catch ``ValidationError`` separately."""
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 
@@ -260,7 +260,7 @@ class TestMetadataEnvelope:
             MetadataEnvelope.extract({"wire": {"bogus": "data"}})
 
     def test_frozen(self) -> None:
-        from calfkit_organization._compat.invoke import (  # noqa: PLC0415
+        from calfkit_organization._compat.invoke import (
             MetadataEnvelope,
         )
 

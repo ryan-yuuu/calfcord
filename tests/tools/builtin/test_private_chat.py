@@ -1613,7 +1613,10 @@ class TestA2ARetryWithFeedback:
         ...fails loudly rather than silently regressing what the
         target LLM sees on retry."""
         from calfkit._vendor.pydantic_ai.messages import (
-            ModelRequest, ModelResponse, TextPart, UserPromptPart,
+            ModelRequest,
+            ModelResponse,
+            TextPart,
+            UserPromptPart,
         )
         long_reply = "x" * 3000
         deps["client"].execute_node = AsyncMock(

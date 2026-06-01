@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import signal
 import time
@@ -32,15 +31,7 @@ from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
 
 def _write_agent_md(dir_: Path, name: str) -> None:
     """Write a minimal valid agents/<name>.md fixture in ``dir_``."""
-    body = (
-        "---\n"
-        f"name: {name}\n"
-        f"display_name: {name.title()}\n"
-        f"description: Test agent {name}.\n"
-        "---\n"
-        "\n"
-        f"You are {name}.\n"
-    )
+    body = f"---\nname: {name}\ndisplay_name: {name.title()}\ndescription: Test agent {name}.\n---\n\nYou are {name}.\n"
     (dir_ / f"{name}.md").write_text(body)
 
 
@@ -50,10 +41,7 @@ class TestBootstrapEnvVar:
 
     def test_hyphens_become_underscores(self) -> None:
         # POSIX env var names cannot contain hyphens.
-        assert (
-            bootstrap_env_var("code-quality-reviewer")
-            == "CALFKIT_AGENT_CODE_QUALITY_REVIEWER_BOOTSTRAP_CHANNELS"
-        )
+        assert bootstrap_env_var("code-quality-reviewer") == "CALFKIT_AGENT_CODE_QUALITY_REVIEWER_BOOTSTRAP_CHANNELS"
 
 
 class TestParseChannelIds:
@@ -234,7 +222,7 @@ class TestBuildNodeOrBootstrapError:
     @staticmethod
     def _definition() -> AgentDefinition:
         return AgentDefinition(
-            agent_id="echo",
+            agent_id="echo",  # type: ignore
             display_name="Echo",
             description="Test.",
             system_prompt="Test echo.",
@@ -243,7 +231,7 @@ class TestBuildNodeOrBootstrapError:
     def test_value_error_wrapped(self) -> None:
         factory = MagicMock()
         factory.build_node.side_effect = ValueError("no channels")
-        with pytest.raises(BootstrapError, match="echo.*failed to construct.*no channels"):
+        with pytest.raises(BootstrapError, match="echo.*failed to construct.*no channels"):  # noqa: RUF043
             _build_node_or_bootstrap_error(
                 factory,
                 self._definition(),
@@ -439,9 +427,7 @@ class TestResolveAgentSpecs:
         _write_agent_md(agents_dir, "echo")
         _write_agent_md(agents_dir, "scribe")
         (state_dir / "echo.json").write_text("{not json")
-        await AgentStateStore(state_dir / "scribe.json").save(
-            AgentRuntimeState(channels=[200])
-        )
+        await AgentStateStore(state_dir / "scribe.json").save(AgentRuntimeState(channels=[200]))
 
         with pytest.raises(BootstrapError) as exc_info:
             await _resolve_agent_specs(None, agents_dir, state_dir)
@@ -461,9 +447,7 @@ class TestResolveAgentSpecs:
         ValueError subclass, so the (OSError, ValueError) catch in
         _load_or_bootstrap_state converts it to BootstrapError."""
         _write_agent_md(agents_dir, "echo")
-        (state_dir / "echo.json").write_text(
-            '{"schema_version": 1, "channels": "not-a-list"}'
-        )
+        (state_dir / "echo.json").write_text('{"schema_version": 1, "channels": "not-a-list"}')
 
         with pytest.raises(BootstrapError) as exc_info:
             await _resolve_agent_specs(None, agents_dir, state_dir)
@@ -494,9 +478,7 @@ class TestResolveAgentSpecs:
         _write_agent_md(agents_dir, "echo")
         # Frontmatter name mismatches the filename stem → load_agents_dir
         # raises ValueError from parse_agent_md.
-        (agents_dir / "broken.md").write_text(
-            "---\nname: mismatch\n---\nbody\n"
-        )
+        (agents_dir / "broken.md").write_text("---\nname: mismatch\n---\nbody\n")
         with pytest.raises(BootstrapError, match="failed to load"):
             await _resolve_agent_specs(None, agents_dir, state_dir)
 
@@ -518,9 +500,7 @@ class TestPrewarmCodexIfNeeded:
         return (definition, MagicMock(spec=AgentRuntimeState), MagicMock(spec=AgentStateStore))
 
     @pytest.mark.asyncio
-    async def test_skips_prewarm_when_no_codex_agent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_skips_prewarm_when_no_codex_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No agent declares openai-codex and no env-var override — prewarm
         must NOT be invoked (avoids the authlib/openhands-sdk import cost for
         non-codex deployments)."""
@@ -538,23 +518,17 @@ class TestPrewarmCodexIfNeeded:
         assert called is False
 
     @pytest.mark.asyncio
-    async def test_invokes_prewarm_when_any_agent_declares_openai_codex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_invokes_prewarm_when_any_agent_declares_openai_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         prewarm = AsyncMock()
         import calfkit_organization.providers.codex as codex_pkg
 
         monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
-        await _prewarm_codex_if_needed(
-            [self._spec("anthropic"), self._spec("openai-codex")]
-        )
+        await _prewarm_codex_if_needed([self._spec("anthropic"), self._spec("openai-codex")])
         prewarm.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_invokes_prewarm_when_env_var_default_is_openai_codex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_invokes_prewarm_when_env_var_default_is_openai_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression guard for the C1 fix: an agent that omits ``provider:``
         from its frontmatter must still trigger prewarm when the operator has
         set ``CALFKIT_AGENT_DEFAULT_PROVIDER=openai-codex``. The pre-fix
@@ -571,16 +545,14 @@ class TestPrewarmCodexIfNeeded:
         prewarm.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_converts_codex_prompts_unavailable_to_bootstrap_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_converts_codex_prompts_unavailable_to_bootstrap_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When upstream prompts can't be fetched and no cache exists, the
         runner must wrap the typed exception in BootstrapError with a hint
         pointing the operator at the CLI — otherwise the worker process would
         crash with an unactionable traceback."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
-        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
         import calfkit_organization.providers.codex as codex_pkg
+        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
 
         async def _failing_prewarm() -> None:
             raise CodexPromptsUnavailableError("simulated network failure")
@@ -601,9 +573,7 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(
-        self, payload: str, *, topic: str, key: bytes | None = None
-    ) -> None:
+    async def publish(self, payload: str, *, topic: str, key: bytes | None = None) -> None:
         self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
@@ -615,9 +585,7 @@ class _FakeClient:
 class _StuckConnection:
     """publish() never completes — simulates a hung Kafka producer."""
 
-    async def publish(
-        self, payload: str, *, topic: str, key: bytes | None = None
-    ) -> None:
+    async def publish(self, payload: str, *, topic: str, key: bytes | None = None) -> None:
         await asyncio.Event().wait()  # never returns
 
 
@@ -629,9 +597,7 @@ class _StuckClient:
 class _RaisingConnection:
     """publish() always raises."""
 
-    async def publish(
-        self, payload: str, *, topic: str, key: bytes | None = None
-    ) -> None:
+    async def publish(self, payload: str, *, topic: str, key: bytes | None = None) -> None:
         raise RuntimeError("simulated kafka outage")
 
 
@@ -667,9 +633,7 @@ class TestPublishDeparturesBestEffort:
         topics = {call["topic"] for call in client._connection.calls}
         assert topics == {"agent.state"}
 
-        agent_ids = sorted(
-            call["payload"]["agent_id"] for call in client._connection.calls
-        )
+        agent_ids = sorted(call["payload"]["agent_id"] for call in client._connection.calls)
         assert agent_ids == ["bridge", "echo", "scribe"]
 
         # Each payload carries the departure discriminator on the wire so
@@ -678,7 +642,8 @@ class TestPublishDeparturesBestEffort:
         assert kinds == {"departure"}
 
     async def test_timeout_is_swallowed(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A publish that exceeds the timeout is logged and skipped, not raised."""
         client = _StuckClient()
@@ -686,19 +651,19 @@ class TestPublishDeparturesBestEffort:
 
         with caplog.at_level(logging.WARNING):
             await _publish_departures_best_effort(
-                client, refs, timeout=0.05,  # type: ignore[arg-type]
+                client,
+                refs,
+                timeout=0.05,  # type: ignore[arg-type]
             )
 
-        warnings = [
-            r for r in caplog.records if r.levelno == logging.WARNING
-        ]
-        assert any(
-            "departure publish timed out for agent=echo" in r.message
-            for r in warnings
-        ), f"expected timeout warning, got: {[r.message for r in caplog.records]}"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("departure publish timed out for agent=echo" in r.message for r in warnings), (
+            f"expected timeout warning, got: {[r.message for r in caplog.records]}"
+        )
 
     async def test_exception_is_swallowed(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A publish that raises is logged at ERROR and skipped, not raised."""
         client = _RaisingClient()
@@ -706,14 +671,13 @@ class TestPublishDeparturesBestEffort:
 
         with caplog.at_level(logging.ERROR):
             await _publish_departures_best_effort(
-                client, refs, timeout=1.0,  # type: ignore[arg-type]
+                client,
+                refs,
+                timeout=1.0,  # type: ignore[arg-type]
             )
 
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any(
-            "departure publish failed for agent=echo" in r.message
-            for r in errors
-        )
+        assert any("departure publish failed for agent=echo" in r.message for r in errors)
         # exc_info attached via logger.exception so operators get the traceback.
         assert any(r.exc_info is not None for r in errors)
 
@@ -725,15 +689,15 @@ class TestPublishDeparturesBestEffort:
 
         start = time.monotonic()
         await _publish_departures_best_effort(
-            client, refs, timeout=timeout,  # type: ignore[arg-type]
+            client,
+            refs,
+            timeout=timeout,  # type: ignore[arg-type]
         )
         elapsed = time.monotonic() - start
 
         # Generous slack for scheduling on a busy CI runner. The serial
         # equivalent would be 5*0.1 = 0.5s; we want to prove parallel.
-        assert elapsed < timeout + 0.5, (
-            f"total elapsed {elapsed:.3f}s exceeded parallel budget"
-        )
+        assert elapsed < timeout + 0.5, f"total elapsed {elapsed:.3f}s exceeded parallel budget"
 
 
 class TestRunWorkerShutdownCallback:
@@ -761,7 +725,8 @@ class TestRunWorkerShutdownCallback:
         return captured
 
     async def test_callback_fires_on_signal(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """SIGINT triggers on_shutdown_signal before _run_worker returns."""
         captured = self._disable_signal_handlers(monkeypatch)
@@ -786,7 +751,8 @@ class TestRunWorkerShutdownCallback:
         assert callback_fired.is_set()
 
     async def test_callback_not_required(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Passing ``on_shutdown_signal=None`` is a no-op past the stop wait."""
         captured = self._disable_signal_handlers(monkeypatch)
@@ -829,6 +795,6 @@ class TestRunWorkerShutdownCallback:
             await run_task
 
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any(
-            "on_shutdown_signal callback raised" in r.message for r in errors
-        ), f"expected callback-raised log, got: {[r.message for r in errors]}"
+        assert any("on_shutdown_signal callback raised" in r.message for r in errors), (
+            f"expected callback-raised log, got: {[r.message for r in errors]}"
+        )

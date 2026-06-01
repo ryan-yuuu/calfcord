@@ -7,8 +7,10 @@ real network calls.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -276,9 +278,7 @@ class TestForcedStreaming:
     ``400 'Stream must be set to true'``."""
 
     @pytest.mark.asyncio
-    async def test_non_streaming_call_forces_stream_and_reconstructs(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_non_streaming_call_forces_stream_and_reconstructs(self, tmp_path: Path) -> None:
         store = _seed(tmp_path, account_id="x")
         client = CodexSubscriptionModelClient(
             model_name="gpt-5.2-codex",
@@ -387,12 +387,13 @@ class TestForcedStreaming:
             async def _gen():
                 if False:  # empty stream
                     yield None
+
             return _gen()
 
         original = OpenAIResponsesModel._responses_create
-        OpenAIResponsesModel._responses_create = _fake_super_create
+        OpenAIResponsesModel._responses_create = _fake_super_create  # pyright: ignore[reportAttributeAccessIssue]
         try:
-            with pytest.raises(RuntimeError, match="response.completed"):
+            with pytest.raises(RuntimeError, match="response.completed"):  # noqa: RUF043
                 await client._responses_create(
                     messages=[],
                     stream=False,
@@ -428,10 +429,8 @@ class TestCodexBearerAuth:
         # mutated) request; the framework would then await the response.
         gen = auth.async_auth_flow(request)
         yielded = await gen.__anext__()
-        try:
+        with contextlib.suppress(StopAsyncIteration):
             await gen.__anext__()
-        except StopAsyncIteration:
-            pass
 
         assert yielded.headers["Authorization"] == f"Bearer {cached_access_token}"
 

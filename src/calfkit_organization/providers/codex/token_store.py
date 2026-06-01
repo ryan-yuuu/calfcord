@@ -91,7 +91,9 @@ def make_persist_callback(store: CredentialStore):
     login (e.g. ``calfkit-auth codex login --force``) can read it back.
     """
 
-    async def _persist(token: dict[str, Any], refresh_token: str | None = None, access_token: str | None = None) -> None:
+    async def _persist(
+        token: dict[str, Any], refresh_token: str | None = None, access_token: str | None = None
+    ) -> None:
         # Authlib passes the previous refresh_token/access_token as kwargs for
         # callbacks that need diffing; we ignore them — the new values live in
         # ``token``.

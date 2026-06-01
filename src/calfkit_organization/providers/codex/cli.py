@@ -37,7 +37,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from openhands.sdk.llm.auth import OpenAISubscriptionAuth
 
@@ -82,7 +82,7 @@ async def _cmd_login(args: argparse.Namespace) -> int:
         # Reuse cached credentials when valid; refresh silently if expired.
         try:
             creds = await auth.refresh_if_needed()
-        except Exception as exc:  # noqa: BLE001 — surface any refresh failure cleanly
+        except Exception as exc:
             print(f"Cached credentials could not be refreshed ({exc}); performing fresh login.", file=sys.stderr)
             creds = None
         if creds is not None:
@@ -92,7 +92,7 @@ async def _cmd_login(args: argparse.Namespace) -> int:
     auth_method = "device_code" if args.device_code else "browser"
     try:
         await auth.login(auth_method=auth_method, open_browser=not args.no_browser)
-    except Exception as exc:  # noqa: BLE001 — top-level CLI handler
+    except Exception as exc:
         print(f"Login failed: {exc}", file=sys.stderr)
         return 1
     print(f"Login successful; credentials cached at {get_credentials_dir()}", file=sys.stderr)
@@ -119,7 +119,7 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         return 1
 
     expires_at_s = creds.expires_at // 1000
-    expires_dt = datetime.fromtimestamp(expires_at_s, tz=timezone.utc)
+    expires_dt = datetime.fromtimestamp(expires_at_s, tz=UTC)
     seconds_remaining = expires_at_s - int(time.time())
     account_id = extract_account_id(creds.access_token) or "<could not decode>"
 
@@ -147,7 +147,7 @@ async def _cmd_refresh(_args: argparse.Namespace) -> int:
     auth = OpenAISubscriptionAuth(credential_store=store)
     try:
         await auth.refresh_if_needed()
-    except Exception as exc:  # noqa: BLE001 — top-level CLI handler
+    except Exception as exc:
         print(f"Refresh failed: {exc}", file=sys.stderr)
         return 1
     return _cmd_status(_args)
@@ -199,7 +199,7 @@ def _cmd_prompt_status(_args: argparse.Namespace) -> int:
         print("Run: uv run calfkit-auth codex refresh-prompts")
         return 1
     print(f"Cache dir: {cache.base_dir}")
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     for e in entries:
         age = (now - e.fetched_at) if e.fetched_at else None
         age_str = _format_age(age) if age else "unknown"

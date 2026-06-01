@@ -131,29 +131,28 @@ async def _amain() -> None:
     subscribe_topics = [f"discord.channel.{cid}.in" for cid in channel_ids]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    async with DiscordPersonaSender(settings) as persona_sender:
-        async with Client.connect(server_urls) as client:
-            node = EchoNode(
-                node_id=definition.agent_id,
-                subscribe_topics=subscribe_topics,
-                persona=persona,
-                persona_sender=persona_sender,
-                reply_style=reply_style,
-            )
-            # AND-semantics: both gates must accept. Authorship check first so
-            # we short-circuit on self/unknown-bot before doing content-based
-            # addressed-to-me checks.
-            node.gate(make_addressable_gate(definition.agent_id))
-            node.gate(make_addressed_to_me_gate(definition.agent_id))
+    async with DiscordPersonaSender(settings) as persona_sender, Client.connect(server_urls) as client:
+        node = EchoNode(
+            node_id=definition.agent_id,
+            subscribe_topics=subscribe_topics,
+            persona=persona,
+            persona_sender=persona_sender,
+            reply_style=reply_style,
+        )
+        # AND-semantics: both gates must accept. Authorship check first so
+        # we short-circuit on self/unknown-bot before doing content-based
+        # addressed-to-me checks.
+        node.gate(make_addressable_gate(definition.agent_id))
+        node.gate(make_addressed_to_me_gate(definition.agent_id))
 
-            worker = Worker(client, [node])
-            logger.info(
-                "echo agent starting on channels=%s broker=%s reply_style=%s",
-                channel_ids,
-                server_urls,
-                reply_style,
-            )
-            await worker.run()
+        worker = Worker(client, [node])
+        logger.info(
+            "echo agent starting on channels=%s broker=%s reply_style=%s",
+            channel_ids,
+            server_urls,
+            reply_style,
+        )
+        await worker.run()
 
 
 def main() -> None:

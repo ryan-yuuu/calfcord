@@ -156,8 +156,8 @@ class TestPrewarmCodexIfNeeded:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
-        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
         import calfkit_organization.providers.codex as codex_pkg
+        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
 
         async def _failing_prewarm() -> None:
             raise CodexPromptsUnavailableError("simulated network failure")

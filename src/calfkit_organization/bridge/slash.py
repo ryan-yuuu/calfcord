@@ -31,6 +31,7 @@ roster.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from typing import cast, get_args
@@ -150,13 +151,11 @@ class SlashCommandManager:
             for spec in self._registry.all()
             if spec.role != "router"
         ]
-        effort_choices = [
-            app_commands.Choice(name=value, value=value) for value in _THINKING_EFFORT_VALUES
-        ]
+        effort_choices = [app_commands.Choice(name=value, value=value) for value in _THINKING_EFFORT_VALUES]
 
         @app_commands.describe(
             agent="Which agent to configure",
-            effort="Thinking-effort tier; applies to the next message (mentions/slashes only — ambient messages use the agent's default)",
+            effort="Thinking-effort tier; applies to the next message (mentions/slashes only — ambient messages use the agent's default)",  # noqa: E501
         )
         @app_commands.choices(agent=agent_choices, effort=effort_choices)
         async def callback(
@@ -206,10 +205,7 @@ class SlashCommandManager:
         spec = self._registry.by_id(agent_id)
         if spec is None:
             known = ", ".join(f"`{s.agent_id}`" for s in self._registry.all()) or "<none>"
-            await reply(
-                f"No agent named `{agent_id}` in the bridge's roster. "
-                f"Known: {known}."
-            )
+            await reply(f"No agent named `{agent_id}` in the bridge's roster. Known: {known}.")
             return
 
         if effort not in _THINKING_EFFORT_VALUES:
@@ -240,8 +236,7 @@ class SlashCommandManager:
                 request_id,
             )
             await reply(
-                f"Couldn't publish control command for `{agent_id}` "
-                f"(request_id={request_id}). Check bridge logs."
+                f"Couldn't publish control command for `{agent_id}` (request_id={request_id}). Check bridge logs."
             )
             return
 
@@ -293,10 +288,7 @@ class SlashCommandManager:
             # A guild slash always carries a messageable channel; this
             # guards the rare uncached-channel case rather than letting an
             # AttributeError escape into the command dispatcher.
-            await reply(
-                "Couldn't find a channel to clear here. Run /clear from a "
-                "text channel or thread."
-            )
+            await reply("Couldn't find a channel to clear here. Run /clear from a text channel or thread.")
             return
 
         # Post the marker as a plain bot message (NOT an ephemeral/followup
@@ -346,9 +338,7 @@ class SlashCommandManager:
             await interaction.response.defer(ephemeral=True)
             await interaction.delete_original_response()
         except discord.DiscordException:
-            logger.exception(
-                "failed to ack clear interaction_id=%s", interaction.id
-            )
+            logger.exception("failed to ack clear interaction_id=%s", interaction.id)
 
     def schedule_resync(self, agent_id: str) -> None:
         """Schedule a debounced re-sync of ``/thinking-effort``.
@@ -388,9 +378,7 @@ class SlashCommandManager:
                 logger.debug("remove_command(/thinking-effort) raised; proceeding")
             self._tree.add_command(self._build_thinking_effort_command())
             await self.sync(self._guild_id)
-            non_router_count = sum(
-                1 for s in self._registry.all() if s.role != "router"
-            )
+            non_router_count = sum(1 for s in self._registry.all() if s.role != "router")
             logger.info(
                 "re-synced /thinking-effort with %d agent choice(s)",
                 non_router_count,
@@ -407,9 +395,7 @@ class SlashCommandManager:
             # get reflected by the one follow-up sync.
             if self._resync_pending:
                 self._resync_pending = False
-                self._resync_task = asyncio.create_task(
-                    self._debounced_resync()
-                )
+                self._resync_task = asyncio.create_task(self._debounced_resync())
 
     async def sync(self, guild_id: int | None) -> None:
         """Push the command tree to Discord. Idempotent; safe to call on every boot."""
@@ -475,10 +461,8 @@ class SlashCommandManager:
                 spec.agent_id,
                 interaction.id,
             )
-            try:
+            with contextlib.suppress(discord.HTTPException):
                 await interaction.followup.send(
                     "Sorry — something went wrong handling that slash. Please try again.",
                     ephemeral=True,
                 )
-            except discord.HTTPException:
-                pass
