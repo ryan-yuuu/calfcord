@@ -2,7 +2,7 @@
 
 calfcord ships agents with shell, filesystem, and web-fetch tools that
 take LLM-supplied input. The deployment model assumes a trusted shared
-workspace (see `README.md` → **Security model**). Real-world deployments
+workspace (see `README.md` → **Security**). Real-world deployments
 will find ways to break those assumptions; this doc is how to report
 what you find without making the problem worse.
 

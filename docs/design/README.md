@@ -6,7 +6,9 @@ on the current behavior of the code.
 
 For up-to-date documentation see:
 
-- [README.md](../../README.md) — project overview, deployment modes, security model.
+- [README.md](../../README.md) — project overview and quick start.
+- [docs/architecture.md](../architecture.md) — the four processes, deployment matrix, run modes.
+- [docs/configuration.md](../configuration.md) — full environment-variable reference.
 - [docs/a2a-threads.md](../a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [docs/ambient-routing.md](../ambient-routing.md) — the router process and non-`@mention` channel routing.
 - [docs/authoring-tools.md](../authoring-tools.md) — adding a builtin tool.

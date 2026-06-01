@@ -3,7 +3,8 @@
 How to split calfcord across multiple hosts by building slim per-tool or
 per-agent images and pointing them at a shared Kafka broker. This is the
 operator reference for the packaging CLIs introduced in PR 5; for the
-single-host default, the README's `Running` section still applies.
+single-host default, the [README quick start](../README.md#quick-start)
+and [`architecture.md`](architecture.md#running-modes) still apply.
 
 The two CLIs are local-only — they build images, they don't push them.
 Operators push to whichever registry they want via plain `docker push`

@@ -47,7 +47,8 @@ servers you trust** — agents can run code on the host (see
 ## 4. Start it and say hello
 
 Launch calfcord (`docker compose up --build`, or see the
-[README](../README.md#running)). Then, in a channel the bot can see:
+[README quick start](../README.md#quick-start)). Then, in a channel the
+bot can see:
 
 ```
 @scribe hello

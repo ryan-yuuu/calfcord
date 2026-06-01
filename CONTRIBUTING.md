@@ -22,16 +22,19 @@ top of the README. If your branch lands below `main` without an
 explicit "this test is removed because X" note in the PR, something
 regressed.
 
-For running calfcord end-to-end, the README documents three deployment
-modes — quick-start Docker Compose, native (`uv run` each process), and
-the mix-and-match hybrid. New contributors should start with Docker
-Compose; native mode is faster to iterate on once you know the layout.
-See the **Running** section of `README.md`.
+For running calfcord end-to-end, start with the **Quick start** in
+`README.md` (Docker Compose). Two more deployment modes — native
+(`uv run` each process) and the mix-and-match hybrid — are documented in
+[`docs/architecture.md`](docs/architecture.md#running-modes). New
+contributors should start with Docker Compose; native mode is faster to
+iterate on once you know the layout.
 
 ## Running locally
 
-The README's **Running** section is the single source of truth for how
-to start the four processes. Don't duplicate it here. The only addition
+The README **Quick start** and
+[`docs/architecture.md`](docs/architecture.md#running-modes) are the
+single source of truth for how to start the four processes. Don't
+duplicate them here. The only addition
 for development: when iterating on a single agent, run that one agent
 natively (`uv run calfkit-agent <name>`) and leave bridge / router /
 tools in compose. The wire protocol is Kafka, so the split-mode shape
