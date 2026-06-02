@@ -182,9 +182,9 @@ memory: false
 # to the inbound frame's callback_topic automatically.
 ---
 
-You are an example agent. The body of this .md file (everything after the
-closing `---` of the frontmatter) is the system prompt fed verbatim to the
-LLM on every run. Nothing in here is templated or substituted.
+The body of this .md file (everything after the closing `---` of the frontmatter) 
+are the instructions fed verbatim to the
+agent on every run. Nothing in here is templated or substituted.
 
-Be concise, helpful, and replace this body with the personality and
-instructions you want the LLM to embody.
+Replace this body with the personality and
+instructions you want the agent to embody.
