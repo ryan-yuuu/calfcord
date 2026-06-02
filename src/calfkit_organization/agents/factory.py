@@ -153,9 +153,7 @@ factory dispatches on ``provider``; tests override this to inject fakes.
 default)."""
 
 
-def _default_model_client_factory(
-    provider: Provider, model_name: str | None
-) -> PydanticModelClient:
+def _default_model_client_factory(provider: Provider, model_name: str | None) -> PydanticModelClient:
     """Map ``provider`` to its concrete calfkit model-client class.
 
     Provider authentication is read from each SDK's standard env var
@@ -181,9 +179,7 @@ def _default_model_client_factory(
         return build_codex_subscription_client(model_name=model_name)
     # Unreachable when ``provider`` is typed as Provider; defensive for
     # runtime callers that bypass the Literal.
-    raise ValueError(
-        f"unknown provider {provider!r}; expected one of {list(_PROVIDER_DEFAULT_MODELS)}"
-    )
+    raise ValueError(f"unknown provider {provider!r}; expected one of {list(_PROVIDER_DEFAULT_MODELS)}")
 
 
 def _require_model(provider: Provider, model_name: str | None) -> str:
@@ -380,12 +376,8 @@ class AgentFactory:
         # pattern), so they must NOT be index 0 or each agent would
         # receive the others' tool returns and emit duplicate replies.
         # See the module docstring for the full failure mode.
-        subscribe_topics = [
-            _PRIVATE_RETURN_TOPIC_TEMPLATE.format(agent_id=definition.agent_id)
-        ]
-        subscribe_topics.extend(
-            self._subscribe_topic_template.format(cid=cid) for cid in state.channels
-        )
+        subscribe_topics = [_PRIVATE_RETURN_TOPIC_TEMPLATE.format(agent_id=definition.agent_id)]
+        subscribe_topics.extend(self._subscribe_topic_template.format(cid=cid) for cid in state.channels)
         # Per-agent inbox: the ``calfkit-tools`` runner publishes A2A
         # invocations to this topic so the LLM-driven ``private_chat``
         # tool can reach this agent without round-tripping through Discord.
@@ -580,9 +572,7 @@ class AgentFactory:
             )
         return resolved
 
-    def _require_memory_tools(
-        self, definition: AgentDefinition, tools: list[ToolNodeDef]
-    ) -> None:
+    def _require_memory_tools(self, definition: AgentDefinition, tools: list[ToolNodeDef]) -> None:
         """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.
 
         A memory-enabled agent manages its notepad with the general-purpose
