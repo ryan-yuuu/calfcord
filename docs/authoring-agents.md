@@ -45,7 +45,7 @@ name: example-bot                       # filename stem; [a-z0-9_-]{1,32}; also 
 display_name: Example                   # webhook username; 1-80 chars; not "Clyde"
 description: A demo agent.              # slash-picker blurb; 1-100 chars
 # avatar_url: ...                       # optional; omit for DiceBear default seeded by name
-provider: anthropic                     # "anthropic" | "openai"
+provider: anthropic                     # "anthropic" | "openai" | "openai-codex"
 model: claude-sonnet-4-5                # provider-specific model name
 tools: [private_chat]                   # resolved against TOOL_REGISTRY
 thinking_effort: medium                 # see §6 for the seven tiers
@@ -107,9 +107,11 @@ late-stage webhook 400.
 | `model`           | string | Definition → `CALFKIT_AGENT_DEFAULT_MODEL` env var → provider-specific default.                 |
 | `thinking_effort` | string | Definition → no override (provider/model default). See §6 for tier semantics.                   |
 
-`provider` is one of `"anthropic"` or `"openai"`. The factory dispatches
-on this string to construct `AnthropicModelClient` or
-`OpenAIModelClient`; an unknown provider raises at boot. See
+`provider` is one of `"anthropic"`, `"openai"`, or `"openai-codex"`. The
+factory dispatches on this string to construct `AnthropicModelClient`,
+`OpenAIModelClient`, or `CodexSubscriptionModelClient` (ChatGPT Plus/Pro
+subscription billing — see `docs/codex-auth.md`); an unknown provider
+raises at boot. See
 `src/calfcord/agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`,
 `resolve_provider`) for the resolution path.
 
@@ -150,7 +152,10 @@ and shell tools share one workspace (the calfkit-tools host's
 `CALFCORD_WORKSPACE_DIR`, default `state/workspace/`). See
 `docs/security.md` for the operator-facing deployment patterns.
 
-Omit `tools` (or set `tools: []`) for an LLM-only agent.
+Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
+entirely is the opposite** — it grants every registered builtin
+(including `shell` / `write_file` / `edit_file`), per the security note
+above.
 
 ### 3.4 Behavior (optional)
 
@@ -216,9 +221,9 @@ editing the `.md` and restarting the agent.
 
 ### 4.1 Write a focused persona prompt
 
-Two examples from this repo:
+Two example persona prompts — pithy and persona-first:
 
-`agents/scribe.md`:
+A friendly assistant:
 
 ```markdown
 You are Scribe, a friendly AI agent. Be helpful and reply concisely
@@ -226,7 +231,7 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely
 helpful.
 ```
 
-`agents/conan.md`:
+A character impersonation:
 
 ```markdown
 You are a Conan O'Brien agent. You sound exactly like Conan O'Brien

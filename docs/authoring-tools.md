@@ -1,8 +1,8 @@
 # Authoring a calfcord Tool
 
 How to add a new tool that any calfcord agent can invoke. This is the
-contributor reference for the file-drop workflow introduced in PR 2; for
-the architectural background on tools as a calfkit node type, see
+contributor reference for the file-drop workflow; for the architectural
+background on tools as a calfkit node type, see
 `src/calfcord/tools/__init__.py` and the calfkit docs.
 
 ## 1. Overview
@@ -240,10 +240,12 @@ Two fields matter to tool authors:
   means dispatch was bypassed; that's an infra bug (see below).
   `private_chat` uses this to look up the caller in the phonebook.
 - **`ctx.deps.provided_deps: dict[str, Any]`** — the per-call deps the
-  bridge populates on every publish. The two keys in v1 are
+  bridge populates on every publish. The two it always sets are
   `"discord"` (the originating `WireMessage` dict) and `"phonebook"`
-  (the canonical roster of registered agents). Most tools don't need
-  either; `private_chat` is the only builtin that does.
+  (the canonical roster of registered agents); memory-enabled
+  deployments also get `"memory_prompt"`, and `private_chat` forwards
+  `"caller_agent_id"` on A2A hops. Most tools don't need any of these;
+  `private_chat` is the only builtin that does.
 
 `ctx.deps.correlation_id: str` is also available — useful in error
 log lines so operators can grep across the Kafka audit trail.

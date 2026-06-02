@@ -43,7 +43,7 @@ The four processes have intentionally different access requirements:
 
 | Resource                              | Bridge | Agent           | Router | Tools |
 |---------------------------------------|:------:|:---------------:|:------:|:-----:|
-| `agents/*.md` (local files)           |   yes  | yes (own only)  |  yes   |  no   |
+| `agents/*.md` (local files)           |   no   | yes (own only)  |   no   |  no   |
 | Discord bot token (env var)           |   yes  | yes             |  yes   |  yes  |
 | Kafka broker                          |   yes  | yes             |  yes   |  yes  |
 | LLM provider API key                  |   —    | yes             |  yes   |  —    |

@@ -38,7 +38,7 @@ The host CLI is the source of truth for both. Token rotation that happens later 
 
 ## Containerized agents
 
-`docker-compose.override.yml` bind-mounts those two host dirs into the agent container, so once you've completed the host login above, `docker compose up agent` works:
+The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent (and router) container, so once you've completed the host login above, `docker compose up agent` works:
 
 ```yaml
 agent:
@@ -73,8 +73,13 @@ Supported model names are whatever upstream `openai/codex` lists in [`codex-rs/m
 | `gpt-5.5` | Frontier model for complex coding, research, and real-world work |
 | `gpt-5.4` | Strong everyday-coding model |
 | `gpt-5.4-mini` | Small, fast, and cost-efficient — good for routers and simple tasks |
-| `gpt-5.3-codex` | Coding-optimized (calfcord's default for `provider: openai-codex`) |
+| `gpt-5.3-codex` | Coding-optimized |
 | `gpt-5.2` | Optimized for professional work and long-running agents |
+
+`openai-codex` has **no fixed default model**: when an agent omits `model:`,
+calfcord uses the highest-priority model in upstream's live `models.json`
+catalog (`factory.py` sets `_PROVIDER_DEFAULT_MODELS["openai-codex"]` to `None`,
+which the Codex client resolves at request time).
 
 Anything not in upstream's `models.json` is sent verbatim. The Codex CLI prompt resolver uses longest-prefix matching against the slug list to pick the right `base_instructions` to send (so e.g. a legacy `gpt-5.2-codex` request still fingerprints against `gpt-5.2`'s prompt), but the model name itself is forwarded as-is — if the Codex backend doesn't recognize it, the request returns a 4xx.
 
