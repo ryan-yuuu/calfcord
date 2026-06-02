@@ -173,7 +173,7 @@ INFO calfkit_organization.tools.discovery: registered builtin
 ```
 
 Add the tool to an agent by listing it in the agent's `.md` frontmatter
-`tools:` array — see `agents/example.md.template`:
+`tools:` array — see `agents/agent.template.md`:
 
 ```yaml
 ---

@@ -62,8 +62,8 @@ is subscribed to. The webhook reply will appear under the `Example`
 persona.
 
 Field details, fallbacks, and reserved fields are in §3. The
-canonical, comment-annotated walkthrough is `agents/example.md.template`
-(loaded only as a reference — its `.md.template` suffix keeps the
+canonical, comment-annotated walkthrough is `agents/agent.template.md`
+(loaded only as a reference — its `.template.md` suffix keeps the
 bridge from picking it up at boot).
 
 ## 3. Field reference
@@ -367,7 +367,7 @@ shift, restart `calfkit-agent`.
 
 When `/thinking-effort` rewrites the `.md`, python-frontmatter's
 PyYAML `safe_dump` alphabetizes the frontmatter keys and discards
-comments. Treat any comments in `agents/example.md.template` as
+comments. Treat any comments in `agents/agent.template.md` as
 documentation only — they don't survive a round-trip on a live agent
 file.
 

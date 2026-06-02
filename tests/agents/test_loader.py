@@ -55,6 +55,18 @@ class TestLoadAgentsDir:
         defs = load_agents_dir(tmp_path)
         assert [d.agent_id for d in defs] == ["scheduler"]
 
+    def test_skips_template_md_files(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path, "scheduler")
+        # ``*.template.md`` reference templates document the frontmatter schema
+        # and are never live agents. Their ``name`` deliberately does not match
+        # the filename stem, so the loader must skip them *before* parsing —
+        # otherwise the stem/name mismatch would abort the whole load.
+        (tmp_path / "agent.template.md").write_text(
+            "---\nname: example\ndisplay_name: Example\ndescription: Template.\n---\nBody.\n"
+        )
+        defs = load_agents_dir(tmp_path)
+        assert [d.agent_id for d in defs] == ["scheduler"]
+
     def test_empty_directory_returns_empty_list(self, tmp_path: Path) -> None:
         assert load_agents_dir(tmp_path) == []
 

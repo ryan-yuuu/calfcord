@@ -1,8 +1,12 @@
 """Load all :class:`AgentDefinition`s from a directory of Markdown files.
 
 Each ``<name>.md`` file in the directory is parsed via
-:func:`parse_agent_md`. Hidden files (``.``-prefixed) and non-``.md``
-files are ignored.
+:func:`parse_agent_md`. Three classes of file are skipped: hidden files
+(``.``-prefixed), non-``.md`` files, and ``*.template.md`` reference
+templates (e.g. ``agents/agent.template.md``). The last documents the
+frontmatter schema for operators and is never a live agent; it is excluded
+by name so it does not have to satisfy ``parse_agent_md``'s
+``stem == name`` check (it would otherwise abort the whole load).
 
 The loader also resolves the ``tools: omitted → all`` default at parse
 time so downstream consumers (factory, phonebook, peer_roster) see a
@@ -49,6 +53,7 @@ def load_agents_dir(path: Path) -> list[AgentDefinition]:
     """Scan ``path`` for ``*.md`` files and parse each into an :class:`AgentDefinition`.
 
     Returns the definitions sorted by ``agent_id`` for deterministic ordering.
+    Dot-prefixed files and ``*.template.md`` reference templates are skipped.
     Any agent whose frontmatter omits ``tools:`` is normalized to receive
     every registered builtin tool — see :func:`_resolve_default_tools`.
 
@@ -62,7 +67,9 @@ def load_agents_dir(path: Path) -> list[AgentDefinition]:
     if not path.is_dir():
         raise NotADirectoryError(f"agents path is not a directory: {path}")
 
-    md_files = sorted(p for p in path.glob("*.md") if not p.name.startswith("."))
+    md_files = sorted(
+        p for p in path.glob("*.md") if not p.name.startswith(".") and not p.name.endswith(".template.md")
+    )
     definitions = [_resolve_default_tools(parse_agent_md(p)) for p in md_files]
     logger.info("loaded %d agent definition(s) from %s", len(definitions), path)
     return definitions
