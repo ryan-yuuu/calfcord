@@ -109,9 +109,9 @@ model: claude-sonnet-4-5
 #
 # Filesystem/shell tools share one workspace on the calfkit-tools host
 # (CALFCORD_WORKSPACE_DIR, default state/workspace/). Every agent that
-# declares them can read/edit any file in that workspace. See the
-# project README's "Security model" section before adding shell/file
-# tools to an agent that takes input from untrusted users.
+# declares them can read/edit any file in that workspace. See
+# docs/security.md before adding shell/file tools to an agent that
+# takes input from untrusted users.
 tools: []
 
 # ----------------------------------------------------------------------------

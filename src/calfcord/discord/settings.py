@@ -22,7 +22,7 @@ class DiscordSettings(BaseSettings):
     - ``DISCORD_GUILD_ID``          (optional)  Default guild for guild-scoped
                                                 slash command sync. ``None`` means
                                                 global sync (~1h propagation).
-    - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional) Channel used by example scripts.
+    - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional) Seeds the first agent's channel on boot.
     - ``DISCORD_TRANSCRIPT_DB_PATH`` (optional) Path to the bridge-local SQLite
                                                 transcript store. Must sit on a
                                                 persistent volume in production.
@@ -53,7 +53,7 @@ class DiscordSettings(BaseSettings):
     )
     default_channel_id: int | None = Field(
         default=None,
-        description="Default channel ID used by example scripts.",
+        description="Default channel ID seeded as the first agent's channel subscription on boot.",
     )
     owner_user_id: int | None = Field(
         default=None,

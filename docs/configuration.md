@@ -22,7 +22,7 @@ These come from the [Discord setup walkthrough](./discord-setup.md) (~5 min).
 | `DISCORD_APPLICATION_ID` | **yes** (all deployments) | Numeric application ID from *General Information*. |
 | `DISCORD_GUILD_ID` | recommended | Server ID for guild-scoped slash-command sync (instant). Blank = global sync (~1 h propagation). Required for bridge + tools in practice. |
 | `DISCORD_OWNER_USER_ID` | optional | Your numeric user ID. Tags inbound messages from the owner and unlocks owner-only commands (`/clear`, `/thinking-effort`). |
-| `DISCORD_DEFAULT_CHANNEL_ID` | optional | Channel ID used by example scripts and to seed the first agent's channel subscription on boot. |
+| `DISCORD_DEFAULT_CHANNEL_ID` | optional | Channel ID used to seed the first agent's channel subscription on boot (fallback when its `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` is unset). |
 
 ## Models / providers
 
@@ -53,7 +53,7 @@ instead of API credits and needs a one-time OAuth login on the host — see
 | `CALFKIT_TOOLS_TIMEOUT_SECONDS` | optional | Per-call timeout for `private_chat` (default `60`). Other built-in tools have no default per-call timeout at the calfkit layer. |
 | `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel. Code default is `private-a2a-chats`; the bundled `docker-compose.yml` overrides it to `private-a2a`. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
-| `CALFCORD_WORKSPACE_DIR` | optional | Host path the filesystem/search/shell tools resolve against. Native: defaults to `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the project root). All agents share this dir — see [`security.md`](./security.md). |
+| `CALFCORD_WORKSPACE_DIR` | optional | Host path the filesystem/search/shell tools resolve against. Native: defaults to `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md). |
 | `CALFCORD_SHELL_BACKEND` | optional | Force the `shell` tool backend: `tmux` \| `subprocess` \| `powershell`. Default auto-detects (tmux if installed, else subprocess). |
 
 ## Per-agent runtime state

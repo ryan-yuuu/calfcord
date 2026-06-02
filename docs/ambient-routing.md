@@ -570,9 +570,9 @@ Currently hardcoded (no env vars):
 
 | Constant | Default | Where |
 |---|---|---|
-| ``MAX_REPLY_RETRY_ATTEMPTS`` | 2 | ``bridge/outbox.py`` |
-| ``CHUNK_SAFE_SIZE`` | 1990 chars | ``bridge/outbox.py`` |
-| ``NON_AGENT_FIXABLE_STATUSES`` | ``{401, 403, 404, 429}`` | ``bridge/outbox.py`` |
+| ``MAX_REPLY_RETRY_ATTEMPTS`` | 2 | ``discord/retry_feedback.py`` |
+| ``CHUNK_SAFE_SIZE`` | 1990 chars | ``discord/retry_feedback.py`` |
+| ``NON_AGENT_FIXABLE_STATUSES`` | ``{401, 403, 404, 429}`` | ``discord/retry_feedback.py`` |
 
 If a specific Discord error code reliably defeats the generic
 ``<system-reminder>`` text in production (the LLM doesn't adapt

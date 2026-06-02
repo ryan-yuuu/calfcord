@@ -48,7 +48,25 @@ DISCORD_GUILD_ID=...             # your server (for instant slash commands)
 ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY
 ```
 
-**3. Launch.**
+**3. Add your first agent.** Calfcord ships only a Codex demo agent, so create
+your own — drop a Markdown file at `agents/scribe.md`:
+
+```markdown
+---
+name: scribe
+display_name: Scribe
+description: Friendly assistant that answers concisely.
+provider: anthropic
+tools: []
+---
+
+You are Scribe, a friendly AI agent. Reply concisely (1–3 sentences).
+```
+
+`tools: []` keeps this first agent text-only; [Define your own agent](#define-your-own-agent)
+below shows how to add tools.
+
+**4. Launch.**
 
 ```bash
 docker compose up --build
@@ -57,7 +75,7 @@ docker compose up --build
 This starts the four Calfcord processes plus a Kafka broker (Redpanda) — five
 containers in total. The first build takes a minute or two.
 
-**4. Say hello.** In any channel the bot can see:
+**5. Say hello.** In any channel the bot can see:
 
 ```
 @scribe hello

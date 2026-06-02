@@ -1,8 +1,9 @@
 # Discord ↔ Topic Bridge — Implementation Plan
 
 The transport-and-routing layer between the Discord server and the Calfkit
-topic substrate. See `discord-org-design.md` for the surrounding multi-agent
-organization design; this document covers only the bridge.
+topic substrate. See [`discord-org-design.md`](../../discord-org-design.md) for
+the surrounding multi-agent organization design; this document covers only the
+bridge.
 
 ## 1. Goal
 
@@ -18,7 +19,7 @@ A thin, deterministic transducer that:
 
 The bridge has **no opinion** about which agent should receive any given
 event. Routing is the consumer's decision, made through Calfkit's gate
-mechanism (see `calfkit-gate-support.md`).
+mechanism (see the gate-support design in the Calfkit repo).
 
 ## 2. Prerequisites
 
@@ -250,7 +251,7 @@ Each phase has a single committable scope and a verifiable acceptance criterion.
 
 ### Phase 0 — Calfkit gate support (prerequisite, external)
 
-See `calfkit-gate-support.md`. Must release a version of Calfkit with gate support before Phase 6 of this plan can be smoke-tested end-to-end.
+See the gate-support design in the Calfkit repo. Must release a version of Calfkit with gate support before Phase 6 of this plan can be smoke-tested end-to-end.
 
 ### Phase 1 — Wire schemas and agent registry
 

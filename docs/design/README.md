@@ -34,3 +34,6 @@ In approximate chronological order (oldest first):
 - [`threaded-private-chat-plan.md`](./threaded-private-chat-plan.md) — the
   per-conversation Discord-thread projection of A2A `private_chat`
   exchanges, replacing the prior `a2a-<a>-<b>` per-pair channel.
+- [`step-transcripts-and-live-streaming-plan.md`](./step-transcripts-and-live-streaming-plan.md) —
+  ephemeral per-step status display, live step streaming, and the SQLite
+  transcript store backing tool-call replay.
