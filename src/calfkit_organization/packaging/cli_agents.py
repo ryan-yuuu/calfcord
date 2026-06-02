@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = make_parser(
         prog="calfcord-package-agents",
         item_kind="agent",
-        item_examples="scribe conan",
+        item_examples="codex_demo",
     )
     args = parser.parse_args(argv)
 
