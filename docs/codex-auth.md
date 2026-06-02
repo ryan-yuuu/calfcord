@@ -2,7 +2,7 @@
 
 The `openai-codex` provider lets calfcord agents call OpenAI's Codex models (`gpt-5.5`, `gpt-5.3-codex`, etc.) through the same OAuth flow the official `codex` CLI uses, so requests are billed against an active **ChatGPT Plus or Pro subscription** rather than against OpenAI API credits.
 
-This page covers the one-time setup required before an agent with `provider: openai-codex` can boot.
+This page covers the one-time setup required before an agent with `provider: openai-codex` can boot. If a Codex-backed agent stops mid-response or fails to authenticate at runtime, see [troubleshooting.md](./troubleshooting.md#codex-subscription-auth).
 
 ## Prerequisites
 
@@ -100,7 +100,7 @@ If you prefer device-code flow (no browser on the host — useful for SSH into a
 
 When a Codex-backed agent serves a request:
 
-1. **Auth**: a fresh OAuth access token is injected per-request by [authlib](https://docs.authlib.org/)'s `AsyncOAuth2Client`, which auto-refreshes ~5 minutes before expiry and writes the new tokens back through the host-side credential file.
+1. **Auth**: a fresh OAuth bearer is injected on every request by a custom `httpx.Auth` (`_CodexBearerAuth`) wrapping the OpenAI SDK's HTTP client. (A `send()`-level hook is required because the OpenAI SDK bypasses the `request()`-level interceptor that authlib's `AsyncOAuth2Client` relies on.) Before each request it calls OpenHands' `refresh_if_needed()`, which refreshes the token **only once it is within ~60 seconds of (or past) its stored expiry**, then writes the new tokens back through the host-side credential file. Refresh is clock-driven only — there is no refresh-and-retry on a server-side `401`, so a revoked token surfaces as a hard error (see [troubleshooting.md](./troubleshooting.md#401-token_revoked--agent-stops-mid-response)).
 2. **Endpoint**: requests go to `https://chatgpt.com/backend-api/codex/responses` (the Codex CLI's backend), not the standard `api.openai.com`.
 3. **Headers**: `originator: codex_cli_rs`, `chatgpt-account-id: <decoded from JWT>`, `OpenAI-Beta: responses=experimental` — same fingerprint the official Codex CLI produces.
 4. **System prompt**: the verbatim official Codex CLI prompt for the requested model (fetched live from openai/codex with ETag caching) is sent as `instructions`. Your agent's own `system_prompt` body is smuggled into a leading synthetic user message as `input_text`. Required because the Codex backend explicitly validates `instructions` against a whitelist of Codex CLI prompts ([openai/codex#4433](https://github.com/openai/codex/issues/4433)).
