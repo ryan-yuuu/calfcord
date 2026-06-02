@@ -425,6 +425,37 @@ class TestModelResolution:
         )
         assert calls[0] == ("openai", "gpt-5-mini")
 
+    def test_openai_codex_resolves_to_none_when_no_model_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """openai-codex has no static default: with no model hint, ``None`` is
+        passed through so the Codex client resolves a live-catalog default."""
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
+        calls, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        factory.build(
+            _definition(provider="openai-codex", model=None),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert calls[0] == ("openai-codex", None)
+
+
+class TestRequireModelGuard:
+    """``_default_model_client_factory`` must reject ``None`` for providers that
+    have no catalog-resolved default — only openai-codex tolerates it."""
+
+    @pytest.mark.parametrize("provider", ["anthropic", "openai"])
+    def test_none_model_raises_for_non_codex(self, provider: str) -> None:
+        from calfkit_organization.agents.factory import _default_model_client_factory
+
+        with pytest.raises(ValueError, match="requires a model name"):
+            _default_model_client_factory(provider, None)  # type: ignore[arg-type]
+
 
 class TestThinkingEffortBaking:
     """Factory passes definition.thinking_effort through build_model_settings

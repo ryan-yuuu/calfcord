@@ -59,16 +59,38 @@ def _loaded_resolver(
     models: dict[str, str] | None = None,
     fallback: str = "FALLBACK PROMPT",
 ):
-    """Build a PromptResolver loaded with synthetic prompts, no network."""
+    """Build a PromptResolver loaded with synthetic prompts, no network.
+
+    ``models`` is a ``slug -> base_instructions`` map; each entry becomes an
+    active (selectable, non-deprecated) :class:`CodexModel`. For richer
+    catalogs (priorities, hidden/deprecated entries) use
+    :func:`_loaded_catalog_resolver`.
+    """
+    instr = models or {
+        "gpt-5.2": "GPT-5.2 OFFICIAL PROMPT",
+        "gpt-5.3-codex": "GPT-5.3 OFFICIAL PROMPT",
+    }
+    from calfkit_organization.providers.codex.prompts import CodexModel
+
+    return _loaded_catalog_resolver(
+        tmp_path,
+        [CodexModel(slug=slug, base_instructions=text) for slug, text in instr.items()],
+        fallback=fallback,
+    )
+
+
+def _loaded_catalog_resolver(
+    tmp_path: Path,
+    entries: list,
+    fallback: str = "FALLBACK PROMPT",
+):
+    """Build a PromptResolver hydrated with explicit :class:`CodexModel` entries."""
     from calfkit_organization.providers.codex.prompt_cache import PromptCache
     from calfkit_organization.providers.codex.prompts import PromptResolver
 
     resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "prompts"))
     # Bypass network: hydrate the resolver's private state directly for tests.
-    resolver._models = models or {
-        "gpt-5.2": "GPT-5.2 OFFICIAL PROMPT",
-        "gpt-5.3-codex": "GPT-5.3 OFFICIAL PROMPT",
-    }
+    resolver._catalog = {m.slug: m for m in entries}
     resolver._fallback_prompt = fallback
     resolver._loaded = True
     return resolver
@@ -467,3 +489,282 @@ def _flatten_text(items: list) -> str:
                     if isinstance(text, str):
                         chunks.append(text)
     return "\n".join(chunks)
+
+
+# --- Model resolution + validation -------------------------------------------
+
+
+def _model(slug, instr="PROMPT", *, priority=0, visibility="list", upgrade_to=None):
+    from calfkit_organization.providers.codex.prompts import CodexModel
+
+    return CodexModel(
+        slug=slug,
+        base_instructions=instr,
+        priority=priority,
+        visibility=visibility,
+        upgrade_to=upgrade_to,
+    )
+
+
+def _unsupported_raiser(model: str = "gpt-5.2-codex"):
+    """A fake ``_responses_create`` that raises the backend's ChatGPT-unsupported 400."""
+    from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
+
+    async def _raise(self, *, messages, stream, model_settings, model_request_parameters):
+        raise ModelHTTPError(
+            status_code=400,
+            model_name=model,
+            body={
+                "detail": f"The '{model}' model is not supported when using "
+                "Codex with a ChatGPT account."
+            },
+        )
+
+    return _raise
+
+
+class TestModelResolutionAndValidation:
+    """Construction-time default selection + fail-fast validation against the
+    live catalog (the fix for pinning a retired ``gpt-5.3-codex``)."""
+
+    def test_unset_model_defaults_to_highest_priority(self, tmp_path: Path) -> None:
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(
+            tmp_path,
+            [
+                _model("gpt-5.5", "FLAGSHIP", priority=0),
+                _model("gpt-5.4", "MID", priority=2),
+                _model("gpt-5.4-mini", "MINI", priority=4),
+            ],
+        )
+        client = CodexSubscriptionModelClient(model_name=None, store=store, resolver=resolver)
+        # Lowest priority number wins → gpt-5.5 goes on the wire with its prompt.
+        assert client.model_name == "gpt-5.5"
+        assert client._codex_instructions == "FLAGSHIP"
+
+    def test_unset_model_skips_deprecated_and_hidden_for_default(self, tmp_path: Path) -> None:
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(
+            tmp_path,
+            [
+                # Lowest number but hidden → must be ignored for the default.
+                _model("codex-auto-review", priority=0, visibility="hide"),
+                # Lower number than gpt-5.4 but deprecated → ignored.
+                _model("gpt-5.3-codex", priority=1, upgrade_to="gpt-5.4"),
+                _model("gpt-5.4", "PICK ME", priority=2),
+            ],
+        )
+        client = CodexSubscriptionModelClient(model_name=None, store=store, resolver=resolver)
+        assert client.model_name == "gpt-5.4"
+
+    def test_deprecated_model_fails_fast(self, tmp_path: Path) -> None:
+        """The reported bug: a configured, retired model must raise at
+        construction (before any request) and name the replacement."""
+        from calfkit_organization.providers.codex.prompts import DeprecatedCodexModelError
+
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(
+            tmp_path,
+            [
+                _model("gpt-5.3-codex", priority=6, upgrade_to="gpt-5.4"),
+                _model("gpt-5.4", priority=2),
+            ],
+        )
+        with pytest.raises(DeprecatedCodexModelError, match=r"gpt-5\.4"):
+            CodexSubscriptionModelClient(
+                model_name="gpt-5.3-codex", store=store, resolver=resolver
+            )
+
+    def test_unknown_model_fails_fast(self, tmp_path: Path) -> None:
+        from calfkit_organization.providers.codex.prompts import UnknownCodexModelError
+
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(tmp_path, [_model("gpt-5.4", priority=2)])
+        with pytest.raises(UnknownCodexModelError, match="not a selectable model"):
+            CodexSubscriptionModelClient(
+                model_name="totally-made-up", store=store, resolver=resolver
+            )
+
+    def test_hidden_model_fails_fast(self, tmp_path: Path) -> None:
+        """Fork B: an explicitly-configured internal model is not selectable."""
+        from calfkit_organization.providers.codex.prompts import UnknownCodexModelError
+
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(
+            tmp_path,
+            [
+                _model("codex-auto-review", priority=0, visibility="hide"),
+                _model("gpt-5.4", priority=2),
+            ],
+        )
+        with pytest.raises(UnknownCodexModelError, match="internal model"):
+            CodexSubscriptionModelClient(
+                model_name="codex-auto-review", store=store, resolver=resolver
+            )
+
+    def test_forward_compatible_variant_prefix_matches_active(self, tmp_path: Path) -> None:
+        """A configured ``gpt-5.5-codex`` not in the catalog still validates via
+        the ``gpt-5.5`` prefix, sends that prompt, and keeps the configured
+        slug on the wire (Fork C: prefix match preserved)."""
+        store = _seed(tmp_path, account_id="x")
+        resolver = _loaded_catalog_resolver(
+            tmp_path, [_model("gpt-5.5", "FLAGSHIP PROMPT", priority=0)]
+        )
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.5-codex", store=store, resolver=resolver
+        )
+        assert client.model_name == "gpt-5.5-codex"
+        assert client._codex_instructions == "FLAGSHIP PROMPT"
+
+
+class TestChatGPTUnsupportedGuard:
+    """The request-time 400 backstop: a model the catalog still advertises but
+    the backend has retired surfaces as ``CodexModelNotSupportedError``."""
+
+    @pytest.mark.asyncio
+    async def test_400_translated_to_not_supported_error(self, tmp_path: Path) -> None:
+        from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        from calfkit_organization.providers.codex.model_client import (
+            CodexModelNotSupportedError,
+        )
+
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex", store=store, resolver=_loaded_resolver(tmp_path)
+        )
+
+        async def _raise_unsupported(self, *, messages, stream, model_settings, model_request_parameters):
+            raise ModelHTTPError(
+                status_code=400,
+                model_name="gpt-5.2-codex",
+                body={
+                    "detail": "The 'gpt-5.2-codex' model is not supported when "
+                    "using Codex with a ChatGPT account."
+                },
+            )
+
+        original = OpenAIResponsesModel._responses_create
+        OpenAIResponsesModel._responses_create = _raise_unsupported
+        try:
+            with pytest.raises(CodexModelNotSupportedError, match="not available"):
+                await client._responses_create(
+                    messages=[],
+                    stream=False,
+                    model_settings=client.model_settings,
+                    model_request_parameters=None,
+                )
+        finally:
+            OpenAIResponsesModel._responses_create = original
+
+    @pytest.mark.asyncio
+    async def test_unrelated_400_propagates_unchanged(self, tmp_path: Path) -> None:
+        """A different 400 (e.g. a real parameter error) must not be masked."""
+        from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex", store=store, resolver=_loaded_resolver(tmp_path)
+        )
+
+        async def _raise_other(self, *, messages, stream, model_settings, model_request_parameters):
+            raise ModelHTTPError(
+                status_code=400,
+                model_name="gpt-5.2-codex",
+                body={"detail": "Unsupported parameter: max_output_tokens"},
+            )
+
+        original = OpenAIResponsesModel._responses_create
+        OpenAIResponsesModel._responses_create = _raise_other
+        try:
+            with pytest.raises(ModelHTTPError, match="max_output_tokens"):
+                await client._responses_create(
+                    messages=[],
+                    stream=True,
+                    model_settings=client.model_settings,
+                    model_request_parameters=None,
+                )
+        finally:
+            OpenAIResponsesModel._responses_create = original
+
+    @pytest.mark.asyncio
+    async def test_400_translated_on_streaming_path(self, tmp_path: Path, monkeypatch) -> None:
+        """The streaming caller path (request_stream) also gets the translated
+        error, not the raw 400."""
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        from calfkit_organization.providers.codex.model_client import (
+            CodexModelNotSupportedError,
+        )
+
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex", store=store, resolver=_loaded_resolver(tmp_path)
+        )
+        monkeypatch.setattr(OpenAIResponsesModel, "_responses_create", _unsupported_raiser())
+        with pytest.raises(CodexModelNotSupportedError):
+            await client._responses_create(
+                messages=[],
+                stream=True,
+                model_settings=client.model_settings,
+                model_request_parameters=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_error_message_names_catalog_default(self, tmp_path: Path, monkeypatch) -> None:
+        """The translated error points the operator at the current default."""
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        from calfkit_organization.providers.codex.model_client import (
+            CodexModelNotSupportedError,
+        )
+
+        store = _seed(tmp_path, account_id="x")
+        # gpt-5.5 is the highest-priority active model; gpt-5.2 is what we pin.
+        resolver = _loaded_catalog_resolver(
+            tmp_path, [_model("gpt-5.5", priority=0), _model("gpt-5.2", priority=5)]
+        )
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex", store=store, resolver=resolver
+        )
+        monkeypatch.setattr(OpenAIResponsesModel, "_responses_create", _unsupported_raiser())
+        with pytest.raises(CodexModelNotSupportedError, match=r"gpt-5\.5"):
+            await client._responses_create(
+                messages=[],
+                stream=False,
+                model_settings=client.model_settings,
+                model_request_parameters=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_error_message_falls_back_when_default_unavailable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If the catalog can't yield a default at error-build time (the
+        `except (CodexModelError, RuntimeError)` branch), the message degrades
+        gracefully to a generic phrase rather than masking the 400."""
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        from calfkit_organization.providers.codex.model_client import (
+            CodexModelNotSupportedError,
+        )
+        from calfkit_organization.providers.codex.prompt_cache import PromptCache
+        from calfkit_organization.providers.codex.prompts import PromptResolver
+
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex", store=store, resolver=_loaded_resolver(tmp_path)
+        )
+        # Swap in an UNLOADED resolver: default_slug() now raises RuntimeError,
+        # which the guard swallows in favour of the generic phrase.
+        client._resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "empty"))
+        monkeypatch.setattr(OpenAIResponsesModel, "_responses_create", _unsupported_raiser())
+        with pytest.raises(CodexModelNotSupportedError, match="the current default"):
+            await client._responses_create(
+                messages=[],
+                stream=False,
+                model_settings=client.model_settings,
+                model_request_parameters=None,
+            )

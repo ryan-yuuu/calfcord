@@ -23,8 +23,14 @@ class CodexNotLoggedInError(RuntimeError):
     """
 
 
-def build_codex_subscription_client(model_name: str) -> PydanticModelClient:
-    """Construct a Codex-backed model client for ``AgentFactory``."""
+def build_codex_subscription_client(model_name: str | None) -> PydanticModelClient:
+    """Construct a Codex-backed model client for ``AgentFactory``.
+
+    ``model_name=None`` (the agent left ``model:`` unset) defers model choice
+    to the client, which selects the highest-priority model from the live
+    ``models.json`` catalog. A configured model is validated against the
+    catalog there and fails fast if unknown, hidden, or deprecated.
+    """
     store = get_credential_store()
     if load_credentials(store) is None:
         raise CodexNotLoggedInError(

@@ -28,6 +28,18 @@ Subclasses :class:`calfkit.providers.OpenAIResponsesModelClient` to:
    so we resolve a per-model prompt at construction time rather than
    substituting a branded short string.
 
+4. Resolve + validate the model against the live catalog at construction.
+   ``model_name=None`` (agent left ``model:`` unset) selects the
+   highest-priority model from ``models.json``; a configured model is
+   checked via :meth:`PromptResolver.validate` and fails fast
+   (:class:`~calfkit_organization.providers.codex.prompts.UnknownCodexModelError`
+   / :class:`~calfkit_organization.providers.codex.prompts.DeprecatedCodexModelError`)
+   when it is unknown, hidden, or deprecated. As a backstop for models the
+   catalog still advertises but the backend has retired, the request path
+   (:meth:`_open_codex_stream`, called from :meth:`_responses_create`)
+   translates the request-time ``400 ... not supported when using Codex with a
+   ChatGPT account`` into :class:`CodexModelNotSupportedError`.
+
 Construction bypasses calfkit's ``OpenAIResponsesModelClient.__init__``
 because it builds its own ``OpenAIProvider`` without the ``http_client``
 hook we need. We call the underlying vendored pydantic-ai initializer
@@ -35,8 +47,9 @@ directly with a provider configured to use our OAuth-aware client.
 
 The runner MUST call :func:`prompts.prewarm_codex_prompts` once at
 startup before constructing any :class:`CodexSubscriptionModelClient`;
-construction calls :meth:`PromptResolver.resolve` synchronously and
-will raise :class:`RuntimeError` if the resolver has not been loaded.
+construction calls :meth:`PromptResolver.validate`/:meth:`default_slug`
+synchronously and will raise :class:`RuntimeError` if the resolver has not
+been loaded.
 """
 
 from __future__ import annotations
@@ -47,6 +60,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
+from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
 from calfkit._vendor.pydantic_ai.models.openai import (
     OpenAIResponsesModel,
     OpenAIResponsesModelSettings,
@@ -61,12 +75,25 @@ from openhands.sdk.llm.auth import (
 
 from calfkit_organization.providers.codex.jwt import extract_account_id
 from calfkit_organization.providers.codex.prompts import (
+    CodexModelError,
     PromptResolver,
     get_default_resolver,
 )
 from calfkit_organization.providers.codex.token_store import load_credentials
 
 logger = logging.getLogger(__name__)
+
+# Substring the Codex backend returns in the 400 body when a model is barred
+# from ChatGPT-account auth, e.g.::
+#
+#     {"detail": "The 'gpt-5.3-codex' model is not supported when using
+#                 Codex with a ChatGPT account."}
+#
+# Construction-time validation against the live catalog catches the *known*
+# cases (deprecated / hidden / unknown slugs); this string backstops the
+# residual case where the backend retires a model that ``models.json`` still
+# advertises as available.
+_CHATGPT_UNSUPPORTED_MARKER = "not supported when using Codex with a ChatGPT account"
 
 # Codex CLI OAuth + API constants — matched to the official ``codex`` CLI so
 # requests on the wire are indistinguishable from it.
@@ -81,6 +108,18 @@ OPENAI_BETA = "responses=experimental"
 # overrides the Authorization header on every request.
 _API_KEY_PLACEHOLDER = "placeholder-overridden-by-auth-flow"
 REFRESH_LEEWAY_SECONDS = 300
+
+
+class CodexModelNotSupportedError(RuntimeError):
+    """Raised when the Codex backend rejects the wire model at request time.
+
+    The backend returns ``400 ... not supported when using Codex with a
+    ChatGPT account`` for models that ``models.json`` still lists as available
+    but that have actually been retired for ChatGPT-subscription auth. We
+    translate that opaque ``ModelHTTPError`` into this actionable error naming
+    the current catalog default, so the failure reads as a config problem
+    rather than a transport error deep in the request path.
+    """
 
 
 class _CodexBearerAuth(httpx.Auth):
@@ -138,7 +177,7 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
     def __init__(
         self,
         *,
-        model_name: str,
+        model_name: str | None,
         store: CredentialStore,
         resolver: PromptResolver | None = None,
     ):
@@ -152,12 +191,31 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
                 "Run: uv run calfkit-auth codex login"
             )
 
-        # Resolve the verbatim Codex CLI system prompt for this model. If the
-        # runner forgot to call ``prewarm_codex_prompts()`` first, the default
-        # resolver's ``resolve()`` raises RuntimeError with a clear message —
-        # we let that propagate so the bug surfaces loudly at construction
-        # rather than silently sending an unfingerprinted instructions block.
-        self._codex_instructions: str = (resolver or get_default_resolver()).resolve(model_name)
+        # Resolve the wire model + its fingerprinted prompt from the live
+        # catalog. If the runner forgot to call ``prewarm_codex_prompts()``,
+        # the resolver raises RuntimeError ("before ensure_loaded") — we let it
+        # propagate so the bug surfaces loudly at construction.
+        self._resolver = resolver or get_default_resolver()
+        # ``model_name is None`` means the agent left ``model:`` unset for the
+        # Codex provider: pick the current flagship from the catalog instead of
+        # a hard-coded default that rots when OpenAI retires a model.
+        resolved_model = model_name or self._resolver.default_slug()
+        if model_name is None:
+            logger.info(
+                "No Codex model configured; defaulting to highest-priority %r",
+                resolved_model,
+            )
+        # Fail fast on a misconfigured model (unknown / hidden / deprecated)
+        # before building any transport. ``validate`` does the same longest-
+        # prefix match as ``resolve``, so the matched entry's prompt is the one
+        # OpenAI fingerprints — use it directly rather than re-matching.
+        entry = self._resolver.validate(resolved_model)
+        self._codex_instructions: str = entry.base_instructions
+        # ``resolved_model`` is the single source of truth from here on: it's the
+        # configured/derived slug that goes on the wire (it may be a forward-
+        # compatible variant like ``gpt-5.5-codex`` that prefix-matched the
+        # ``gpt-5.5`` catalog entry for its prompt). The ``model_name`` parameter
+        # is not used past this point.
 
         # Per-request OAuth bearer injection via httpx.Auth. The OpenAI SDK
         # calls ``send()`` (not ``request()``), so authlib's AsyncOAuth2Client
@@ -218,7 +276,7 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         )
 
         self.model_settings = settings
-        OpenAIResponsesModel.__init__(self, model_name, provider=provider, settings=settings)
+        OpenAIResponsesModel.__init__(self, resolved_model, provider=provider, settings=settings)
 
     async def _map_messages(
         self,
@@ -280,20 +338,18 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         returning.
 
         Streaming callers (``request_stream()``) pass through unchanged.
+
+        Either path may raise the backend's ``400 ... not supported when using
+        Codex with a ChatGPT account``; :meth:`_open_codex_stream` translates
+        that into :class:`CodexModelNotSupportedError`.
         """
         if stream:
-            return await super()._responses_create(
-                messages=messages,
-                stream=True,
-                model_settings=model_settings,
-                model_request_parameters=model_request_parameters,
+            return await self._open_codex_stream(
+                messages, model_settings, model_request_parameters
             )
 
-        stream_obj = await super()._responses_create(
-            messages=messages,
-            stream=True,
-            model_settings=model_settings,
-            model_request_parameters=model_request_parameters,
+        stream_obj = await self._open_codex_stream(
+            messages, model_settings, model_request_parameters
         )
 
         final_response: Any = None
@@ -319,3 +375,47 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
             final_response.output = output_items
 
         return final_response
+
+    async def _open_codex_stream(
+        self,
+        messages: Any,
+        model_settings: Any,
+        model_request_parameters: Any,
+    ) -> Any:
+        """Open the wire stream, translating the ChatGPT-unsupported 400.
+
+        The OpenAI SDK sends the request when the stream is created, so a
+        ``model not supported`` rejection surfaces synchronously from this
+        ``await`` rather than mid-iteration. We catch it here and re-raise as
+        :class:`CodexModelNotSupportedError`; any other ``ModelHTTPError``
+        propagates unchanged.
+        """
+        try:
+            return await super()._responses_create(
+                messages=messages,
+                stream=True,
+                model_settings=model_settings,
+                model_request_parameters=model_request_parameters,
+            )
+        except ModelHTTPError as exc:
+            if exc.status_code == 400 and _CHATGPT_UNSUPPORTED_MARKER in str(exc):
+                raise self._chatgpt_unsupported_error() from exc
+            raise
+
+    def _chatgpt_unsupported_error(self) -> CodexModelNotSupportedError:
+        """Build the actionable error for a backend ChatGPT-unsupported 400."""
+        try:
+            default = repr(self._resolver.default_slug())
+        except (CodexModelError, RuntimeError) as exc:
+            # The catalog can be empty (CodexModelError) or unloaded
+            # (RuntimeError). Either way, fall back to a generic phrase rather
+            # than let a secondary failure mask the original 400 — but log it,
+            # since an empty/unloaded catalog at this point is itself a signal.
+            logger.warning("Could not resolve catalog default for error message: %s", exc)
+            default = "the current default"
+        return CodexModelNotSupportedError(
+            f"Codex backend rejected model {self.model_name!r} for this ChatGPT "
+            f"account (HTTP 400): the model is not available to Codex "
+            f"ChatGPT-subscription auth. Set the agent's `model:` to {default} "
+            f"(or unset `model:` to use the highest-priority catalog default)."
+        )

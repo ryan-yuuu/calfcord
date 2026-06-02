@@ -15,8 +15,11 @@ from calfkit_organization.providers.codex.prompt_cache import PromptCache
 from calfkit_organization.providers.codex.prompts import (
     FALLBACK_PROMPT_URL,
     MODELS_JSON_URL,
+    CodexModelError,
     CodexPromptsUnavailableError,
+    DeprecatedCodexModelError,
     PromptResolver,
+    UnknownCodexModelError,
     get_default_resolver,
     prewarm_codex_prompts,
 )
@@ -568,3 +571,240 @@ class TestPrewarmCodexPrompts:
         first = get_default_resolver()
         second = get_default_resolver()
         assert first is second
+
+
+# ---------------------------------------------------------------------------
+# Catalog metadata: default selection + validation
+# ---------------------------------------------------------------------------
+
+
+# Mirrors the shape of the real openai/codex models.json: priority (0 = best),
+# visibility ("list"/"hide"), and an "upgrade" pointer on retired models.
+CATALOG_MODELS_JSON: bytes = json.dumps(
+    {
+        "models": [
+            {
+                "slug": "gpt-5.5",
+                "base_instructions": "FLAGSHIP PROMPT",
+                "display_name": "GPT-5.5",
+                "priority": 0,
+                "visibility": "list",
+            },
+            {
+                "slug": "gpt-5.4",
+                "base_instructions": "GPT-5.4 PROMPT",
+                "priority": 2,
+                "visibility": "list",
+            },
+            {
+                "slug": "gpt-5.3-codex",
+                "base_instructions": "RETIRED PROMPT",
+                "priority": 6,
+                "visibility": "list",
+                "upgrade": {"model": "gpt-5.4", "migration_markdown": "..."},
+            },
+            {
+                "slug": "codex-auto-review",
+                "base_instructions": "INTERNAL PROMPT",
+                "priority": 1,
+                "visibility": "hide",
+            },
+        ]
+    }
+).encode()
+
+
+def _catalog_resolver(tmp_path: Path) -> PromptResolver:
+    handler, _ = _build_default_handler(models_body=CATALOG_MODELS_JSON)
+    resolver, _ = _make_resolver(tmp_path, handler)
+    return resolver
+
+
+class TestCatalogMetadata:
+    async def test_default_slug_is_highest_priority_active(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        # gpt-5.5 (priority 0) beats gpt-5.4; the hidden codex-auto-review
+        # (priority 1) and deprecated gpt-5.3-codex are excluded entirely.
+        assert resolver.default_slug() == "gpt-5.5"
+
+    async def test_selectable_models_excludes_hidden_and_deprecated(
+        self, tmp_path: Path
+    ) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        slugs = [m.slug for m in resolver.selectable_models()]
+        assert slugs == ["gpt-5.5", "gpt-5.4"]  # priority order, no hide/deprecated
+
+    async def test_validate_active_returns_entry(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        entry = resolver.validate("gpt-5.4")
+        assert entry.slug == "gpt-5.4"
+        assert entry.is_deprecated is False
+        assert entry.is_selectable is True
+
+    async def test_validate_deprecated_raises_with_upgrade(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        with pytest.raises(DeprecatedCodexModelError, match=r"gpt-5\.4") as exc:
+            resolver.validate("gpt-5.3-codex")
+        assert exc.value.upgrade_to == "gpt-5.4"
+
+    async def test_validate_hidden_raises_unknown(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        with pytest.raises(UnknownCodexModelError, match="internal model"):
+            resolver.validate("codex-auto-review")
+
+    async def test_validate_unknown_raises(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        with pytest.raises(UnknownCodexModelError, match="not a selectable model"):
+            resolver.validate("gpt-9-imaginary")
+
+    async def test_validate_prefix_variant_inherits_active_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A forward-compatible ``gpt-5.5-codex`` validates via the gpt-5.5
+        prefix and inherits its (active) entry + prompt."""
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+        entry = resolver.validate("gpt-5.5-codex")
+        assert entry.slug == "gpt-5.5"
+        assert resolver.resolve("gpt-5.5-codex") == "FLAGSHIP PROMPT"
+
+    async def test_missing_priority_sorts_last(self, tmp_path: Path) -> None:
+        """An entry without a priority field must not win the default by
+        sorting as 0 — it should sort after explicitly-prioritized models."""
+        body = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-no-prio", "base_instructions": "NO PRIO"},
+                    {"slug": "gpt-best", "base_instructions": "BEST", "priority": 0},
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        assert resolver.default_slug() == "gpt-best"
+
+    async def test_default_slug_raises_when_no_active_models(self, tmp_path: Path) -> None:
+        body = json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "only-hidden",
+                        "base_instructions": "X",
+                        "visibility": "hide",
+                    }
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        with pytest.raises(CodexModelError, match="No active Codex models"):
+            resolver.default_slug()
+
+    async def test_query_before_load_raises(self, tmp_path: Path) -> None:
+        resolver = _catalog_resolver(tmp_path)
+        for call in (resolver.default_slug, lambda: resolver.validate("gpt-5.5")):
+            with pytest.raises(RuntimeError, match="before ensure_loaded"):
+                call()
+
+    async def test_validate_prefix_variant_of_deprecated_fails_with_matched_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """The longest-prefix + deprecation interaction: a configured string that
+        only *prefix*-matches a deprecated entry must fail, and the message must
+        name the matched catalog entry (the `via` branch of the error)."""
+        body = json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.2",
+                        "base_instructions": "X",
+                        "priority": 4,
+                        "upgrade": {"model": "gpt-5.4"},
+                    },
+                    {"slug": "gpt-5.4", "base_instructions": "Y", "priority": 2},
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        # "gpt-5.2-codex" is not itself a slug; it longest-prefix-matches the
+        # deprecated "gpt-5.2" entry and must be rejected.
+        with pytest.raises(DeprecatedCodexModelError, match="matched catalog entry") as exc:
+            resolver.validate("gpt-5.2-codex")
+        assert exc.value.matched_slug == "gpt-5.2"
+        assert exc.value.upgrade_to == "gpt-5.4"
+
+    async def test_unknown_vs_hidden_carry_matched_slug_discriminator(
+        self, tmp_path: Path
+    ) -> None:
+        """UnknownCodexModelError distinguishes no-match (matched_slug=None) from
+        a hidden match (matched_slug set) without parsing the message."""
+        resolver = _catalog_resolver(tmp_path)
+        await resolver.ensure_loaded()
+
+        with pytest.raises(UnknownCodexModelError) as no_match:
+            resolver.validate("gpt-9-imaginary")
+        assert no_match.value.matched_slug is None
+
+        with pytest.raises(UnknownCodexModelError) as hidden:
+            resolver.validate("codex-auto-review")
+        assert hidden.value.matched_slug == "codex-auto-review"
+
+    async def test_bool_priority_is_rejected_and_sorts_last(self, tmp_path: Path) -> None:
+        """A stray ``"priority": true`` must not serialise to 1 and win the
+        default; it is treated as missing (sorts last)."""
+        body = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-bool", "base_instructions": "BOOL", "priority": True},
+                    {"slug": "gpt-best", "base_instructions": "BEST", "priority": 0},
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        assert resolver.default_slug() == "gpt-best"
+
+    async def test_default_slug_tie_break_by_slug(self, tmp_path: Path) -> None:
+        """Equal priority → alphabetical slug order decides (stable default)."""
+        body = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-zeta", "base_instructions": "Z", "priority": 0},
+                    {"slug": "gpt-alpha", "base_instructions": "A", "priority": 0},
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        assert resolver.default_slug() == "gpt-alpha"
+
+    async def test_empty_slug_entry_is_skipped(self, tmp_path: Path) -> None:
+        """An empty-string slug would prefix-match every model name; it must be
+        dropped, not stored (else it shadows the unknown-model path)."""
+        body = json.dumps(
+            {
+                "models": [
+                    {"slug": "", "base_instructions": "EMPTY"},
+                    {"slug": "gpt-real", "base_instructions": "REAL", "priority": 0},
+                ]
+            }
+        ).encode()
+        handler, _ = _build_default_handler(models_body=body)
+        resolver, _ = _make_resolver(tmp_path, handler)
+        await resolver.ensure_loaded()
+        assert [m.slug for m in resolver.selectable_models()] == ["gpt-real"]
+        # The empty slug must NOT have been stored as a catch-all match.
+        with pytest.raises(UnknownCodexModelError):
+            resolver.validate("anything-unknown")

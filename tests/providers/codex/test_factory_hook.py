@@ -33,17 +33,22 @@ def _preloaded_default_resolver(monkeypatch, tmp_path):
     """Hydrate the process-singleton PromptResolver with synthetic prompts.
 
     The factory hook constructs a CodexSubscriptionModelClient which calls
-    ``get_default_resolver().resolve(model_name)`` synchronously. In real
-    deployments the runner prewarms the resolver before any model client
-    is built; tests must do the same. We bypass network entirely by
-    hydrating the singleton's private state with fixed prompts.
+    ``get_default_resolver().validate(model_name)`` (and ``default_slug()``
+    when ``model_name`` is None) synchronously. In real deployments the runner
+    prewarms the resolver before any model client is built; tests must do the
+    same. We bypass network entirely by hydrating the singleton's private
+    state with a fixed catalog.
     """
     from calfkit_organization.providers.codex import prompts as _prompts
     from calfkit_organization.providers.codex.prompt_cache import PromptCache
-    from calfkit_organization.providers.codex.prompts import PromptResolver
+    from calfkit_organization.providers.codex.prompts import CodexModel, PromptResolver
 
     resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "_prompts_cache"))
-    resolver._models = {"gpt-5.2": "GPT-5.2 OFFICIAL PROMPT"}
+    resolver._catalog = {
+        "gpt-5.2": CodexModel(
+            slug="gpt-5.2", base_instructions="GPT-5.2 OFFICIAL PROMPT", priority=0
+        )
+    }
     resolver._fallback_prompt = "FALLBACK PROMPT"
     resolver._loaded = True
     monkeypatch.setattr(_prompts, "_default_resolver", resolver)
@@ -108,7 +113,22 @@ class TestDefaultModelClientFactory:
         with pytest.raises(CodexNotLoggedInError):
             _default_model_client_factory("openai-codex", "gpt-5.2-codex")
 
-    def test_default_model_for_openai_codex(self) -> None:
+    def test_default_model_for_openai_codex_is_none(self) -> None:
+        """openai-codex has no static default: the Codex client resolves the
+        highest-priority model from the live catalog at construction."""
         from calfkit_organization.agents.factory import _PROVIDER_DEFAULT_MODELS
 
-        assert _PROVIDER_DEFAULT_MODELS["openai-codex"] == "gpt-5.3-codex"
+        assert _PROVIDER_DEFAULT_MODELS["openai-codex"] is None
+
+    def test_dispatches_openai_codex_with_unset_model(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """model_name=None reaches the Codex client, which defaults from the
+        catalog (the preloaded fixture's gpt-5.2)."""
+        monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path))
+        _seed_credentials(tmp_path)
+
+        from calfkit_organization.agents.factory import _default_model_client_factory
+
+        client = _default_model_client_factory("openai-codex", None)
+        assert client.model_name == "gpt-5.2"

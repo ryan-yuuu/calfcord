@@ -32,13 +32,30 @@ import json
 import logging
 import threading
 from collections.abc import Callable
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Literal
 
 import httpx
 
 from calfkit_organization.providers.codex.prompt_cache import PromptCache
 
 logger = logging.getLogger(__name__)
+
+# Visibility domain from models.json. Only "list" (user-selectable) and "hide"
+# (internal, e.g. codex-auto-review) are meaningful; the parser maps any
+# unrecognised upstream value to "hide" so a new value fails closed.
+Visibility = Literal["list", "hide"]
+
+# Sentinel priority for catalog entries whose upstream JSON omits ``priority``.
+# Real ``models.json`` entries always carry a small integer (0 = flagship);
+# a missing value sorts the model *last* in the ascending ``(priority, slug)``
+# order used by ``selectable_models``/``default_slug`` rather than tying at 0
+# and beating real flagships.
+_MISSING_PRIORITY: Final[int] = 1_000_000
+
+# Marker returned by ``_safe_default_slug`` (log-only) when no active model
+# exists, so the load path can detect and WARN on the degraded state.
+_NO_DEFAULT_MARKER: Final[str] = "<none>"
 
 MODELS_JSON_URL: Final[str] = (
     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
@@ -72,6 +89,107 @@ class _BodyValidationError(RuntimeError):
     """
 
 
+@dataclass(frozen=True)
+class CodexModel:
+    """A single Codex model parsed from ``models.json``.
+
+    Carries only the fields we act on: ``base_instructions`` (the
+    fingerprinted system prompt), ``priority`` (lower = preferred; 0 is the
+    flagship), ``visibility`` (``"list"`` = user-selectable, ``"hide"`` =
+    internal), and ``upgrade_to`` (the slug that supersedes this one, or
+    ``None`` when the model is current). The remaining ~30 fields in the
+    upstream JSON are intentionally dropped — we re-fetch live, so there's
+    no value in mirroring the full schema.
+    """
+
+    slug: str
+    base_instructions: str
+    priority: int = _MISSING_PRIORITY
+    visibility: Visibility = "list"
+    upgrade_to: str | None = None
+
+    @property
+    def is_selectable(self) -> bool:
+        """True when the model is meant for user selection (``visibility == "list"``).
+
+        Hidden models (e.g. ``codex-auto-review``) are internal and not valid
+        targets for an agent's ``model:`` field.
+        """
+        return self.visibility == "list"
+
+    @property
+    def is_deprecated(self) -> bool:
+        """True when upstream marks the model superseded (``upgrade`` set).
+
+        A deprecated model carries an ``upgrade.model`` pointer to its
+        replacement; the Codex backend rejects such models for
+        ChatGPT-account auth, which is the exact failure this catalog guards
+        against.
+        """
+        return self.upgrade_to is not None
+
+
+class CodexModelError(RuntimeError):
+    """Base class for catalog-driven model validation failures.
+
+    Raised from :meth:`PromptResolver.validate` / :meth:`default_slug` at
+    model-client construction time — before any request reaches the Codex
+    backend — so a misconfigured ``model:`` fails fast with an actionable
+    message instead of a raw ``400`` deep in the request path.
+    """
+
+
+class UnknownCodexModelError(CodexModelError):
+    """The configured model is not a selectable entry in the live catalog.
+
+    Covers two distinct cases, distinguishable via ``matched_slug`` so a caller
+    can branch without parsing the message:
+
+    * ``matched_slug is None`` — no catalog slug is a prefix of the configured
+      model (a genuine typo / made-up model);
+    * ``matched_slug`` set — the model matched a real but hidden (internal)
+      entry, e.g. ``codex-auto-review`` (``visibility != "list"``).
+    """
+
+    def __init__(self, model_name: str, selectable: list[str], *, matched_slug: str | None = None):
+        self.model_name = model_name
+        self.selectable = selectable
+        self.matched_slug = matched_slug
+        detail = (
+            f" (matched internal model {matched_slug!r}, which is not user-selectable)"
+            if matched_slug is not None
+            else ""
+        )
+        super().__init__(
+            f"Codex model {model_name!r} is not a selectable model in the live "
+            f"catalog{detail}. Selectable models: {selectable or '<none>'}. Set the "
+            f"agent's `model:` to one of these, or unset `model:` to use the "
+            f"highest-priority default."
+        )
+
+
+class DeprecatedCodexModelError(CodexModelError):
+    """The configured model has been retired upstream (superseded).
+
+    The Codex backend rejects retired models for ChatGPT-account auth, so we
+    refuse them at construction and point the operator at the replacement.
+    """
+
+    def __init__(self, model_name: str, matched_slug: str, upgrade_to: str):
+        self.model_name = model_name
+        self.matched_slug = matched_slug
+        self.upgrade_to = upgrade_to
+        # When the configured string isn't itself a catalog slug (prefix
+        # match), name the entry we matched so the cause is unambiguous.
+        via = "" if model_name == matched_slug else f" (matched catalog entry {matched_slug!r})"
+        super().__init__(
+            f"Codex model {model_name!r}{via} has been retired by OpenAI and "
+            f"superseded by {upgrade_to!r}; the Codex backend rejects it for "
+            f"ChatGPT-account auth. Update the agent's `model:` to {upgrade_to!r}, "
+            f"or unset `model:` to use the current highest-priority default."
+        )
+
+
 def _validate_body(cache_name: str, body: bytes) -> None:
     """Verify a freshly fetched upstream body is structurally usable.
 
@@ -100,17 +218,83 @@ def _validate_body(cache_name: str, body: bytes) -> None:
         return
 
 
+def _parse_model_entry(entry: dict) -> CodexModel | None:
+    """Build a :class:`CodexModel` from one ``models.json`` entry, or ``None``.
+
+    A usable entry must carry a non-empty ``slug`` and ``base_instructions``
+    (same requirement as before catalog metadata existed); entries missing
+    either are skipped with a WARNING. An empty ``slug`` is rejected too: it
+    would prefix-match *every* model name in :meth:`PromptResolver._match`
+    (``"x".startswith("")`` is always true) and silently shadow the
+    unknown-model path.
+
+    All other fields are optional and fall back to the :class:`CodexModel`
+    defaults; a value present but of the wrong shape is coerced to the default
+    and logged, so a parse regression is visible in startup logs rather than
+    silently dropping a model or flipping its selectability.
+    """
+    slug = entry.get("slug")
+    instructions = entry.get("base_instructions")
+    if not (isinstance(slug, str) and slug and isinstance(instructions, str) and instructions):
+        logger.warning(
+            "Skipping models.json entry missing/empty slug or base_instructions: keys=%s",
+            sorted(entry),
+        )
+        return None
+
+    # ``bool`` is an ``int`` subclass, so ``isinstance(True, int)`` is True;
+    # ``type(x) is int`` rejects a stray ``true`` that would serialise to 1 and
+    # skew default selection. ``json.loads`` only ever yields plain ``int``.
+    raw_priority = entry.get("priority")
+    priority = raw_priority if type(raw_priority) is int else _MISSING_PRIORITY
+    if raw_priority is not None and priority is _MISSING_PRIORITY:
+        logger.warning("Model %r: non-int priority %r; sorting last", slug, raw_priority)
+
+    # Absent visibility defaults to "list" (selectable), matching the
+    # CodexModel default. A *present* but unrecognised value (a future upstream
+    # value, or a non-string) fails closed to "hide" so it can't accidentally
+    # become user-selectable.
+    raw_visibility = entry.get("visibility")
+    if raw_visibility is None:
+        visibility: Visibility = "list"
+    elif raw_visibility in ("list", "hide"):
+        visibility = raw_visibility
+    else:
+        visibility = "hide"
+        logger.warning("Model %r: unrecognised visibility %r; treating as 'hide'", slug, raw_visibility)
+
+    upgrade = entry.get("upgrade")
+    upgrade_model = upgrade.get("model") if isinstance(upgrade, dict) else None
+    upgrade_to = upgrade_model if isinstance(upgrade_model, str) and upgrade_model else None
+
+    return CodexModel(
+        slug=slug,
+        base_instructions=instructions,
+        priority=priority,
+        visibility=visibility,
+        upgrade_to=upgrade_to,
+    )
+
+
 class PromptResolver:
-    """In-memory store of Codex CLI system prompts.
+    """In-memory catalog of Codex models parsed from ``models.json``.
 
-    Construct once per process (typically via :func:`get_default_resolver`),
-    call ``await ensure_loaded()`` during startup, then call
-    :meth:`resolve` synchronously from request paths.
+    Despite the name (kept for API stability), this owns the full per-model
+    catalog, not just prompts. Construct once per process (typically via
+    :func:`get_default_resolver`), call ``await ensure_loaded()`` during
+    startup, then call the synchronous query methods from request/construction
+    paths:
 
-    ``ensure_loaded`` is :class:`asyncio.Lock`-guarded so concurrent
-    callers coalesce. :meth:`resolve` is lock-free; post-load state is
-    treated as immutable for the lifetime of the resolver (call
-    :meth:`reset` then ``ensure_loaded`` again to refresh).
+    * :meth:`resolve` — the verbatim (longest-prefix) Codex CLI prompt;
+    * :meth:`validate` — fail-fast check that a configured model is selectable
+      and not deprecated, returning its :class:`CodexModel`;
+    * :meth:`default_slug` — the highest-priority selectable model, used when
+      an agent leaves ``model:`` unset.
+
+    ``ensure_loaded`` is :class:`asyncio.Lock`-guarded so concurrent callers
+    coalesce. The query methods are lock-free; post-load state is treated as
+    immutable for the lifetime of the resolver (call :meth:`reset` then
+    ``ensure_loaded`` again to refresh).
     """
 
     def __init__(
@@ -122,7 +306,7 @@ class PromptResolver:
         self._http_client_factory = http_client_factory or self._default_http_client
         self._lock = asyncio.Lock()
         self._loaded = False
-        self._models: dict[str, str] = {}
+        self._catalog: dict[str, CodexModel] = {}
         self._fallback_prompt: str = ""
 
     @staticmethod
@@ -169,14 +353,19 @@ class PromptResolver:
             if not isinstance(entries, list):
                 raise CodexPromptsUnavailableError("models.json: 'models' is not a list")
 
-            parsed: dict[str, str] = {}
+            parsed: dict[str, CodexModel] = {}
+            skipped = 0
             for entry in entries:
-                if not isinstance(entry, dict):
+                model = _parse_model_entry(entry) if isinstance(entry, dict) else None
+                if model is None:
+                    skipped += 1
                     continue
-                slug = entry.get("slug")
-                instructions = entry.get("base_instructions")
-                if isinstance(slug, str) and isinstance(instructions, str):
-                    parsed[slug] = instructions
+                parsed[model.slug] = model
+
+            if skipped:
+                # Per-entry detail is logged in _parse_model_entry; this is the
+                # aggregate so a parse regression is visible at a glance.
+                logger.warning("models.json: skipped %d of %d entries", skipped, len(entries))
 
             if not parsed:
                 raise CodexPromptsUnavailableError(
@@ -190,14 +379,25 @@ class PromptResolver:
                     f"Upstream prompt.md is not valid UTF-8: {exc}"
                 ) from exc
 
-            self._models = parsed
+            self._catalog = parsed
             self._fallback_prompt = fallback_text
             self._loaded = True
+            default = self._safe_default_slug()
             logger.info(
-                "Loaded %d Codex model prompts + %d-byte fallback from openai/codex",
+                "Loaded %d Codex models + %d-byte fallback prompt from openai/codex "
+                "(default=%s)",
                 len(parsed),
                 len(self._fallback_prompt),
+                default,
             )
+            if default == _NO_DEFAULT_MARKER:
+                # Loaded fine, but every model is hidden or deprecated — an agent
+                # with ``model:`` unset will hard-fail later in default_slug().
+                # Surface the degraded state loudly at load, not at next use.
+                logger.warning(
+                    "Codex catalog has no selectable, non-deprecated model; "
+                    "agents with `model:` unset will fail at construction."
+                )
 
     def reset(self) -> None:
         """Drop in-memory state. Does NOT clear the disk cache.
@@ -207,8 +407,24 @@ class PromptResolver:
         cached bodies).
         """
         self._loaded = False
-        self._models = {}
+        self._catalog = {}
         self._fallback_prompt = ""
+
+    def _require_loaded(self) -> None:
+        if not self._loaded:
+            raise RuntimeError("PromptResolver used before ensure_loaded()")
+
+    def _match(self, model_name: str) -> CodexModel | None:
+        """Longest-prefix match of ``model_name`` against catalog slugs.
+
+        ``gpt-5.2-codex`` prefers a ``gpt-5.2-codex`` entry, falling back to
+        ``gpt-5.2`` then ``gpt-5``. Returns ``None`` when no slug is a prefix
+        of ``model_name``.
+        """
+        matches = [slug for slug in self._catalog if model_name.startswith(slug)]
+        if not matches:
+            return None
+        return self._catalog[max(matches, key=len)]
 
     def resolve(self, model_name: str) -> str:
         """Return the verbatim Codex CLI prompt for ``model_name``.
@@ -217,13 +433,83 @@ class PromptResolver:
         ``gpt-5.2-codex`` will prefer a ``gpt-5.2-codex`` entry, fall back
         to ``gpt-5.2``, then ``gpt-5``, etc. When no slug matches, the
         contents of ``prompt.md`` are returned.
+
+        OpenAI fingerprints ``instructions`` against the official strings, so
+        the prefix-matched prompt of a *close* model is preferable to a
+        branded short string even when the exact slug isn't in the catalog —
+        which is why this stays a prefix match rather than an exact lookup.
         """
-        if not self._loaded:
-            raise RuntimeError("PromptResolver.resolve() called before ensure_loaded()")
-        matches = [slug for slug in self._models if model_name.startswith(slug)]
-        if matches:
-            return self._models[max(matches, key=len)]
-        return self._fallback_prompt
+        self._require_loaded()
+        entry = self._match(model_name)
+        return entry.base_instructions if entry is not None else self._fallback_prompt
+
+    def selectable_models(self) -> list[CodexModel]:
+        """Return the user-selectable, non-deprecated models, best-first.
+
+        Sorted by ``priority`` (ascending; 0 = flagship) then ``slug`` for a
+        stable order. This is the set an operator may legitimately pin an
+        agent's ``model:`` to, and the pool :meth:`default_slug` chooses from.
+        """
+        self._require_loaded()
+        active = [m for m in self._catalog.values() if m.is_selectable and not m.is_deprecated]
+        return sorted(active, key=lambda m: (m.priority, m.slug))
+
+    def default_slug(self) -> str:
+        """Return the highest-priority selectable, non-deprecated model slug.
+
+        Used when an agent leaves ``model:`` unset for the Codex provider:
+        rather than hard-coding a default that rots when OpenAI retires a
+        model, we pick the current flagship from the live catalog.
+
+        Raises:
+            CodexModelError: when the catalog has no active models (every
+                entry is hidden or deprecated) — there is nothing safe to
+                default to.
+        """
+        active = self.selectable_models()
+        if not active:
+            raise CodexModelError(
+                "No active Codex models in the live catalog (all hidden or "
+                "deprecated); cannot select a default model."
+            )
+        return active[0].slug
+
+    def validate(self, model_name: str) -> CodexModel:
+        """Resolve + validate ``model_name`` against the live catalog.
+
+        Returns the matched :class:`CodexModel` when the model is usable.
+        Raises (fail-fast at construction, before any request) when it is not:
+
+        * :class:`UnknownCodexModelError` — no catalog slug is a prefix of
+          ``model_name``, or the matched entry is hidden (internal).
+        * :class:`DeprecatedCodexModelError` — the matched entry has been
+          superseded upstream (the Codex backend would reject it).
+
+        Matching is the same longest-prefix logic :meth:`resolve` uses, so a
+        forward-compatible ``gpt-5.5-codex`` validates against (and inherits
+        the instructions of) a ``gpt-5.5`` catalog entry.
+        """
+        self._require_loaded()
+        entry = self._match(model_name)
+        # Order matters: an unknown/hidden model is reported as "not selectable"
+        # before the deprecation check, so a hidden+deprecated entry surfaces as
+        # UnknownCodexModelError (hidden is the more fundamental disqualifier).
+        if entry is None or not entry.is_selectable:
+            raise UnknownCodexModelError(
+                model_name,
+                [m.slug for m in self.selectable_models()],
+                matched_slug=entry.slug if entry is not None else None,
+            )
+        if entry.upgrade_to is not None:  # i.e. is_deprecated — superseded upstream
+            raise DeprecatedCodexModelError(model_name, entry.slug, entry.upgrade_to)
+        return entry
+
+    def _safe_default_slug(self) -> str:
+        """``default_slug`` for log lines: never raises (returns a marker)."""
+        try:
+            return self.default_slug()
+        except CodexModelError:
+            return _NO_DEFAULT_MARKER
 
     async def _fetch_one(self, url: str, cache_name: str) -> bytes:
         """Fetch ``url`` with ETag-conditional GET against the disk cache.

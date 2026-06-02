@@ -127,33 +127,52 @@ docstring for the failure mode this prevents. Matches calfkit's own
 wired into the publish path) for forward compatibility with an
 upstream fix."""
 
-_PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
+_PROVIDER_DEFAULT_MODELS: dict[Provider, str | None] = {
     "anthropic": "claude-sonnet-4-5",
     "openai": "gpt-5-mini",
-    "openai-codex": "gpt-5.3-codex",
+    # ``openai-codex`` has no static default: the set of usable models (and
+    # which is the flagship) changes as OpenAI retires/ships models, and a
+    # hard-coded slug here is exactly what caused retired models to be sent.
+    # ``None`` flows through to the Codex client, which resolves the
+    # highest-priority model from the live ``models.json`` catalog at
+    # construction. The key is kept so ``resolve_provider`` still recognises
+    # the provider.
+    "openai-codex": None,
 }
 """Default model name per provider when neither ``definition.model`` nor
 ``CALFKIT_AGENT_DEFAULT_MODEL`` is set. Each provider's model namespace is
 disjoint, so a single cross-provider default is meaningless — picking one
-per provider is the only sensible fallback."""
+per provider is the only sensible fallback. ``openai-codex`` is ``None``: its
+default is resolved from the live catalog at client construction, not pinned
+here."""
 
-ModelClientFactory = Callable[[Provider, str], PydanticModelClient]
+ModelClientFactory = Callable[[Provider, str | None], PydanticModelClient]
 """Construct a model client for ``(provider, model_name)``. The default
-factory dispatches on ``provider``; tests override this to inject fakes."""
+factory dispatches on ``provider``; tests override this to inject fakes.
+``model_name`` may be ``None`` only for ``openai-codex`` (catalog-resolved
+default)."""
 
 
-def _default_model_client_factory(provider: Provider, model_name: str) -> PydanticModelClient:
+def _default_model_client_factory(
+    provider: Provider, model_name: str | None
+) -> PydanticModelClient:
     """Map ``provider`` to its concrete calfkit model-client class.
 
     Provider authentication is read from each SDK's standard env var
     (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY``); the factory does not
     handle keys. A missing key surfaces on first invocation, not at
     construction.
+
+    ``model_name`` is ``None`` only when the resolved provider is
+    ``openai-codex`` and no model was configured (the Codex client resolves a
+    catalog default). The other providers always carry a static default from
+    :data:`_PROVIDER_DEFAULT_MODELS`, so a ``None`` reaching them is a bug —
+    guarded explicitly rather than passed through as an invalid model name.
     """
     if provider == "anthropic":
-        return AnthropicModelClient(model_name=model_name)
+        return AnthropicModelClient(model_name=_require_model(provider, model_name))
     if provider == "openai":
-        return OpenAIModelClient(model_name=model_name)
+        return OpenAIModelClient(model_name=_require_model(provider, model_name))
     if provider == "openai-codex":
         # Lazy import: pulls in authlib + OpenHands auth machinery only when
         # an agent actually opts in to ChatGPT subscription billing.
@@ -165,6 +184,20 @@ def _default_model_client_factory(provider: Provider, model_name: str) -> Pydant
     raise ValueError(
         f"unknown provider {provider!r}; expected one of {list(_PROVIDER_DEFAULT_MODELS)}"
     )
+
+
+def _require_model(provider: Provider, model_name: str | None) -> str:
+    """Return ``model_name`` or raise — for providers that need an explicit slug.
+
+    Only ``openai-codex`` tolerates ``None`` (it resolves a catalog default);
+    every other provider must have a concrete model by this point.
+    """
+    if model_name is None:
+        raise ValueError(
+            f"provider {provider!r} requires a model name but none was resolved; "
+            f"only 'openai-codex' supports a catalog-resolved default"
+        )
+    return model_name
 
 
 def resolve_provider(
@@ -363,7 +396,9 @@ class AgentFactory:
             "building agent=%s provider=%s model=%s topics=%s thinking_effort=%s tools=%s",
             definition.agent_id,
             provider,
-            model_name,
+            # ``None`` for an unconfigured Codex model — resolved to the live
+            # catalog default at client construction (logged there).
+            model_name if model_name is not None else "<codex catalog default>",
             subscribe_topics,
             definition.thinking_effort,
             [t.tool_schema.name for t in tools] if tools else [],
@@ -489,7 +524,15 @@ class AgentFactory:
     def _resolve_provider(self, definition: AgentDefinition) -> Provider:
         return resolve_provider(definition, default_provider=self._default_provider)
 
-    def _resolve_model(self, definition: AgentDefinition, provider: Provider) -> str:
+    def _resolve_model(self, definition: AgentDefinition, provider: Provider) -> str | None:
+        """Resolve the model name, or ``None`` for catalog-defaulted providers.
+
+        Precedence: ``definition.model`` → ``CALFKIT_AGENT_DEFAULT_MODEL`` →
+        ``self._default_model`` → the provider's static default. Returns
+        ``None`` only for ``openai-codex`` when none of the above is set —
+        its static default is ``None`` and the Codex client resolves a live
+        catalog default instead.
+        """
         return (
             definition.model
             or os.getenv(_DEFAULT_MODEL_ENV_VAR)

@@ -13,9 +13,12 @@ Composition:
   - OAuth login/refresh flows: delegated to ``openhands-sdk`` (already a
     transitive dependency; its ``OpenAISubscriptionAuth`` handles PKCE,
     browser callback, device-code, and credential persistence).
-  - Runtime token refresh: delegated to ``authlib``'s ``AsyncOAuth2Client``,
-    used as the underlying ``httpx.AsyncClient`` for the OpenAI SDK so
-    refresh-on-expiry happens transparently with no background task.
+  - Runtime token refresh: a per-request ``httpx.Auth`` (``_CodexBearerAuth``)
+    injects a fresh OAuth bearer on every ``httpx.send()``, refreshing via
+    OpenHands' ``OpenAISubscriptionAuth`` when expired — so refresh-on-expiry
+    happens transparently with no background task. See ``model_client.py`` for
+    why authlib's ``AsyncOAuth2Client`` does not work here (it hooks
+    ``request()``, which the OpenAI SDK bypasses via ``send()``).
   - Codex CLI system prompt: fetched verbatim from ``openai/codex`` on
     process startup (with ETag-conditional refresh against an on-disk
     cache) so the ``instructions`` field of every request matches what
@@ -34,14 +37,26 @@ from calfkit_organization.providers.codex.factory_hook import (
     CodexNotLoggedInError,
     build_codex_subscription_client,
 )
+from calfkit_organization.providers.codex.model_client import (
+    CodexModelNotSupportedError,
+)
 from calfkit_organization.providers.codex.prompts import (
+    CodexModel,
+    CodexModelError,
     CodexPromptsUnavailableError,
+    DeprecatedCodexModelError,
+    UnknownCodexModelError,
     prewarm_codex_prompts,
 )
 
 __all__ = [
+    "CodexModel",
+    "CodexModelError",
+    "CodexModelNotSupportedError",
     "CodexNotLoggedInError",
     "CodexPromptsUnavailableError",
+    "DeprecatedCodexModelError",
+    "UnknownCodexModelError",
     "build_codex_subscription_client",
     "prewarm_codex_prompts",
 ]
