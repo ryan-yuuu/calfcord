@@ -44,14 +44,11 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-src = ["src", "examples"]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "W", "SIM", "RUF"]
 ignore = []
-
-[tool.ruff.lint.per-file-ignores]
-"examples/*" = ["T201"]  # allow print() in examples
 
 [dependency-groups]
 dev = [

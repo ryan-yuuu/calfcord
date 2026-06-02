@@ -184,9 +184,8 @@ async def _load_or_bootstrap_state(
            explicit-seed env var. Recommended for production where each
            agent's channels are intentional.
         2. ``DISCORD_DEFAULT_CHANNEL_ID`` — the shared example/dev channel
-           env var (also used by ``examples/`` scripts and ``agents/echo.py``).
-           Convenient for local smoke tests where a single channel is wired
-           up for every agent.
+           env var. Convenient for local smoke tests where a single channel
+           is wired up for every agent.
 
     If both are unset and the state file does not exist, raises
     :class:`BootstrapError` with a hint pointing to either var.
