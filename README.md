@@ -119,19 +119,6 @@ Calfcord has **four independent process types**:
 
 Any process can run anywhere.
 
-```mermaid
-flowchart LR
-    Discord(("Discord")) <--> Bridge[calfkit-bridge]
-    Bridge <--> Kafka{{Kafka}}
-    Kafka <--> Agents[calfkit-agent]
-    Kafka <--> Router[calfkit-router]
-    Kafka <--> Tools[calfkit-tools]
-    Tools <--> Discord
-```
-
-Full process model, the decoupled-deployment access matrix, and project layout →
-[`docs/architecture.md`](./docs/architecture.md).
-
 ## Configuration
 
 `.env.example` is fully commented — the [quick start](#quick-start) covers the
