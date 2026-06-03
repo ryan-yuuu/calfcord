@@ -500,6 +500,126 @@ class TestBootValidation:
         assert ingress is not None
 
 
+class TestMcpBootValidation:
+    """The boot-time tool check is MCP-aware: ``mcp/...`` selectors are
+    validated against the committed MCP catalog (existence of the referenced
+    server/tool), while bare builtin names keep their ``TOOL_REGISTRY``
+    check. ``BridgeIngress.__init__`` lazily imports
+    ``calfcord.mcp.catalog.MCP_CATALOG``, so we patch that module attribute
+    to inject a deterministic catalog."""
+
+    @staticmethod
+    def _patch_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+        from calfkit.mcp import McpToolDef
+
+        monkeypatch.setattr(
+            "calfcord.mcp.catalog.MCP_CATALOG",
+            {"gmail": [McpToolDef(name="search"), McpToolDef(name="send")]},
+        )
+
+    @staticmethod
+    def _registry_with(tools: tuple[str, ...]) -> AgentRegistry:
+        return AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    display_name="Aksel (Scheduler)",
+                    description="Calendar.",
+                    provider="anthropic",
+                    tools=tools,
+                    system_prompt="x",
+                ),
+            ]
+        )
+
+    def test_valid_mcp_server_selector_boots(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bare ``mcp/<server>`` selector that the catalog can serve boots
+        cleanly."""
+        self._patch_catalog(monkeypatch)
+        ingress = BridgeIngress(client, self._registry_with(("mcp/gmail",)), pending_wires)
+        assert ingress is not None
+
+    def test_valid_mcp_tool_selector_boots(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch_catalog(monkeypatch)
+        ingress = BridgeIngress(
+            client, self._registry_with(("mcp/gmail/search",)), pending_wires
+        )
+        assert ingress is not None
+
+    def test_unknown_mcp_server_raises_at_boot(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch_catalog(monkeypatch)
+        with pytest.raises(ValueError, match="invalid MCP tool reference"):
+            BridgeIngress(client, self._registry_with(("mcp/ghost",)), pending_wires)
+
+    def test_unknown_mcp_tool_raises_at_boot(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch_catalog(monkeypatch)
+        with pytest.raises(ValueError, match="invalid MCP tool reference"):
+            BridgeIngress(
+                client, self._registry_with(("mcp/gmail/missing",)), pending_wires
+            )
+
+    def test_invalid_mcp_error_names_declaring_agent(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The boot error names the declaring agent so an operator can find
+        the offending ``.md`` without grepping."""
+        self._patch_catalog(monkeypatch)
+        with pytest.raises(ValueError) as excinfo:
+            BridgeIngress(client, self._registry_with(("mcp/ghost",)), pending_wires)
+        assert "scheduler" in str(excinfo.value)
+
+    def test_unknown_builtin_still_raises_with_mcp_aware_loop(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The builtin unknown-name check is preserved alongside the new MCP
+        branch — a typo'd bare name still fails at boot with the original
+        ``unknown tool`` message."""
+        self._patch_catalog(monkeypatch)
+        with pytest.raises(ValueError, match="unknown tool"):
+            BridgeIngress(client, self._registry_with(("calndar",)), pending_wires)
+
+    def test_mixed_builtin_and_mcp_selectors_boot(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A spec mixing a valid builtin and a valid MCP selector boots."""
+        self._patch_catalog(monkeypatch)
+        ingress = BridgeIngress(
+            client,
+            self._registry_with(("private_chat", "mcp/gmail/search")),
+            pending_wires,
+        )
+        assert ingress is not None
+
+
 class TestTempInstructions:
     """Per-call ``temp_instructions`` carries the channel peer roster and
     the @-mention rules so the LLM knows which peers it can loop in via

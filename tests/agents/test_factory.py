@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from calfkit.mcp import McpToolDef
 from calfkit.nodes import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
@@ -566,10 +567,23 @@ class TestResolveProviderModuleFunction:
 
 
 def _fake_tool_node(name: str) -> Any:
-    """Build a MagicMock that quacks like a ``ToolNodeDef`` for wiring tests."""
-    node = MagicMock()
-    node.tool_schema.name = name
-    return node
+    """Build a real ``ToolNodeDef`` whose schema name is ``name``.
+
+    calfkit's ``Agent(tools=...)`` flattener (``_flatten_tools``) rejects
+    anything that is not a ``ToolNodeDef`` / ``BaseToolNodeSchema`` /
+    ``McpServer``, so a bare ``MagicMock`` no longer works as a stand-in.
+    ``agent_tool`` derives the schema name from the wrapped function's
+    ``__name__``; we rewrite ``__name__`` to ``name`` so the registered key,
+    the schema name, and the wiring assertions all line up.
+    """
+    from calfkit.nodes import agent_tool
+
+    async def _impl(ctx: Any, payload: str) -> str:
+        """Trivial tool body for wiring tests (never executed here)."""
+        return payload
+
+    _impl.__name__ = name
+    return agent_tool(_impl)
 
 
 class TestToolsWiring:
@@ -612,7 +626,11 @@ class TestToolsWiring:
             AgentRuntimeState(channels=[100]),
             MagicMock(),
         )
-        assert set(worker._nodes[0].tools) == {fake_a, fake_b}
+        # ``_resolve_tools`` returns ``registry.values()`` for ``tools=None``,
+        # so the wired nodes are exactly the registry's, in insertion order.
+        # (``ToolNodeDef`` is unhashable, so compare the list rather than a
+        # set.)
+        assert worker._nodes[0].tools == [fake_a, fake_b]
 
     def test_known_tool_name_is_wired_through_registry(self) -> None:
         """A name listed in ``tools:`` resolves to the registry's ToolNodeDef
@@ -704,6 +722,167 @@ class TestToolsWiring:
         resolved = worker._nodes[0].tools
         assert resolved is not None and len(resolved) == 1
         assert resolved[0].tool_schema.name == tool_name
+
+
+@pytest.fixture
+def mcp_catalog() -> dict[str, list[McpToolDef]]:
+    """A small transport-free MCP catalog for selector-resolution tests.
+
+    ``McpToolDef`` is schema-only (no transport / no ``$VAR`` secrets), so
+    constructing these in-process is safe and never opens an MCP server.
+    """
+    return {"demo": [McpToolDef(name="echo"), McpToolDef(name="ask")]}
+
+
+class TestMcpToolsWiring:
+    """``mcp/...`` selectors in ``definition.tools`` resolve through the
+    injected ``mcp_catalog`` into schema-only nodes named ``<server>_<tool>``,
+    are concatenated with resolved builtins, and collide-check across the
+    combined surface."""
+
+    def test_bare_server_selector_resolves_all_tools(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        worker = factory.build(
+            _definition(tools=("mcp/demo",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        names = {t.tool_schema.name for t in worker._nodes[0].tools}
+        assert names == {"demo_echo", "demo_ask"}
+
+    def test_single_tool_selector_resolves_only_that_tool(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        worker = factory.build(
+            _definition(tools=("mcp/demo/echo",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        names = {t.tool_schema.name for t in worker._nodes[0].tools}
+        assert names == {"demo_echo"}
+
+    def test_unknown_server_raises(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        with pytest.raises(ValueError, match="unknown server"):
+            factory.build(
+                _definition(tools=("mcp/ghost",)),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
+    def test_unknown_tool_raises(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        with pytest.raises(ValueError, match="unknown tool"):
+            factory.build(
+                _definition(tools=("mcp/demo/missing",)),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
+    def test_builtin_and_mcp_mix_yields_combined_surface(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        """A flat ``tools:`` list mixing a builtin and an MCP selector resolves
+        to the builtin node followed by the MCP nodes (builtins first, then
+        MCP — see ``_resolve_tools``)."""
+        _, model_factory = _model_factory_spy()
+        fake_calendar = _fake_tool_node("calendar")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"calendar": fake_calendar},
+            mcp_catalog=mcp_catalog,
+        )
+        worker = factory.build(
+            _definition(tools=("calendar", "mcp/demo/echo")),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        names = [t.tool_schema.name for t in worker._nodes[0].tools]
+        assert names == ["calendar", "demo_echo"]
+
+    def test_collision_between_builtin_and_mcp_raises(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        """A builtin whose schema name equals an MCP selection's flattened
+        ``<server>_<tool>`` name (here both ``demo_echo``) is a collision.
+        calfkit would silently last-wins on it, so the factory must detect
+        and reject it at build time."""
+        _, model_factory = _model_factory_spy()
+        fake_collider = _fake_tool_node("demo_echo")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"demo_echo": fake_collider},
+            mcp_catalog=mcp_catalog,
+        )
+        with pytest.raises(ValueError, match="colliding tool name"):
+            factory.build(
+                _definition(tools=("demo_echo", "mcp/demo/echo")),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
+    def test_mcp_nodes_carry_original_topics(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        """The wired MCP node advertises ``demo_echo`` to the LLM but routes
+        on the original-name topics — the agent↔bridge wire contract."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        worker = factory.build(
+            _definition(tools=("mcp/demo/echo",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        node = next(
+            t for t in worker._nodes[0].tools if t.tool_schema.name == "demo_echo"
+        )
+        assert node.subscribe_topics == ["mcp.demo.echo.input"]
+        assert node.publish_topic == "mcp.demo.echo.output"
 
 
 def _router_definition(

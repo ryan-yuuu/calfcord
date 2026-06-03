@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
+from calfcord.mcp.selector import is_mcp_selector
 
 if TYPE_CHECKING:
     # Type-checking-only import; avoids the same package-init cycle that
@@ -101,6 +102,13 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
     with no consumer and time out). The router fan-out's per-call
     roster (``router.roster.build_router_temp_instructions``) is the
     intentional place for the router-visible agent list.
+
+    ``mcp/...`` selectors are **stripped** from each entry's ``tools``:
+    the phonebook advertises an agent's A2A-relevant *builtin* capabilities
+    to peer deployments, and MCP tools are not A2A peers (they are
+    request/response endpoints the bridge hosts, not agents another agent
+    can ``private_chat``). A spec whose ``tools`` is ``None`` ("all
+    builtins") stays ``None``.
     """
     return [
         PhonebookEntry(
@@ -108,12 +116,26 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
             display_name=spec.display_name,
             avatar_url=spec.avatar_url,
             description=spec.description,
-            tools=spec.tools,
+            tools=_builtin_tools_only(spec.tools),
             history_turns=spec.history_turns,
         )
         for spec in registry.all()
         if spec.role != "router"
     ]
+
+
+def _builtin_tools_only(tools: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Drop ``mcp/...`` selectors, keeping only bare builtin tool names.
+
+    ``None`` (the "all builtins" default-resolution sentinel) passes through
+    unchanged — it carries no selectors to strip and its meaning is "every
+    registered builtin", which the phonebook preserves verbatim. A concrete
+    tuple is filtered to its builtin names (MCP tools aren't A2A peers, so
+    downstream consumers of the phonebook never need to see them).
+    """
+    if tools is None:
+        return None
+    return tuple(t for t in tools if not is_mcp_selector(t))
 
 
 def format_roster_lines(entries: Iterable[PhonebookEntry]) -> str:

@@ -33,13 +33,13 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
 from typing import Any
 
 from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.discord.sender import DiscordSender
@@ -142,46 +142,13 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
 async def _run_worker(worker: Worker) -> None:
     """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
 
-    Mirrors :func:`calfcord.agents.runner._run_worker` so the
-    shutdown behavior is consistent across runners.
+    Delegates to the shared :func:`calfcord._worker_runtime.run_worker_until_signal`
+    so the shutdown contract (signal-driven drain plus the
+    "clean return without a signal is a crash" supervisor invariant) is
+    defined in exactly one place across runners. Kept as a thin local
+    wrapper because existing tests reference ``_run_worker`` by name.
     """
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    worker_task = asyncio.create_task(worker.run())
-    stop_task = asyncio.create_task(stop.wait())
-    worker_exc: BaseException | None = None
-    try:
-        await asyncio.wait(
-            {worker_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if worker_task.done() and not stop_task.done():
-            worker_exc = worker_task.exception()
-            if worker_exc is not None:
-                logger.error("worker crashed during runtime; exiting non-zero", exc_info=worker_exc)
-            else:
-                # A clean return from ``worker.run()`` without a shutdown
-                # signal is unexpected. Treat as a crash so supervisors
-                # configured for ``Restart=on-failure`` restart us —
-                # without this, the process exits 0 and the supervisor
-                # leaves us down.
-                worker_exc = RuntimeError(
-                    "worker.run() returned unexpectedly without a shutdown signal"
-                )
-                logger.error("%s; exiting non-zero", worker_exc)
-        else:
-            logger.info("shutdown signal received, draining tools worker")
-    finally:
-        for t in (worker_task, stop_task):
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(worker_task, stop_task, return_exceptions=True)
-
-    if worker_exc is not None:
-        raise worker_exc
+    await run_worker_until_signal(worker, drain_label="tools worker")
 
 
 async def _amain() -> None:

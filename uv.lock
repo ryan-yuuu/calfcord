@@ -538,7 +538,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "authlib" },
-    { name = "calfkit" },
+    { name = "calfkit", extra = ["mcp-codegen"] },
     { name = "discord-py" },
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
@@ -559,7 +559,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", specifier = "~=0.3.1" },
+    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.3.6" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
     { name = "openhands-tools", specifier = ">=1.23.1" },
@@ -578,7 +578,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.3.1"
+version = "0.3.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -587,6 +587,7 @@ dependencies = [
     { name = "genai-prices" },
     { name = "griffe" },
     { name = "httpx" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
@@ -596,9 +597,14 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/78/d0/3d697e63d27c702773e749511fb99fecd2dd2d8020b8512131cb6545ef21/calfkit-0.3.1.tar.gz", hash = "sha256:7ae518996651cac6733803e39eec24ba7bec77c3c5cb984c3dc283e3fbd33383", size = 549332, upload-time = "2026-05-19T05:12:08.567Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/60/0bfe6ad55b67e453281c4869693b02557b914b7eea8aa664af51934326db/calfkit-0.3.6.tar.gz", hash = "sha256:da164046e8087721badfcc9565e2964489b11f3c728621742a9f2a9ed0962b17", size = 700731, upload-time = "2026-06-02T22:03:58.898Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/2b/b7b5e8f3cb9a9b20e58707fe5410c245234ba15507274ab1e6bcfde68220/calfkit-0.3.1-py3-none-any.whl", hash = "sha256:7da26001b6836fceb88bb7a5cda910381bac8ef8edd5ce58695b17af5c3698a2", size = 571427, upload-time = "2026-05-19T05:12:06.81Z" },
+    { url = "https://files.pythonhosted.org/packages/64/a5/2acc246e1de59da5f4348b3f9b4145dce3665b8fbb61b6325c84d7014cb0/calfkit-0.3.6-py3-none-any.whl", hash = "sha256:f8b08e8bc2f1d5d1138d2e9f052f03c757c6267b06357a86df85771e53a8f7f7", size = 629603, upload-time = "2026-06-02T22:03:56.979Z" },
+]
+
+[package.optional-dependencies]
+mcp-codegen = [
+    { name = "typer" },
 ]
 
 [[package]]

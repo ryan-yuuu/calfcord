@@ -81,8 +81,10 @@ provider: anthropic
 model: claude-sonnet-4-5
 
 # ----------------------------------------------------------------------------
-# Tools (optional). Each name resolves against TOOL_REGISTRY at boot —
-# unknown names fail fast with a "known tools: ..." error.
+# Tools (optional). Each entry resolves at boot — builtin names against
+# TOOL_REGISTRY, `mcp/...` selectors against the committed MCP catalog.
+# Unknown builtins, unknown servers/tools, and malformed selectors all fail
+# fast with an error listing the valid alternatives.
 # ----------------------------------------------------------------------------
 
 # Available builtins (see src/calfcord/tools/builtin/ for source):
@@ -98,14 +100,32 @@ model: claude-sonnet-4-5
 #   - todo_view      view the agent's task list
 #   - todo_write     replace the agent's task list
 #
+# MCP-server tools (see docs/mcp-tools.md for the full architecture). Mix
+# `mcp/...` selectors into this SAME list alongside builtin names. Two forms:
+#   - mcp/<server>          ALL tools advertised by that MCP server.
+#   - mcp/<server>/<tool>   ONE specific tool. `<tool>` is the raw MCP tool
+#                           name and MAY contain hyphens (e.g. mcp/gmail/list-labels).
+# Whichever form you use, the agent's LLM sees each selected tool under the
+# flattened name `<server>_<tool>` (e.g. `gmail_search`, `gmail_list_labels`).
+# Builtin names are unchanged. The agent process only advertises the MCP tool
+# SCHEMA and dispatches calls over Kafka — it never opens an MCP connection
+# and holds no MCP credentials; the separate calfkit-mcp bridge does that.
+#
 # Semantics of the `tools:` line:
-#   - omitted entirely  → agent gets EVERY registered builtin (the loader
-#                         expands the default). Convenient, but means a new
-#                         agent ships with shell/write_file/edit_file access
-#                         to the shared workspace — narrow the list if the
-#                         agent takes input from untrusted users.
+#   - omitted entirely  → agent gets EVERY registered builtin and NO MCP
+#                         tools. Convenient, but means a new agent ships with
+#                         shell/write_file/edit_file access to the shared
+#                         workspace — narrow the list if the agent takes input
+#                         from untrusted users.
 #   - tools: []         → agent gets NO tools (text-only).
-#   - tools: [a, b]     → exactly those tools.
+#   - tools: [a, b]     → exactly those entries (builtins and/or mcp/...).
+#
+# KNOWN LIMITATION: there is no "all builtins PLUS some MCP tools" shorthand.
+# The default expansion (omitting `tools:`) is builtins-only; adding an
+# `mcp/...` selector requires an explicit list, which turns off the
+# builtin default. To get both, list the builtins you want explicitly
+# alongside the `mcp/...` selectors, e.g.:
+#   tools: [shell, read_file, write_file, grep, mcp/gmail/search]
 #
 # Filesystem/shell tools share one workspace on the calfkit-tools host
 # (CALFCORD_WORKSPACE_DIR, default state/workspace/). Every agent that
@@ -174,7 +194,8 @@ memory: false
 # user-authored agent should be. "router" is reserved for the singleton
 # built-in routing agent, constructed in code from a bundled router.md
 # (not loaded from this directory). Wiring a second router trips a registry
-# boot error. Leave this unset.
+# boot error. Leave this unset. (Routers declare NO tools at all, so no
+# builtin names and no `mcp/...` selectors ever appear on a router.)
 #
 # publish_topic: reserved for routers (declares the Kafka topic their
 # structured output is published to). The validator REJECTS an assistant
