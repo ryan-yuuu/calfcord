@@ -18,6 +18,11 @@ For up-to-date documentation see:
 
 In approximate chronological order (oldest first):
 
+- [`discord-org-design.md`](./discord-org-design.md) — the foundational vision
+  the rest of these descend from: running a personal life or company as an
+  organization of AI agents inside a Discord server (user-as-CEO,
+  agents-as-employees, channels-as-Kafka-topics), with the org chart as the
+  architecture.
 - [`discord-topic-bridge-plan.md`](./discord-topic-bridge-plan.md) — the original
   bridge design: per-channel Kafka topics, Discord-event normalization, and
   the persona-webhook outbox.

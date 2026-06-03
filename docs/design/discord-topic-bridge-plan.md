@@ -1,7 +1,7 @@
 # Discord ↔ Topic Bridge — Implementation Plan
 
 The transport-and-routing layer between the Discord server and the Calfkit
-topic substrate. See [`discord-org-design.md`](../../discord-org-design.md) for
+topic substrate. See [`discord-org-design.md`](./discord-org-design.md) for
 the surrounding multi-agent organization design; this document covers only the
 bridge.
 
