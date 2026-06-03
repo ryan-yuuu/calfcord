@@ -72,7 +72,7 @@ from dotenv import load_dotenv
 
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
-from calfcord.agents.loader import load_agents_dir
+from calfcord.agents.loader import load_agent_targets, load_agents_dir
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 
 # NOTE: ``calfcord.control_plane.*`` modules are NOT imported
@@ -138,7 +138,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "started on a single shared Worker in this process."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "-t", "--target",
+        action="append",
+        default=None,
+        metavar="PATH",
+        dest="targets",
+        help=(
+            "Path to an agent .md file OR a directory of agent .md files. "
+            "Repeatable: pass -t/--target several times to deploy multiple "
+            "files and/or directories together. A directory is scanned with the "
+            "usual skip rules (dotfiles and *.template.md ignored); an "
+            "explicitly named file is loaded literally. Mutually exclusive with "
+            "the positional agent name; when given, overrides CALFKIT_AGENTS_DIR."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.targets and args.agent is not None:
+        parser.error(
+            "argument agent: not allowed with --target — pass either a single "
+            "agent name (resolved within CALFKIT_AGENTS_DIR) or one-or-more "
+            "--target paths, not both"
+        )
+    return args
 
 
 def _resolve_definition(agent_name: str, agents_dir: Path) -> AgentDefinition:
@@ -277,28 +299,52 @@ async def _resolve_agent_specs(
     agent_name: str | None,
     agents_dir: Path,
     state_dir: Path,
+    *,
+    targets: list[Path] | None = None,
 ) -> list[AgentSpec]:
     """Resolve which agents to run and bootstrap each one's state.
 
-    Single-agent mode (``agent_name`` set): returns a list of length 1.
-    Bootstrap failure surfaces as a raised :class:`BootstrapError`
+    Three modes, selected by precedence (``targets`` wins, then
+    ``agent_name``, then the directory scan):
+
+    Targets mode (``targets`` non-empty): returns one entry per agent
+    resolved from the explicit ``--target`` file/directory paths via
+    :func:`load_agent_targets` (which de-duplicates by ``agent_id``).
+    Like all-agents mode, per-agent bootstrap failures are **aggregated**
+    rather than fail-fast. Target-resolution errors (missing path, neither
+    file nor directory, malformed ``.md``, duplicate ``agent_id``) are
+    converted to :class:`BootstrapError` for a clean exit.
+
+    Single-agent mode (``agent_name`` set, no targets): returns a list of
+    length 1. Bootstrap failure surfaces as a raised :class:`BootstrapError`
     immediately (fail-fast) with the underlying per-agent message
     unwrapped — operators invoking ``calfkit-agent <name>`` see the same
     actionable error they did before the all-mode change.
 
-    All-agents mode (``agent_name`` is ``None``): returns one entry per
-    ``agents/*.md`` file. Per-agent bootstrap failures are **aggregated**
-    so the caller sees every misconfigured agent in a single error
-    message rather than re-running N times. ``agents_dir`` errors
+    All-agents mode (no targets, ``agent_name`` is ``None``): returns one
+    entry per ``agents/*.md`` file. Per-agent bootstrap failures are
+    **aggregated** so the caller sees every misconfigured agent in a single
+    error message rather than re-running N times. ``agents_dir`` errors
     (missing, not-a-directory, malformed ``.md``) are converted to
     :class:`BootstrapError` for the same clean-exit reason.
 
     Raises:
         BootstrapError: if a named agent is unknown, the agents directory
-            cannot be loaded, or one-or-more agents fail to bootstrap.
+            or ``--target`` paths cannot be loaded, or one-or-more agents
+            fail to bootstrap.
     """
-    if agent_name is not None:
+    if targets:
+        try:
+            definitions = load_agent_targets(targets)
+        except (FileNotFoundError, NotADirectoryError, ValueError) as e:
+            raise BootstrapError(f"failed to load --target paths: {e}") from e
+        if not definitions:
+            joined = ", ".join(str(t) for t in targets)
+            raise BootstrapError(f"no agent definitions found in --target paths: {joined}")
+        fail_fast = False
+    elif agent_name is not None:
         definitions = [_resolve_definition(agent_name, agents_dir)]
+        fail_fast = True
     else:
         try:
             definitions = load_agents_dir(agents_dir)
@@ -306,6 +352,7 @@ async def _resolve_agent_specs(
             raise BootstrapError(f"failed to load {agents_dir}: {e}") from e
         if not definitions:
             raise BootstrapError(f"no agent definitions found in {agents_dir}")
+        fail_fast = False
 
     specs: list[AgentSpec] = []
     failures: list[tuple[str, str]] = []
@@ -314,7 +361,7 @@ async def _resolve_agent_specs(
         try:
             state = await _load_or_bootstrap_state(store, definition.agent_id)
         except BootstrapError as e:
-            if agent_name is not None:
+            if fail_fast:
                 # Single-mode: let the per-agent message propagate
                 # unwrapped so operators see the same actionable error
                 # they did before all-mode existed.
@@ -495,7 +542,8 @@ async def _amain(args: argparse.Namespace) -> None:
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
     state_dir = Path(os.getenv(_STATE_DIR_ENV, _STATE_DIR_DEFAULT))
 
-    specs = await _resolve_agent_specs(args.agent, agents_dir, state_dir)
+    targets = [Path(t) for t in args.targets] if args.targets else None
+    specs = await _resolve_agent_specs(args.agent, agents_dir, state_dir, targets=targets)
     await _prewarm_codex_if_needed(specs)
 
     settings = DiscordSettings()  # type: ignore[call-arg]

@@ -276,6 +276,35 @@ class TestParseArgs:
         args = _parse_args(["echo"])
         assert args.agent == "echo"
 
+    def test_single_target_short_flag(self) -> None:
+        """``-t`` accumulates into ``targets`` and leaves the positional None."""
+        args = _parse_args(["-t", "a.md"])
+        assert args.targets == ["a.md"]
+        assert args.agent is None
+
+    def test_target_long_flag(self) -> None:
+        args = _parse_args(["--target", "a.md"])
+        assert args.targets == ["a.md"]
+        assert args.agent is None
+
+    def test_repeated_target_accumulates(self) -> None:
+        """``action="append"`` collects every ``-t``/``--target`` in order."""
+        args = _parse_args(["-t", "a.md", "--target", "dir", "-t", "b.md"])
+        assert args.targets == ["a.md", "dir", "b.md"]
+        assert args.agent is None
+
+    def test_no_target_defaults_to_none(self) -> None:
+        """Without ``-t``, ``targets`` is None (not an empty list) so the
+        precedence check in _resolve_agent_specs falls through cleanly."""
+        args = _parse_args([])
+        assert args.targets is None
+
+    def test_target_and_positional_are_mutually_exclusive(self) -> None:
+        """Passing both a positional name and ``-t`` is a usage error.
+        ``parser.error`` raises SystemExit(2)."""
+        with pytest.raises(SystemExit):
+            _parse_args(["foo", "-t", "a.md"])
+
 
 class TestResolveAgentSpecs:
     """``_resolve_agent_specs`` is the unified entry point for both runner modes.
@@ -481,6 +510,122 @@ class TestResolveAgentSpecs:
         (agents_dir / "broken.md").write_text("---\nname: mismatch\n---\nbody\n")
         with pytest.raises(BootstrapError, match="failed to load"):
             await _resolve_agent_specs(None, agents_dir, state_dir)
+
+    async def test_targets_file_yields_one_spec(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A single file target resolves to exactly that agent's spec."""
+        _write_agent_md(agents_dir, "echo")
+        _write_agent_md(agents_dir, "scribe")
+        monkeypatch.setenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", "100")
+
+        specs = await _resolve_agent_specs(
+            None, agents_dir, state_dir, targets=[agents_dir / "echo.md"],
+        )
+
+        assert len(specs) == 1
+        assert specs[0][0].agent_id == "echo"
+
+    async def test_targets_directory_matches_all_mode(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A directory target behaves like all-mode: every agent, sorted."""
+        _write_agent_md(agents_dir, "scribe")
+        _write_agent_md(agents_dir, "echo")
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.delenv("CALFKIT_AGENT_SCRIBE_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "100")
+
+        specs = await _resolve_agent_specs(
+            None, agents_dir, state_dir, targets=[agents_dir],
+        )
+
+        assert [d.agent_id for d, _, _ in specs] == ["echo", "scribe"]
+        assert all(s.channels == [100] for _, s, _ in specs)
+
+    async def test_targets_mode_aggregates_bootstrap_failures(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Targets mode is NOT fail-fast: multiple misconfigured agents are
+        collected into one aggregated error, like all-mode."""
+        _write_agent_md(agents_dir, "echo")
+        _write_agent_md(agents_dir, "scribe")
+        monkeypatch.delenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.delenv("CALFKIT_AGENT_SCRIBE_BOOTSTRAP_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_DEFAULT_CHANNEL_ID", raising=False)
+
+        with pytest.raises(BootstrapError) as exc_info:
+            await _resolve_agent_specs(
+                None,
+                agents_dir,
+                state_dir,
+                targets=[agents_dir / "echo.md", agents_dir / "scribe.md"],
+            )
+
+        msg = str(exc_info.value)
+        assert "2 agent(s)" in msg
+        assert "echo" in msg
+        assert "scribe" in msg
+
+    async def test_targets_missing_path_raises_bootstrap_error(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+    ) -> None:
+        """A nonexistent target surfaces as a clean BootstrapError."""
+        with pytest.raises(BootstrapError, match="failed to load --target paths"):
+            await _resolve_agent_specs(
+                None, agents_dir, state_dir, targets=[agents_dir / "ghost.md"],
+            )
+
+    async def test_targets_duplicate_agent_id_raises_bootstrap_error(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Targeting the same agent via a file and its parent dir collides on
+        agent_id; load_agent_targets raises ValueError, wrapped as
+        BootstrapError naming the offending agent_id."""
+        _write_agent_md(agents_dir, "echo")
+        monkeypatch.setenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", "100")
+        with pytest.raises(BootstrapError) as exc_info:
+            await _resolve_agent_specs(
+                None,
+                agents_dir,
+                state_dir,
+                targets=[agents_dir / "echo.md", agents_dir],
+            )
+        msg = str(exc_info.value)
+        assert "duplicate agent_id" in msg
+        assert "echo" in msg
+
+    async def test_targets_take_precedence_over_positional_name(
+        self,
+        agents_dir: Path,
+        state_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Defense-in-depth: even if both arrive (argparse normally blocks
+        this), targets win the precedence ladder over a positional name."""
+        _write_agent_md(agents_dir, "echo")
+        _write_agent_md(agents_dir, "scribe")
+        monkeypatch.setenv("CALFKIT_AGENT_ECHO_BOOTSTRAP_CHANNELS", "100")
+
+        specs = await _resolve_agent_specs(
+            "scribe", agents_dir, state_dir, targets=[agents_dir / "echo.md"],
+        )
+
+        assert [d.agent_id for d, _, _ in specs] == ["echo"]
 
 
 class TestPrewarmCodexIfNeeded:

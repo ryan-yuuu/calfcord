@@ -49,6 +49,20 @@ def _resolve_default_tools(definition: AgentDefinition) -> AgentDefinition:
     return definition.model_copy(update={"tools": tuple(sorted(TOOL_REGISTRY))})
 
 
+def _load_one(path: Path) -> AgentDefinition:
+    """Parse one agent .md file and normalize its tools default.
+
+    Single source of truth for turning one file into a live
+    ``AgentDefinition``. Both the directory scan (:func:`load_agents_dir`)
+    and explicit file targeting (:func:`load_agent_targets`) route through
+    here, so a given file yields an identical definition regardless of how
+    it was selected — crucially the ``tools: omitted → all`` expansion
+    (:func:`_resolve_default_tools`) is always applied. See
+    :attr:`AgentDefinition.tools` for the sentinel semantics.
+    """
+    return _resolve_default_tools(parse_agent_md(path))
+
+
 def load_agents_dir(path: Path) -> list[AgentDefinition]:
     """Scan ``path`` for ``*.md`` files and parse each into an :class:`AgentDefinition`.
 
@@ -70,6 +84,64 @@ def load_agents_dir(path: Path) -> list[AgentDefinition]:
     md_files = sorted(
         p for p in path.glob("*.md") if not p.name.startswith(".") and not p.name.endswith(".template.md")
     )
-    definitions = [_resolve_default_tools(parse_agent_md(p)) for p in md_files]
+    definitions = [_load_one(p) for p in md_files]
     logger.info("loaded %d agent definition(s) from %s", len(definitions), path)
+    return definitions
+
+
+def load_agent_targets(targets: list[Path]) -> list[AgentDefinition]:
+    """Resolve a mix of file and directory paths into ``AgentDefinition``s.
+
+    Each target is classified by the filesystem:
+
+    * **directory** — scanned via :func:`load_agents_dir` (skips dotfiles
+      and ``*.template.md``, applies tools normalization).
+    * **regular file** — loaded literally via :func:`_load_one`. Explicitly
+      naming a file BYPASSES the directory skip filters: pointing at
+      ``agents/foo.template.md`` is an unambiguous request to run it, so it
+      is parsed rather than silently dropped (``parse_agent_md`` still
+      validates frontmatter, including its ``stem == name`` check).
+
+    The combined set is de-duplicated by ``agent_id``: targeting the same
+    agent twice (e.g. a file plus the directory that contains it) is a hard
+    error, not silent last-wins — two live agents sharing an ``agent_id``
+    would collide on slash command, state-file path, and Kafka identity.
+
+    Returns definitions sorted by ``agent_id`` for deterministic ordering.
+
+    Raises:
+        FileNotFoundError: if any target path does not exist.
+        ValueError: if a target is neither a file nor a directory, if any
+            file fails to parse/validate, or if two targets resolve to the
+            same ``agent_id``.
+    """
+    definitions: list[AgentDefinition] = []
+    # agent_id -> source paths that produced it, in encounter order. Used
+    # both to detect cross-target collisions and to build a helpful error.
+    provenance: dict[str, list[Path]] = {}
+
+    for target in targets:
+        if not target.exists():
+            raise FileNotFoundError(f"agent target does not exist: {target}")
+        if target.is_dir():
+            for definition in load_agents_dir(target):
+                definitions.append(definition)
+                provenance.setdefault(definition.agent_id, []).append(target)
+        elif target.is_file():
+            definition = _load_one(target)
+            definitions.append(definition)
+            provenance.setdefault(definition.agent_id, []).append(target)
+        else:
+            raise ValueError(f"agent target is neither a file nor a directory: {target}")
+
+    duplicates = {aid: paths for aid, paths in provenance.items() if len(paths) > 1}
+    if duplicates:
+        lines = "\n".join(
+            f"  - {aid}: {', '.join(str(p) for p in paths)}"
+            for aid, paths in sorted(duplicates.items())
+        )
+        raise ValueError(f"duplicate agent_id across --target paths:\n{lines}")
+
+    definitions.sort(key=lambda d: d.agent_id)
+    logger.info("loaded %d agent definition(s) from %d target(s)", len(definitions), len(targets))
     return definitions
