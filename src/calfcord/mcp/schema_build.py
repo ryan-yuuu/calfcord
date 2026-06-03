@@ -126,25 +126,25 @@ def _group_selected_tools(
     # server -> set of original tool names (set dedupes bare+explicit overlap)
     selected: dict[str, set[str]] = {}
     for entry in selectors:
-        server, tool = parse_mcp_selector(entry)
-        if server not in catalog:
+        sel = parse_mcp_selector(entry)
+        if sel.server not in catalog:
             raise ValueError(
                 f"MCP selector {entry!r} references unknown server "
-                f"{server!r}; known servers: {sorted(catalog)}"
+                f"{sel.server!r}; known servers: {sorted(catalog)}"
             )
-        available = {t.name for t in catalog[server]}
-        bucket = selected.setdefault(server, set())
-        if tool is None:
+        available = {t.name for t in catalog[sel.server]}
+        bucket = selected.setdefault(sel.server, set())
+        if sel.selects_all_tools:
             # Bare server: select every tool the server publishes.
             bucket.update(available)
         else:
-            if tool not in available:
+            if sel.tool not in available:
                 raise ValueError(
                     f"MCP selector {entry!r} references unknown tool "
-                    f"{tool!r} on server {server!r}; available tools: "
+                    f"{sel.tool!r} on server {sel.server!r}; available tools: "
                     f"{sorted(available)}"
                 )
-            bucket.add(tool)
+            bucket.add(sel.tool)
     return {server: sorted(names) for server, names in selected.items()}
 
 

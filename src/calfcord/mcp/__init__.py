@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from calfcord.mcp.selector import (
     MCP_SELECTOR_PREFIX,
+    McpSelector,
     is_mcp_selector,
     is_valid_server_name,
     parse_mcp_selector,
@@ -56,6 +57,7 @@ from calfcord.mcp.selector import (
 
 __all__ = [
     "MCP_SELECTOR_PREFIX",
+    "McpSelector",
     "is_mcp_selector",
     "is_valid_server_name",
     "parse_mcp_selector",

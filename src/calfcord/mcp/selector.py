@@ -56,6 +56,7 @@ Design choices
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 MCP_SELECTOR_PREFIX = "mcp/"
 """The literal prefix that marks a ``tools:`` entry as an MCP selector
@@ -119,7 +120,30 @@ def is_mcp_selector(entry: str) -> bool:
     return entry.startswith(MCP_SELECTOR_PREFIX)
 
 
-def parse_mcp_selector(entry: str) -> tuple[str, str | None]:
+class McpSelector(NamedTuple):
+    """A parsed ``mcp/...`` selector: a server plus an optional single tool.
+
+    ``tool is None`` means "all tools of ``server``" (the bare ``mcp/<server>``
+    form); a concrete ``tool`` selects exactly one (``mcp/<server>/<tool>``).
+    Prefer reading that distinction through :attr:`selects_all_tools` over
+    re-checking ``tool is None`` at each call site.
+
+    As a :class:`~typing.NamedTuple` it stays backward compatible with the
+    previous ``(server, tool)`` return: positional unpacking
+    (``server, tool = parse_mcp_selector(...)``) and tuple equality
+    (``== ("gmail", "search")``) both still hold.
+    """
+
+    server: str
+    tool: str | None
+
+    @property
+    def selects_all_tools(self) -> bool:
+        """Whether this selector expands to every tool of :attr:`server`."""
+        return self.tool is None
+
+
+def parse_mcp_selector(entry: str) -> McpSelector:
     """Decompose an MCP selector into ``(server, tool_or_none)``.
 
     Examples::
@@ -135,8 +159,10 @@ def parse_mcp_selector(entry: str) -> tuple[str, str | None]:
             :data:`MCP_SELECTOR_PREFIX`.
 
     Returns:
-        A ``(server, tool)`` tuple where ``tool`` is ``None`` for the
-        bare-server form and the original tool name otherwise.
+        An :class:`McpSelector` (a ``(server, tool)`` NamedTuple) where
+        ``tool`` is ``None`` for the bare-server form and the original tool
+        name otherwise. It unpacks and compares as the plain ``(server,
+        tool)`` tuple it replaced, so existing callers are unaffected.
 
     Raises:
         ValueError: When ``entry`` does not start with the ``mcp/``
@@ -186,7 +212,7 @@ def parse_mcp_selector(entry: str) -> tuple[str, str | None]:
                 f"must match {_TOOL_NAME_REGEX.pattern}"
             )
 
-    return server, tool
+    return McpSelector(server, tool)
 
 
 def validate_mcp_selector(entry: str) -> None:

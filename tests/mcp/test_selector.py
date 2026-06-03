@@ -13,11 +13,37 @@ import pytest
 
 from calfcord.mcp.selector import (
     MCP_SELECTOR_PREFIX,
+    McpSelector,
     is_mcp_selector,
     is_valid_server_name,
     parse_mcp_selector,
     validate_mcp_selector,
 )
+
+
+class TestMcpSelectorType:
+    """The parsed result is an :class:`McpSelector` NamedTuple — named-field
+    access plus a ``selects_all_tools`` predicate — while staying compatible
+    with the legacy ``(server, tool)`` tuple (equality and unpacking)."""
+
+    def test_named_fields_and_predicate(self) -> None:
+        sel = parse_mcp_selector("mcp/gmail/search")
+        assert isinstance(sel, McpSelector)
+        assert sel.server == "gmail"
+        assert sel.tool == "search"
+        assert sel.selects_all_tools is False
+
+    def test_bare_server_selects_all(self) -> None:
+        sel = parse_mcp_selector("mcp/gmail")
+        assert sel.server == "gmail"
+        assert sel.tool is None
+        assert sel.selects_all_tools is True
+
+    def test_backward_compatible_with_tuple(self) -> None:
+        sel = parse_mcp_selector("mcp/gmail/search")
+        assert sel == ("gmail", "search")
+        server, tool = sel
+        assert (server, tool) == ("gmail", "search")
 
 
 class TestIsMcpSelector:
