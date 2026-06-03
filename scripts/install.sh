@@ -53,9 +53,13 @@ fi
 log()  { printf '%scalfcord%s %s\n' "$C_I" "$C_0" "$*" >&2; }
 warn() { printf '%scalfcord%s %s\n' "$C_W" "$C_0" "$*" >&2; }
 die()  { printf '%scalfcord error%s %s\n' "$C_E" "$C_0" "$*" >&2; exit 1; }
-trap 'die "install failed (line $LINENO)"' ERR
+trap 'die "install failed: $BASH_COMMAND"' ERR
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# True if this uv supports the flags the calfcord shim relies on (notably
+# `uv run --env-file`, a relatively recent addition).
+uv_supported() { "$1" run --help 2>/dev/null | grep -q -- '--env-file'; }
 
 require_bash() {
   [ -n "${BASH_VERSION:-}" ] || die "this installer needs bash; run: curl -fsSL <url> | bash"
@@ -87,6 +91,7 @@ resolve_sha() {
   case "$sha" in
     "" | *[!0-9a-f]*) die "could not resolve '$ref' to a commit (got: ${sha:0:60})" ;;
   esac
+  [ "${#sha}" -eq 40 ] || die "resolved '$ref' to a non-commit value (${#sha} chars): ${sha:0:60}"
   printf '%s' "$sha"
 }
 
@@ -97,7 +102,9 @@ extract_source() {
   mkdir -p "$dest"
   if have curl; then
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-      curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$url" | tar -xz -C "$dest" --strip-components=1
+      # --location-trusted keeps the auth header across the github.com -> codeload
+      # redirect (curl drops it by default), so private repos / mirrors work.
+      curl -fsS --location-trusted -H "Authorization: Bearer $GITHUB_TOKEN" "$url" | tar -xz -C "$dest" --strip-components=1
     else
       curl -fsSL "$url" | tar -xz -C "$dest" --strip-components=1
     fi
@@ -114,11 +121,15 @@ extract_source() {
 ensure_uv() {
   if [ -x "$BIN_DIR/uv" ]; then
     UV="$BIN_DIR/uv"
-  elif have uv; then
+  elif have uv && uv_supported "$(command -v uv)"; then
     UV="$(command -v uv)"
     log "using existing uv at $UV"
   else
-    log "installing uv (no system Python or git required)..."
+    if have uv; then
+      warn "system uv lacks 'uv run --env-file'; installing a private uv under $BIN_DIR"
+    else
+      log "installing uv (no system Python or git required)..."
+    fi
     mkdir -p "$BIN_DIR"
     if have curl; then
       curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$BIN_DIR" sh
@@ -182,6 +193,7 @@ CALFCORD_COMMIT=$sha
 CALFCORD_INSTALLED_AT=$now
 CALFCORD_REPO=$REPO
 CALFCORD_REF=$REF
+CALFCORD_PREVIOUS_COMMIT=$PREVIOUS_SHA
 EOF
 }
 
@@ -208,6 +220,7 @@ write_shims() {
 # `calfcord self ...` handles install management. New entry points need no
 # changes here.
 set -euo pipefail
+trap 'rc=$?; printf "calfcord: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
 
@@ -248,6 +261,7 @@ CALF_SHIM
 #!/usr/bin/env bash
 # calfcord self-management: version | status | update | rollback | set-broker
 set -euo pipefail
+trap 'rc=$?; printf "calfcord self: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
 VERSION_FILE="$H/version"
@@ -255,8 +269,21 @@ VERSIONS_DIR="$H/versions"
 CURRENT_LINK="$H/current"
 CONFIG_ENV="$H/config/.env"
 
-# shellcheck disable=SC1090
-{ [ -f "$VERSION_FILE" ] && . "$VERSION_FILE"; } || true
+# Read the install marker by PARSING, never sourcing: a ref/repo containing
+# shell metacharacters must be treated as data, not executed.
+meta() {
+  local _line
+  [ -f "$VERSION_FILE" ] || return 0
+  while IFS= read -r _line; do
+    case "$_line" in "$1="*) printf '%s' "${_line#*=}"; return 0 ;; esac
+  done < "$VERSION_FILE"
+  return 0
+}
+CALFCORD_COMMIT="$(meta CALFCORD_COMMIT)"
+CALFCORD_INSTALLED_AT="$(meta CALFCORD_INSTALLED_AT)"
+CALFCORD_REPO="$(meta CALFCORD_REPO)"
+CALFCORD_REF="$(meta CALFCORD_REF)"
+CALFCORD_PREVIOUS_COMMIT="$(meta CALFCORD_PREVIOUS_COMMIT)"
 REPO="${CALFCORD_REPO:-ryan-yuuu/calfcord}"
 
 short() { printf '%s' "${1:0:12}"; }
@@ -293,7 +320,10 @@ case "$cmd" in
     have="${CALFCORD_COMMIT:-}"
     [ -n "$have" ] || { echo "no install metadata; re-run the installer" >&2; exit 1; }
     ref="${CALFCORD_REF:-main}"
-    latest="$(remote_sha "$ref")"
+    if ! latest="$(remote_sha "$ref")" || [ -z "$latest" ]; then
+      echo "calfcord self: could not reach GitHub to check for updates (offline or rate-limited)" >&2
+      exit 1
+    fi
     if [ "$have" = "$latest" ]; then
       echo "up to date ($(short "$have") on $ref)"
     else
@@ -303,24 +333,29 @@ case "$cmd" in
     ;;
   update)
     url="https://raw.githubusercontent.com/$REPO/main/scripts/install.sh"
-    echo "calfcord: updating from $REPO (main)..." >&2
+    ref="${CALFCORD_REF:-main}"
+    echo "calfcord: updating $REPO ($ref)..." >&2
+    tmp="$(mktemp)"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$url" | bash
+      curl -fsSL "$url" -o "$tmp" || { echo "calfcord self: update download failed" >&2; rm -f "$tmp"; exit 1; }
     else
-      wget -qO- "$url" | bash
+      wget -qO- "$url" > "$tmp" || { echo "calfcord self: update download failed" >&2; rm -f "$tmp"; exit 1; }
     fi
+    [ -s "$tmp" ] || { echo "calfcord self: downloaded installer is empty" >&2; rm -f "$tmp"; exit 1; }
+    # Re-run for the SAME ref/repo/home this install used, not a hardcoded main.
+    rc=0
+    CALFCORD_REPO="$REPO" CALFCORD_REF="$ref" CALFCORD_HOME="$H" bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    [ "$rc" -eq 0 ] || exit "$rc"
     ;;
   rollback)
     [ -L "$CURRENT_LINK" ] || { echo "no active install to roll back" >&2; exit 1; }
     cur_sha="$(basename "$(readlink "$CURRENT_LINK")")"
-    prev=""
-    for d in "$VERSIONS_DIR"/*/; do
-      [ -d "$d" ] || continue
-      b="$(basename "$d")"
-      [ "$b" = "$cur_sha" ] && continue
-      prev="$b"; break
-    done
-    [ -n "$prev" ] || { echo "no previous version to roll back to" >&2; exit 1; }
+    prev="${CALFCORD_PREVIOUS_COMMIT:-}"
+    if [ -z "$prev" ] || [ ! -f "$VERSIONS_DIR/$prev/.calfcord-ok" ]; then
+      echo "calfcord self: no valid previous version to roll back to" >&2
+      exit 1
+    fi
     ln -sfn "$VERSIONS_DIR/$prev" "$CURRENT_LINK"
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cat > "$VERSION_FILE" <<EOF
@@ -328,16 +363,21 @@ CALFCORD_COMMIT=$prev
 CALFCORD_INSTALLED_AT=$now
 CALFCORD_REPO=$REPO
 CALFCORD_REF=${CALFCORD_REF:-main}
+CALFCORD_PREVIOUS_COMMIT=$cur_sha
 EOF
     echo "rolled back to $(short "$prev")"
     ;;
   set-broker)
     val="${1:-}"
-    [ -n "$val" ] || { echo "usage: calfcord self set-broker <kafka-url>" >&2; exit 2; }
+    [ -n "$val" ] || { echo "usage: calfcord self set-broker <host:port>" >&2; exit 2; }
     mkdir -p "$(dirname "$CONFIG_ENV")"
     [ -f "$CONFIG_ENV" ] || { : > "$CONFIG_ENV"; chmod 600 "$CONFIG_ENV"; }
     tmp="$(mktemp)"
-    grep -v '^CALF_HOST_URL=' "$CONFIG_ENV" > "$tmp" 2>/dev/null || true
+    rc=0
+    grep -v '^CALF_HOST_URL=' "$CONFIG_ENV" > "$tmp" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      echo "calfcord self: failed to read $CONFIG_ENV (grep exit $rc)" >&2; rm -f "$tmp"; exit 1
+    fi
     echo "CALF_HOST_URL=$val" >> "$tmp"
     mv "$tmp" "$CONFIG_ENV"
     chmod 600 "$CONFIG_ENV"
@@ -350,7 +390,7 @@ calfcord self <command>:
   status               compare installed commit to the latest on the branch
   update               re-run the installer to upgrade to the latest
   rollback             switch back to the previous installed version
-  set-broker <url>     set CALF_HOST_URL in the config .env
+  set-broker <host:port>  set CALF_HOST_URL (Kafka bootstrap) in the config .env
 USAGE
     [ -z "$cmd" ] && exit 2
     exit 0
@@ -371,7 +411,7 @@ ensure_path() {
   esac
   local rc added=0
   local line='export PATH="'"$SHIM_DIR"':$PATH"'
-  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     [ -e "$rc" ] || continue
     if ! grep -qs "$SHIM_DIR" "$rc"; then
       printf '\n# calfcord\n%s\n' "$line" >> "$rc"

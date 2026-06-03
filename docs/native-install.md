@@ -1,117 +1,79 @@
-# Native install (no Docker)
+# Install & run calfcord (no Docker)
 
-A one-line installer for running calfcord directly on a box — no Docker, and no
-prerequisites on the box itself (it bootstraps everything it needs, including
-Python). This is the native alternative to the
-[Docker quick start](../README.md#quick-start) and the slim per-role images in
-[`distributed-deployment.md`](distributed-deployment.md); the
-[process model](architecture.md#running-modes) and the Kafka contract are
-identical either way.
+Run calfcord directly on a machine with a single command — no Docker, and
+nothing to set up first. This is the native alternative to the
+[Docker quick start](../README.md#quick-start); if you just want to try calfcord
+on one machine, Docker is simpler. Reach for this when you don't want Docker or
+you're running calfcord across several machines.
 
-## Install
+## 1. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
 ```
 
-The box needs only `curl` (or `wget`) and `bash` — no system Python and no
-`git`. The installer:
+You don't need Python, Docker, or git installed first — the installer handles
+everything. When it finishes, **restart your shell** (or open a new terminal)
+so the `calfcord` command is on your `PATH`.
 
-1. bootstraps [`uv`](https://docs.astral.sh/uv/) privately under `~/.calfcord`;
-2. pins `main` to an exact commit and downloads that source as a tarball (no
-   `git clone`);
-3. builds an isolated, locked environment with `uv sync --locked --no-dev`
-   (`uv` provisions Python 3.12 automatically);
-4. installs a `calfcord` command into `~/.calfcord/shims` and adds it to your
-   `PATH`.
+## 2. Configure
 
-Restart your shell (or `source` your profile) afterwards so `calfcord` is on
-your `PATH`. Everything lives under `~/.calfcord`; to uninstall, `rm -rf
-~/.calfcord` and remove the `# calfcord` line from your shell profile.
-
-## The `calfcord` command
-
-`calfcord` is a thin wrapper around `uv run` inside the pinned environment, so
-**any** calfcord process is just `calfcord <process> [args]`:
+calfcord reads its settings from `~/.calfcord/config/.env`. Open it and fill in
+your Discord bot token and an LLM API key (the file is commented; the full list
+is in [`configuration.md`](configuration.md)):
 
 ```bash
-calfcord calfkit-bridge        # the Discord gateway
-calfcord calfkit-agent         # run the agents
-calfcord calfkit-router        # ambient routing
-calfcord calfkit-tools         # tools + the agent-to-agent channel
+$EDITOR ~/.calfcord/config/.env
 ```
 
-New entry points work automatically — the wrapper forwards everything to `uv
-run`, so it never needs updating as calfcord grows.
-
-## Configure
-
-The installer seeds `~/.calfcord/config/.env` from the project's
-[`.env.example`](../.env.example) (mode `600`), and every command run through
-`calfcord` loads it automatically. Fill in the values that box's role needs
-(full reference: [`configuration.md`](configuration.md)) — at minimum the
-broker URL that ties the swarm together:
+calfcord's processes talk to each other through a **Kafka broker**, so you need
+one running (e.g. a Redpanda or Kafka instance) and must point calfcord at it.
+Use the same broker on every machine:
 
 ```bash
-calfcord self set-broker my-broker.internal:9092   # writes CALF_HOST_URL
-# ...or edit ~/.calfcord/config/.env directly
+calfcord self set-broker my-broker-host:9092
 ```
 
-> **Where config lives.** Secrets and connection settings (`DISCORD_*`,
-> `CALF_HOST_URL`, API keys) belong in this `.env` — that is the 12-factor home
-> for per-box, per-deploy values, and it is how calfcord's processes read
-> config. Structured, versioned definitions (your agents and tools) stay in
-> their Markdown / YAML-frontmatter files. Don't promote secrets into YAML.
+## 3. Run
 
-## Deploy across hosts
-
-calfcord's processes are location-transparent over Kafka (see
-[`distributed-deployment.md`](distributed-deployment.md)). Install calfcord on
-each box, point them all at the same broker, and run the role each box owns:
+Start any calfcord process with `calfcord <name>`:
 
 ```bash
-# box A — bridge + router + agents
-calfcord self set-broker broker.tailnet:9092
-calfcord calfkit-bridge &
-calfcord calfkit-router &
-calfcord calfkit-agent &
-
-# box B — remote tools only, same broker
-calfcord self set-broker broker.tailnet:9092
-calfcord calfkit-tools
+calfcord calfkit-bridge     # the Discord gateway
+calfcord calfkit-agent      # runs your agents
+calfcord calfkit-router     # routes un-mentioned messages
+calfcord calfkit-tools      # tools + the agent-to-agent channel
 ```
 
-(For real deployments, run each role under a supervisor — `systemd`, `tmux`, or
-similar — rather than `&`.) Because every box installs the same pinned commit,
-they all run a schema/topic-compatible build, which matters since the processes
-only agree via Kafka topics derived from committed schemas.
+On one machine you'll usually run all four. To spread them across machines,
+install calfcord on each, point them all at the **same** broker (step 2), and
+run only the processes that machine should handle — see
+[`distributed-deployment.md`](distributed-deployment.md).
 
-## Stay current
+## 4. Keep it up to date
 
 ```bash
-calfcord self version     # installed commit + timestamp
-calfcord self status      # compare against the latest commit on main
-calfcord self update      # upgrade to the latest main (keeps the previous build)
-calfcord self rollback    # switch back to the previous build
+calfcord self version     # show what's installed
+calfcord self status      # check whether a newer version is available
+calfcord self update      # upgrade to the latest
+calfcord self rollback    # undo the last update
 ```
 
-`update` and `rollback` swap an internal `current` symlink between built
-versions, so switching is atomic and the previous version stays on disk for an
-instant rollback.
-
-## Pinning a specific version
-
-To install a specific branch or commit instead of the latest `main`:
+## Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | CALFCORD_REF=<branch-or-sha> bash
+rm -rf ~/.calfcord
 ```
 
-Other knobs: `CALFCORD_HOME` (install root), `CALFCORD_REPO` (install a fork),
-`GITHUB_TOKEN` (lift GitHub API rate limits / use a private mirror).
+Then remove the `# calfcord` line the installer added to your shell profile
+(`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile`).
 
-## This is for deploying, not developing
+---
 
-The installer gives you a frozen, pinned build. To hack on calfcord, use the
-normal `uv` project workflow instead — `git clone`, `uv sync`, `uv run …` — so
-your edits are live. See [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+**Pin a version:** set `CALFCORD_REF` to a branch or commit before installing,
+e.g. `… | CALFCORD_REF=v1.2 bash`. `calfcord self update` then stays on that
+ref.
+
+**Want to develop calfcord?** Don't use the installer — clone the repo and use
+the standard `uv` workflow so your edits are live. See
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).
