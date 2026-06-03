@@ -77,7 +77,8 @@ This starts the four processes plus a Calfkit broker — five containers in tota
 
 A reply appears from the agent. You're live. 🎉
 
-> Prefer running without Docker, or splitting processes across hosts? See
+> Prefer running without Docker, or splitting processes across hosts? Use the
+> [one-line native installer](./docs/installation.md), and see
 > [running modes](./docs/architecture.md#running-modes).
 
 ## Define your own agent
@@ -148,6 +149,7 @@ complete environment-variable reference.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
+- [`docs/installation.md`](./docs/installation.md) — install & run calfcord natively (no Docker), the `calfcord` CLI, updates/rollback.
 - [`docs/design/`](./docs/design/) — historical design notes.
 
 ## Contributing

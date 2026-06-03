@@ -1,0 +1,62 @@
+# Lints and tests the native installer (scripts/install.sh) and the shell
+# shims it generates. Separate from ci.yml (which covers the Python package)
+# because the installer is plain shell with its own toolchain and platform
+# matrix.
+#
+# Path-filtered so it only runs when the installer or its tests change.
+#
+# Security: no untrusted github.event.* input is used in any run: step (only
+# the built-in RUNNER_OS), so the workflow-injection patterns do not apply.
+
+name: installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/install.sh'
+      - 'scripts/tests/**'
+      - '.github/workflows/installer.yml'
+  pull_request:
+    paths:
+      - 'scripts/install.sh'
+      - 'scripts/tests/**'
+      - '.github/workflows/installer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint installer + generated shims
+        run: bash scripts/tests/lint.sh
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # macOS ships bash 3.2 at /bin/bash; run the suite under it there to
+      # guard the installer's bash-3.2 compatibility contract (the harness runs
+      # the shims under the same interpreter). Linux uses its modern bash.
+      - name: Run installer tests
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            /bin/bash scripts/tests/test_installer.sh
+          else
+            bash scripts/tests/test_installer.sh
+          fi
