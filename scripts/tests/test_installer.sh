@@ -75,7 +75,9 @@ v="$(grep '^CALF_HOST_URL=' "$TD/config/.env")"
 k="$(grep -c '^DISCORD_BOT_TOKEN=keep-me$' "$TD/config/.env")"
 { [ "$n" -eq 1 ] && [ "$v" = "CALF_HOST_URL=kafka-b:19092" ] && [ "$k" -eq 1 ]; } \
   && pass "set-broker replace + preserve" || fail "set-broker (n=$n v=$v k=$k)"
-perm="$(stat -f '%Lp' "$TD/config/.env" 2>/dev/null || stat -c '%a' "$TD/config/.env")"
+# GNU stat (-c) first; on macOS it errors cleanly (no stdout) and we fall back
+# to BSD stat (-f). The reverse order pollutes the value on Linux.
+perm="$(stat -c '%a' "$TD/config/.env" 2>/dev/null || stat -f '%Lp' "$TD/config/.env" 2>/dev/null)"
 [ "$perm" = "600" ] && pass "config perms 600" || fail "perms ($perm)"
 
 # rollback: uses recorded previous, flips, rewrites marker with swapped previous
