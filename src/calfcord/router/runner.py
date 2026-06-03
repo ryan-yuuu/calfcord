@@ -42,12 +42,12 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
 
 from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.router.definition import ROUTER_AGENT_ID, build_router_definition
@@ -88,50 +88,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def _run_worker(worker: Worker) -> None:
     """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
 
-    Mirrors :func:`calfcord.tools.runner._run_worker`
-    exactly; the agents-runner variant
-    (:func:`calfcord.agents.runner._run_worker`) is
-    similar but takes an additional ``num_agents`` kwarg for its
-    boot logging. Extract the shared core to a
-    ``calfcord/runtime.py`` module when the
-    near-duplication starts itching — see follow-up tracked in
-    ``docs/ambient-routing.md``'s "Out of scope" section.
+    Delegates to the shared :func:`calfcord._worker_runtime.run_worker_until_signal`
+    so the shutdown contract (signal-driven drain plus the
+    "clean return without a signal is a crash" supervisor invariant) is
+    defined in exactly one place across runners — mirroring
+    :func:`calfcord.tools.runner._run_worker`. Kept as a thin local wrapper
+    because ``tests/router/test_runner.py`` references ``_run_worker`` by name.
     """
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    worker_task = asyncio.create_task(worker.run())
-    stop_task = asyncio.create_task(stop.wait())
-    worker_exc: BaseException | None = None
-    try:
-        await asyncio.wait(
-            {worker_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if worker_task.done() and not stop_task.done():
-            worker_exc = worker_task.exception()
-            if worker_exc is not None:
-                logger.error("worker crashed during runtime; exiting non-zero", exc_info=worker_exc)
-            else:
-                # Same "clean return without signal" handling as
-                # tools/runner.py: synthesize a RuntimeError so
-                # supervisors restart us.
-                worker_exc = RuntimeError(
-                    "worker.run() returned unexpectedly without a shutdown signal"
-                )
-                logger.error("%s; exiting non-zero", worker_exc)
-        else:
-            logger.info("shutdown signal received, draining router worker")
-    finally:
-        for t in (worker_task, stop_task):
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(worker_task, stop_task, return_exceptions=True)
-
-    if worker_exc is not None:
-        raise worker_exc
+    await run_worker_until_signal(worker, drain_label="router worker")
 
 
 def _build_router_nodes(

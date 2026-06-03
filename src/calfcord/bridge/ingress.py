@@ -248,24 +248,42 @@ class BridgeIngress:
         for spec in registry.all():
             resolve_provider(spec, default_provider=default_provider)
         # Symmetrically validate that every `tools:` reference in every
-        # .md resolves against TOOL_REGISTRY. The agent runner runs the
-        # same check at its own boot, but the bridge usually starts first
-        # in dev — surfacing typos here gives operators a single
+        # .md resolves — bare builtin names against TOOL_REGISTRY, and
+        # ``mcp/...`` selectors against the committed MCP catalog. The agent
+        # runner runs the same check at its own boot, but the bridge usually
+        # starts first in dev — surfacing typos here gives operators a single
         # actionable error before any agent process boots.
-        # Lazy import: `calfcord.tools` transitively imports
-        # bridge code, so a top-level import would cycle at boot.
+        # Lazy imports: `calfcord.tools` transitively imports bridge code, so
+        # a top-level import would cycle at boot. The three `calfcord.mcp`
+        # modules are agent-safe (selector is a pure leaf; catalog and
+        # schema_build carry no transport / no `$VAR` secrets) and crucially
+        # must NOT pull in `calfcord.mcp.servers` (the credentialed,
+        # bridge-only registry) — they don't.
+        from calfcord.mcp.catalog import MCP_CATALOG
+        from calfcord.mcp.schema_build import validate_mcp_references
+        from calfcord.mcp.selector import is_mcp_selector
         from calfcord.tools import TOOL_REGISTRY
 
         unknown: list[tuple[str, str]] = []
+        # Collect (agent_id, selector) pairs so an invalid MCP reference can
+        # be reported with the declaring agent named, like the builtin path.
+        mcp_refs: list[tuple[str, str]] = []
         for spec in registry.all():
             # ``spec.tools is None`` means "all registered tools" — the
             # loader's default-resolution sentinel for assistants whose
             # frontmatter omits the ``tools:`` line. Nothing to validate
-            # (every name comes from TOOL_REGISTRY by construction).
+            # (every name comes from TOOL_REGISTRY by construction; MCP
+            # tools are never part of the "all" default).
             if spec.tools is None:
                 continue
             for tool_name in spec.tools:
-                if tool_name not in TOOL_REGISTRY:
+                if is_mcp_selector(tool_name):
+                    # Shape was already validated at parse time
+                    # (``AgentDefinition._validate_tools``); here we only
+                    # check that the referenced server/tool exists in the
+                    # catalog the bridge hosts.
+                    mcp_refs.append((spec.agent_id, tool_name))
+                elif tool_name not in TOOL_REGISTRY:
                     unknown.append((spec.agent_id, tool_name))
         if unknown:
             known = sorted(TOOL_REGISTRY)
@@ -274,6 +292,21 @@ class BridgeIngress:
                 f"bridge boot found unknown tool references: {entries}; "
                 f"known tools: {known or '<none registered>'}"
             )
+        if mcp_refs:
+            # ``validate_mcp_references`` raises on the first unknown
+            # server/tool with a message that lists the valid alternatives.
+            # Re-raise with the declaring-agent context so an operator can
+            # find the offending ``.md`` without grepping.
+            try:
+                validate_mcp_references([selector for _aid, selector in mcp_refs], MCP_CATALOG)
+            except ValueError as e:
+                declarers = ", ".join(
+                    f"{aid!r} declares {selector!r}" for aid, selector in mcp_refs
+                )
+                raise ValueError(
+                    f"bridge boot found invalid MCP tool reference(s): {e} "
+                    f"(declared by: {declarers})"
+                ) from e
 
     def set_fetcher(self, fetcher: ChannelHistoryFetcher) -> None:
         """Inject the channel-history fetcher.

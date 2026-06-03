@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
 from calfcord.discord.avatar import dicebear_avatar_url
+from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.
@@ -227,6 +228,61 @@ class AgentDefinition(BaseModel):
     def _validate_system_prompt(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("system_prompt (markdown body) must be non-empty")
+        return v
+
+    @field_validator("tools")
+    @classmethod
+    def _validate_tools(cls, v: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        """Syntactically validate every ``mcp/...`` selector in ``tools``.
+
+        This is a *shape* check only, deliberately split from existence
+        resolution:
+
+        * Entries that look like MCP selectors (``mcp/...`` —
+          :func:`~calfcord.mcp.selector.is_mcp_selector`) are run through
+          :func:`~calfcord.mcp.selector.validate_mcp_selector` so a malformed
+          selector (``mcp/``, ``mcp/a/b/c``, a bad charset, …) fails here, at
+          parse time, with the offending entry named verbatim.
+        * Bare names (anything *not* starting with ``mcp/`` — ``shell``,
+          ``calendar``, …) pass through **untouched**. Whether a bare name
+          actually resolves to a registered builtin is checked later, by
+          :meth:`AgentFactory._resolve_tools` against ``TOOL_REGISTRY``;
+          rejecting arbitrary bare names here would couple this leaf schema
+          to the tool registry and break code-built definitions that name
+          tools the local registry doesn't (yet) hold.
+
+        Whether the *referenced* MCP server/tool exists in the catalog is
+        likewise deferred (to :func:`~calfcord.mcp.schema_build.resolve_mcp_selectors`
+        / :func:`~calfcord.mcp.schema_build.validate_mcp_references`): the
+        catalog is a deployment concern and importing it here would build it
+        as a side effect of parsing a frontmatter string. This validator
+        stays a pure-syntax leaf.
+
+        All malformed selectors are collected into a *single*
+        :class:`ValueError` so a multi-typo ``.md`` surfaces every bad entry
+        in one parse, matching the aggregate-and-report style the factory and
+        bridge use for unknown builtin names.
+
+        Note: this runs *before* :meth:`_validate_router_constraints`, which
+        rejects any router that declares non-empty tools — so a router with
+        an ``mcp/...`` tool is still rejected (by the router constraint),
+        regardless of whether the selector itself is well-formed.
+        """
+        if v is None:
+            return v
+        bad: list[str] = []
+        for entry in v:
+            if not is_mcp_selector(entry):
+                # Bare builtin name — existence validated later in the factory.
+                continue
+            try:
+                validate_mcp_selector(entry)
+            except ValueError as exc:
+                bad.append(f"{entry!r}: {exc}")
+        if bad:
+            raise ValueError(
+                "malformed MCP tool selector(s) in tools: " + "; ".join(bad)
+            )
         return v
 
     @model_validator(mode="after")

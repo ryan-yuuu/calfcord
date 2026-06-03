@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "authlib>=1.7.2",
-    "calfkit~=0.3.1",
+    "calfkit[mcp-codegen]~=0.3.6",
     "discord-py>=2.7.1",
     "openhands-sdk>=1.23.1",
     "openhands-tools>=1.23.1",
@@ -22,6 +22,7 @@ dependencies = [
 calfkit-bridge = "calfcord.bridge.gateway:main"
 calfkit-agent = "calfcord.agents.runner:main"
 calfkit-tools = "calfcord.tools.runner:main"
+calfkit-mcp = "calfcord.mcp.runner:main"
 calfkit-router = "calfcord.router.runner:main"
 calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-package-tools = "calfcord.packaging.cli_tools:main"

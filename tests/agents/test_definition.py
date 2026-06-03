@@ -88,6 +88,65 @@ class TestAgentDefinitionValidators:
         d = _make_definition(tools=["calendar", "email"])
         assert d.tools == ("calendar", "email")
 
+    @pytest.mark.parametrize(
+        "selector",
+        ["mcp/gmail", "mcp/gmail/search", "mcp/demo/get-x", "mcp/srv_2"],
+    )
+    def test_valid_mcp_selectors_accepted(self, selector: str) -> None:
+        """Well-formed ``mcp/...`` selectors pass the syntactic field
+        validator and are preserved verbatim in ``tools``."""
+        d = _make_definition(tools=[selector])
+        assert d.tools == (selector,)
+
+    def test_mixed_builtins_and_mcp_selectors_accepted(self) -> None:
+        """A flat ``tools:`` list may freely mix bare builtin names and
+        ``mcp/...`` selectors — both kinds coexist on the same agent."""
+        d = _make_definition(tools=["shell", "mcp/gmail", "mcp/calendar/list-events"])
+        assert d.tools == ("shell", "mcp/gmail", "mcp/calendar/list-events")
+
+    @pytest.mark.parametrize(
+        "bad_selector",
+        ["mcp/", "mcp/a/b/c", "mcp//x", "mcp/Gmail", "mcp/gmail/"],
+    )
+    def test_malformed_mcp_selectors_rejected(self, bad_selector: str) -> None:
+        """A malformed selector fails at parse time; the message names the
+        offending entry so an operator can fix the exact frontmatter line."""
+        with pytest.raises(ValidationError, match="malformed MCP tool selector"):
+            _make_definition(tools=[bad_selector])
+
+    def test_arbitrary_bare_names_still_accepted(self) -> None:
+        """Bare (non-``mcp/``) names pass through untouched — existence is
+        validated later by the factory, not here. This guards the
+        ``["calendar", "email"]`` case that
+        :meth:`test_tools_coerced_to_tuple` relies on."""
+        d = _make_definition(tools=["calendar", "totally_made_up_tool"])
+        assert d.tools == ("calendar", "totally_made_up_tool")
+
+    def test_multiple_malformed_selectors_aggregated(self) -> None:
+        """Several malformed selectors surface in one ValueError so a
+        multi-typo ``.md`` is fixed in a single parse."""
+        with pytest.raises(ValidationError) as excinfo:
+            _make_definition(tools=["mcp/", "mcp/a/b/c"])
+        msg = str(excinfo.value)
+        assert "'mcp/'" in msg
+        assert "'mcp/a/b/c'" in msg
+
+    def test_router_with_mcp_tool_rejected(self) -> None:
+        """A ``role="router"`` definition that declares an ``mcp/...`` tool is
+        rejected by the router constraint (routers must declare no tools) —
+        even though the selector itself is well-formed. Confirms the
+        model-validator runs after the syntactic field validator."""
+        with pytest.raises(ValidationError, match="must declare no tools"):
+            AgentDefinition(
+                agent_id="_router",
+                display_name="Router",
+                description="Internal routing agent",
+                role="router",
+                publish_topic="routing.decisions",
+                tools=["mcp/gmail"],
+                system_prompt="route",
+            )
+
     def test_provider_defaults_to_none(self) -> None:
         """Unset provider lets the factory's default win at build time."""
         d = _make_definition()
