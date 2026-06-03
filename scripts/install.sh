@@ -61,6 +61,25 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # `uv run --env-file`, a relatively recent addition).
 uv_supported() { "$1" run --help 2>/dev/null | grep -q -- '--env-file'; }
 
+# fetch URL [accept] -> response body on stdout. Single home for the
+# curl/wget + optional-auth matrix. For curl, --location-trusted keeps the
+# auth header across GitHub's github.com -> codeload redirect (private mirrors).
+fetch() {
+  local url="$1" accept="${2:-}"
+  local acc=() auth=()
+  if have curl; then
+    if [ -n "$accept" ]; then acc=(-H "Accept: $accept"); fi
+    if [ -n "${GITHUB_TOKEN:-}" ]; then auth=(--location-trusted -H "Authorization: Bearer $GITHUB_TOKEN"); fi
+    curl -fsSL "${acc[@]+"${acc[@]}"}" "${auth[@]+"${auth[@]}"}" "$url"
+  elif have wget; then
+    if [ -n "$accept" ]; then acc=(--header="Accept: $accept"); fi
+    if [ -n "${GITHUB_TOKEN:-}" ]; then auth=(--header="Authorization: Bearer $GITHUB_TOKEN"); fi
+    wget -qO- "${acc[@]+"${acc[@]}"}" "${auth[@]+"${auth[@]}"}" "$url"
+  else
+    die "need curl or wget"
+  fi
+}
+
 require_bash() {
   [ -n "${BASH_VERSION:-}" ] || die "this installer needs bash; run: curl -fsSL <url> | bash"
 }
@@ -71,23 +90,8 @@ require_bash() {
 # via the application/vnd.github.sha media type).
 resolve_sha() {
   local ref="$1"
-  local url="$API_BASE/commits/$ref"
   local sha
-  if have curl; then
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      sha="$(curl -fsSL -H 'Accept: application/vnd.github.sha' -H "Authorization: Bearer $GITHUB_TOKEN" "$url")"
-    else
-      sha="$(curl -fsSL -H 'Accept: application/vnd.github.sha' "$url")"
-    fi
-  elif have wget; then
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      sha="$(wget -qO- --header='Accept: application/vnd.github.sha' --header="Authorization: Bearer $GITHUB_TOKEN" "$url")"
-    else
-      sha="$(wget -qO- --header='Accept: application/vnd.github.sha' "$url")"
-    fi
-  else
-    die "need curl or wget"
-  fi
+  sha="$(fetch "$API_BASE/commits/$ref" 'application/vnd.github.sha')"
   case "$sha" in
     "" | *[!0-9a-f]*) die "could not resolve '$ref' to a commit (got: ${sha:0:60})" ;;
   esac
@@ -98,23 +102,8 @@ resolve_sha() {
 # Stream the source tarball for a SHA into DEST, stripping the top-level dir.
 extract_source() {
   local sha="$1" dest="$2"
-  local url="$DL_BASE/archive/$sha.tar.gz"
   mkdir -p "$dest"
-  if have curl; then
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      # --location-trusted keeps the auth header across the github.com -> codeload
-      # redirect (curl drops it by default), so private repos / mirrors work.
-      curl -fsS --location-trusted -H "Authorization: Bearer $GITHUB_TOKEN" "$url" | tar -xz -C "$dest" --strip-components=1
-    else
-      curl -fsSL "$url" | tar -xz -C "$dest" --strip-components=1
-    fi
-  else
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      wget -qO- --header="Authorization: Bearer $GITHUB_TOKEN" "$url" | tar -xz -C "$dest" --strip-components=1
-    else
-      wget -qO- "$url" | tar -xz -C "$dest" --strip-components=1
-    fi
-  fi
+  fetch "$DL_BASE/archive/$sha.tar.gz" | tar -xz -C "$dest" --strip-components=1
 }
 
 # Bootstrap uv privately, or reuse an existing one.
@@ -220,6 +209,7 @@ write_shims() {
 # `calfcord self ...` handles install management. New entry points need no
 # changes here.
 set -euo pipefail
+# shellcheck disable=SC2154  # rc is assigned by rc=$? at the start of the trap body
 trap 'rc=$?; printf "calfcord: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
@@ -410,6 +400,9 @@ ensure_path() {
     *":$SHIM_DIR:"*) return 0 ;;
   esac
   local rc added=0
+  # The literal $PATH is intentional: it must be expanded by the shell at
+  # profile-load time, not now.
+  # shellcheck disable=SC2016
   local line='export PATH="'"$SHIM_DIR"':$PATH"'
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     [ -e "$rc" ] || continue

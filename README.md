@@ -84,7 +84,7 @@ containers in total. The first build takes a minute or two.
 A reply appears **under the agent's own persona**. You're live. 🎉
 
 > Prefer running without Docker, or splitting processes across hosts? Use the
-> [one-line native installer](./docs/native-install.md), and see
+> [one-line native installer](./docs/installation.md), and see
 > [running modes](./docs/architecture.md#running-modes).
 
 ## Define your own agent
@@ -168,7 +168,7 @@ Details and hardening → [`docs/security.md`](./docs/security.md).
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
-- [`docs/native-install.md`](./docs/native-install.md) — one-line native install (no Docker), the `calfcord` CLI, updates/rollback.
+- [`docs/installation.md`](./docs/installation.md) — install & run calfcord natively (no Docker), the `calfcord` CLI, updates/rollback.
 - [`docs/design/`](./docs/design/) — historical design notes.
 
 ## Contributing
