@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "grill-with-docs": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
+      "computedHash": "eb0e91e84277283dc2b23ed544399e53afd6b5287e5b6929f25fe8aa608e164b"
+    },
     "opensource-guide-coach": {
       "source": "xixu-me/skills",
       "sourceType": "github",
       "skillPath": "skills/opensource-guide-coach/SKILL.md",
       "computedHash": "71ed130d355df51a91940a28c313d09930876c3d70974fbb255a970c6a4dcbcc"
+    },
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "computedHash": "15a7b5e36383ebadb2dec5e586679e55e9663d292da418926b8da6fc0ef27d84"
+    },
+    "test-driven-development": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "skillPath": "skills/test-driven-development/SKILL.md",
+      "computedHash": "126f1ebf6ccd414f42544f6e83d8cc5adb089e1108eaffb7c400701e37eecd9f"
     }
   }
 }
