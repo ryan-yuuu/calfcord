@@ -217,10 +217,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-
-.claude/
-
-CLAUDE.md
+# Claude Code
+.claude/agents/
+.claude/agent-memory/
+.claude/worktrees/
+.claude/settings.local.json
+CLAUDE.local.md
 
 # Calfkit per-agent runtime state (channel subscriptions, etc.)
 state/
