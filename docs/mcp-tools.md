@@ -183,32 +183,48 @@ committed** as per-server Python modules under
 `src/calfcord/mcp/schemas/`. One module per server; the **module name
 equals the server name** (`schemas/gmail.py` → server `gmail`).
 
-Generate (or regenerate) a module with the `mcp codegen` subcommand. It
-connects to the server once, enumerates its tools, and writes the schema
-module:
+Generate (or regenerate) a module with **`calfcord-mcp-codegen`**. It
+connects to the server once, enumerates its tools, writes the module to the
+right place, and verifies it registers:
 
 ```bash
 # stdio server (launched as a subprocess):
-uv run calfkit mcp codegen gmail \
-  --command "npx -y @some-org/gmail-mcp-server" \
-  -o src/calfcord/mcp/schemas/gmail.py
+uv run calfcord-mcp-codegen gmail \
+  --command "npx -y @some-org/gmail-mcp-server"
 
 # Streamable HTTP server:
-uv run calfkit mcp codegen drive \
+uv run calfcord-mcp-codegen drive \
   --url https://mcp.example.com/drive \
-  --token "$DRIVE_MCP_TOKEN" \
-  -o src/calfcord/mcp/schemas/drive.py
+  --token "$DRIVE_MCP_TOKEN"
 ```
+
+There is **no `-o`**: the wrapper computes the output path
+(`src/calfcord/mcp/schemas/<server>.py`) from the server name, so the module
+always lands where discovery looks. It also validates the name against the
+selector grammar *before* connecting, keeps the generated class name and the
+filename in sync, and after writing re-runs discovery to confirm the server
+actually registered (warning if it didn't — an empty/stale module, or a
+digit-leading tool name).
 
 Codegen requires the `mcp-codegen` extra, which is already declared in
 `pyproject.toml` (`calfkit[mcp-codegen]`) — a plain `uv sync` pulls it in,
-no extra install step. The positional argument (`gmail`, `drive`) sets the
-**generated class name** inside the module — it does *not* drive
-resolution. The binding contract is the **`-o` filename**: discovery keys
-the catalog by the schema module's filename, so that filename must equal
-the `MCP_SERVERS` key (§5) and the `<server>` segment agents type in their
-selectors. Keep the positional matching the filename for consistency, but
-know that only the filename is load-bearing.
+no extra install step.
+
+Under the hood `calfcord-mcp-codegen` delegates to **`calfkit mcp codegen`**,
+forwarding every flag verbatim (so new calfkit codegen options work without a
+change here). Reach for the calfkit command directly only when you need to
+write somewhere other than the discovery directory — then *you* own the
+binding contract: the positional sets only the **generated class name**, and
+the **`-o` filename** is what's load-bearing (discovery keys the catalog by
+the module filename, which must equal the `MCP_SERVERS` key (§5) and the
+`<server>` segment agents type in their selectors), so the two can silently
+diverge.
+
+```bash
+uv run calfkit mcp codegen gmail \
+  --command "npx -y @some-org/gmail-mcp-server" \
+  -o src/calfcord/mcp/schemas/gmail.py
+```
 
 **Commit the generated module.** It is the contract the agent deployment
 reads at boot. A schema change (the upstream server added or renamed a
@@ -221,8 +237,9 @@ Because the committed schema can drift from the live server, codegen has a
 committed file, exiting non-zero on any difference (and writing nothing):
 
 ```bash
-# In CI — fails the build if schemas/gmail.py is stale:
-uv run calfkit mcp codegen gmail \
+# In CI — fails the build if schemas/gmail.py is stale (--check is
+# forwarded straight through to calfkit):
+uv run calfcord-mcp-codegen gmail \
   --command "npx -y @some-org/gmail-mcp-server" \
   --check
 ```
