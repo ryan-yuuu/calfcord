@@ -169,6 +169,68 @@ def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:
     assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
+# --------------------------------------------------------- shim subcommands ---
+
+# A fake ``uv`` that echoes the arguments it was exec'd with, so we can assert
+# how the shim translated the user's command line (e.g. ``init`` becoming
+# ``calfcord-cli init``). It strips the leading ``run --frozen ... --`` wrapper
+# the shim always adds and prints just the trailing user-program argv.
+_FAKE_UV_ECHO_ARGS = """#!/usr/bin/env bash
+seen=()
+take=0
+for a in "$@"; do
+  if [ "$take" -eq 1 ]; then seen+=("$a"); fi
+  if [ "$a" = "--" ]; then take=1; fi
+done
+printf 'ARGV=%s\\n' "${seen[*]}"
+"""
+
+
+def _run_shim_argv(home: Path, argv: list[str]) -> str:
+    """Invoke the shim with ``argv`` and return the user-program argv the fake uv saw."""
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    uv = home / "bin" / "uv"
+    uv.write_text(_FAKE_UV_ECHO_ARGS)
+    uv.chmod(0o755)
+    (home / "current").mkdir(exist_ok=True)
+    (home / "config").mkdir(exist_ok=True)
+    (home / "config" / ".env").write_text("")
+
+    env = {**os.environ, "CALFCORD_HOME": str(home)}
+    result = subprocess.run(
+        [str(home / "shims" / "calfcord"), *argv],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, f"shim failed: {result.stderr}"
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key == "ARGV":
+            return value
+    raise AssertionError(f"fake uv did not report ARGV; stdout was: {result.stdout!r}")
+
+
+def test_shim_dispatches_init_to_calfcord_cli(tmp_path: Path) -> None:
+    """``calfcord init`` must exec ``calfcord-cli init`` through the same `uv run`."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["init"]) == "calfcord-cli init"
+
+
+def test_shim_passes_runner_commands_through_unchanged(tmp_path: Path) -> None:
+    """A non-management command (e.g. a runner) is not rewritten by the dispatch."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["calfkit-bridge"]) == "calfkit-bridge"
+
+
+def test_shim_exports_calfcord_home(tmp_path: Path) -> None:
+    """The shim must export CALFCORD_HOME so calfcord-cli can locate config + agents."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    shim_text = (home / "shims" / "calfcord").read_text()
+    assert 'export CALFCORD_HOME="$H"' in shim_text
+
+
 @pytest.mark.skipif(not INSTALL_SH.exists(), reason="installer script missing")
 def test_install_sh_parses() -> None:
     """The outer script must stay syntactically valid (``bash -n``)."""

@@ -235,6 +235,7 @@ set -euo pipefail
 trap 'rc=$?; printf "calfcord: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
+export CALFCORD_HOME="$H"  # so calfcord-cli can locate config/.env and the agents dir
 
 if [ "${1:-}" = "self" ]; then
   shift
@@ -249,6 +250,7 @@ usage:
                                    calfcord calfkit-agent
                                    calfcord calfkit-router
                                    calfcord calfkit-tools
+  calfcord init                  guided first-run config (provider, Discord, broker)
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
   exit 2
@@ -278,6 +280,12 @@ _default_env() {  # name default
 _default_env CALFKIT_AGENTS_DIR     "$H/agents"
 _default_env CALFKIT_STATE_DIR      "$H/state/agents"
 _default_env CALFCORD_WORKSPACE_DIR "$PWD"
+
+# Management subcommands dispatch to the calfcord-cli argparse entry point,
+# exec'd through the SAME locked-venv `uv run` as the runners below.
+case "${1:-}" in
+  init) set -- calfcord-cli "$@" ;;
+esac
 
 if [ -f "$ENVF" ]; then
   exec "$UV" run --frozen --no-sync --project "$H/current" --env-file "$ENVF" -- "$@"
