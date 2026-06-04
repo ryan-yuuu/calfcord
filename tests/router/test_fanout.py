@@ -404,6 +404,30 @@ class TestHistoryForwarding:
         # No input history key → fan-out forwards deps.get("history", []).
         assert forwarded == []
 
+    async def test_synthesized_publish_deps_shape(
+        self, client: MagicMock, broker: MagicMock
+    ) -> None:
+        """The synthesized publish carries exactly ``{discord, history}``
+        — the wire plus the forwarded history. ``phonebook`` is
+        deliberately omitted (``fanout.py`` builds ``synth_deps`` without
+        it; the bridge's slash branch rebuilds deps from its own registry
+        on re-entry, so re-shipping the projection would be redundant).
+        Pin both halves so a regression that drops ``history`` or re-adds
+        ``phonebook`` to the synthesized hop is caught here — neither side
+        is asserted by the producer-side key guard in
+        ``test_ingress_router.py``."""
+        consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
+        await consumer.handler(
+            envelope=_envelope(
+                decision=RoutingDecision(agent_id="scribe", reasoning="m"),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        published_deps = client.invoke_node.await_args_list[0].kwargs["deps"]
+        assert set(published_deps) == {"discord", "history"}
+
 
 class TestRouterSelfFilter:
     async def test_skips_routers_own_id(

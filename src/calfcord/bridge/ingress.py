@@ -563,9 +563,9 @@ class BridgeIngress:
         #      same history, not slightly-different snapshots that
         #      each refetch would produce.
         #   3. Single REST call regardless of fan-out width — the
-        #      synthesized-in consumer hands the same envelope.history
-        #      to each chosen agent, so a fan-out to N agents costs
-        #      one fetch, not N.
+        #      synthesized-in consumer hands the same deps["history"]
+        #      records to each chosen agent, so a fan-out to N agents
+        #      costs one fetch, not N.
         # The alternative (lazy fetch at synth-in re-entry) loses all
         # three, and the wasted-fetch cost on silent-route decisions is
         # small enough that the consistency wins.

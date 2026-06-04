@@ -721,13 +721,16 @@ deps={"discord": <wire dict>, "phonebook": <phonebook list>, "history": <history
 ```
 
 and each consumer reads them back off `result.deps`, validating each
-against its domain model inline (the same idiom the gates and
-`private_chat` already use):
+against its domain model inline — the same `WireMessage.model_validate`
+idiom `private_chat` already uses (the gates read the same
+`deps["discord"]` key with lighter `isinstance` checks). Each read
+fail-closes on a missing/malformed key via `raise_routing_contract_error`;
+the bracket form below is shorthand for that guarded read:
 
 ```python
-wire = WireMessage.model_validate(result.deps["discord"])
-phonebook = phonebook_from_deps(result.deps["phonebook"])
-history = result.deps.get("history", [])
+wire = WireMessage.model_validate(result.deps.get("discord"))   # raises on missing/bad
+phonebook = phonebook_from_deps(result.deps.get("phonebook"))   # raises on missing/bad
+history = history_from_deps(result.deps.get("history", []))     # [] = "no history"
 ```
 
 This works because calfkit propagates the inbound producer's `deps`

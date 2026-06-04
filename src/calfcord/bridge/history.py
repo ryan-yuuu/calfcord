@@ -94,14 +94,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from calfcord.agents.identifier import AGENT_ID_PATTERN
 
 if TYPE_CHECKING:
-    # Top-level import would cycle: this module loads early in the
-    # ``bridge`` package init (via ``bridge.ingress``), while
-    # ``bridge.registry`` — which defines ``AgentRegistry`` and pulls in
-    # ``router.definition`` — loads later in the same init. Importing it
-    # here at runtime would re-enter a partially-initialized module.
-    # Lazy import via ``TYPE_CHECKING`` keeps the type hint without
-    # triggering the cycle — at runtime the ``from __future__ import
-    # annotations`` directive above keeps ``AgentRegistry`` as a string.
+    # ``AgentRegistry`` is needed only as a type hint. Keep it behind
+    # ``TYPE_CHECKING`` (paired with the ``from __future__ import
+    # annotations`` above, which keeps the hint a string at runtime) so
+    # this low-level module — loaded early in the ``bridge`` package init
+    # via ``bridge.gateway`` — does not hard-depend on ``bridge.registry``
+    # (which pulls in ``router.definition``). There is no hard runtime
+    # cycle today; the historical one ran through the now-deleted
+    # ``_compat.invoke`` shim. The lazy hint keeps the decoupling and
+    # keeps ``history.py`` importable standalone.
     from calfcord.bridge.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,30 @@ class HistoryRecord(BaseModel):
                 f"author_agent_id must match [a-z0-9_-]{{1,32}}, got {v!r}"
             )
         return v
+
+
+def history_from_deps(raw: object) -> tuple[HistoryRecord, ...]:
+    """Parse channel-history records out of a raw ``deps["history"]`` value.
+
+    Symmetric with :func:`~calfcord.agents.phonebook.phonebook_from_deps`:
+    the producer packs ``[r.model_dump(mode="json") for r in records]`` on
+    ``deps`` and the synthesized-in consumer validates them back into typed
+    records on read. An empty list is valid ("no history"). Returns a
+    ``tuple`` (not a ``list``) to match the immutable shape consumers pass
+    as :meth:`BridgeIngress.handle`'s ``prefetched_history``.
+
+    Raises:
+        ValueError: the value isn't a list (covers a non-iterable or
+            ``None`` payload).
+        pydantic.ValidationError: any record fails :class:`HistoryRecord`
+            validation. Callers catch both — ``(ValueError, ValidationError)``
+            — and wrap them in a fail-closed contract error, since the
+            bridge / fan-out is expected to forward well-formed history on
+            every publish.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"history must be a list, got {type(raw).__name__}")
+    return tuple(HistoryRecord.model_validate(item) for item in raw)
 
 
 class ChannelHistoryFetcher:

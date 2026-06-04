@@ -44,7 +44,7 @@ from calfkit.nodes.consumer import consumer
 from pydantic import ValidationError
 
 from calfcord.ambient_routing import raise_routing_contract_error
-from calfcord.bridge.history import HistoryRecord
+from calfcord.bridge.history import history_from_deps
 from calfcord.bridge.ingress import BridgeIngress
 from calfcord.bridge.wire import WireMessage
 from calfcord.topics import SYNTHESIZED_INGRESS_TOPIC
@@ -106,14 +106,13 @@ def build_synthesized_consumer(
 
         # The fan-out forwards channel history as an opaque JSON list
         # under ``deps["history"]``; validate it back into typed records
-        # for ``BridgeIngress.handle``. An absent key (rolling-deploy
-        # edge case) is fine — an empty tuple means "no history".
-        history_raw = deps.get("history", [])
+        # for ``BridgeIngress.handle`` via the same ``*_from_deps`` parser
+        # the phonebook uses. An absent key (rolling-deploy edge case) is
+        # fine — ``history_from_deps([])`` returns an empty tuple ("no
+        # history").
         try:
-            history = tuple(
-                HistoryRecord.model_validate(h) for h in history_raw
-            )
-        except (ValidationError, TypeError) as exc:
+            history = history_from_deps(deps.get("history", []))
+        except (ValueError, ValidationError) as exc:
             raise_routing_contract_error(
                 correlation_id=result.correlation_id,
                 site="synthesized-in",

@@ -25,16 +25,23 @@ import it, and keeping it free of any ``calfcord.bridge`` /
 ``calfcord.agents`` import avoids the package-init import cycle that the
 predecessor ``_compat`` shim had to work around with bottom-of-module
 imports. Consumers do their own domain-model validation inline (the
-same ``WireMessage.model_validate(ctx.deps["discord"])`` idiom the gates
-and ``private_chat`` already use).
+same ``WireMessage.model_validate(ctx.deps["discord"])`` idiom
+``private_chat`` already uses; the gates read the same ``deps["discord"]``
+key with lighter ``isinstance`` checks).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 logger = logging.getLogger(__name__)
+
+RoutingSite = Literal["fanout", "synthesized-in"]
+"""The two ambient-routing consumer sites that raise this contract error:
+the router's fan-out and the bridge's synthesized-in consumer. Modeled as
+a ``Literal`` (matching the codebase's ``WireMessage.kind`` / ``Provider``
+convention) so a mistyped site is a type error, not a slightly-wrong log."""
 
 
 class RoutingContractError(RuntimeError):
@@ -54,7 +61,7 @@ class RoutingContractError(RuntimeError):
         self,
         *,
         correlation_id: str,
-        site: str,  # "fanout" or "synthesized-in"
+        site: RoutingSite,
         reason: str,
         cause: Exception | None = None,
     ) -> None:
@@ -71,7 +78,7 @@ class RoutingContractError(RuntimeError):
 def raise_routing_contract_error(
     *,
     correlation_id: str,
-    site: str,
+    site: RoutingSite,
     reason: str,
     cause: Exception | None = None,
 ) -> NoReturn:
