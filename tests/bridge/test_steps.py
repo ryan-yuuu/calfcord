@@ -58,7 +58,6 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
-    Deps,
     SessionRunContext,
     WorkflowState,
 )
@@ -168,7 +167,7 @@ def _envelope(
         internal_workflow_state=WorkflowState(call_stack=call_stack),
         context=SessionRunContext(
             state=state,
-            deps=Deps(correlation_id=correlation_id, provided_deps={}),
+            deps={},
         ),
     )
 

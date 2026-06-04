@@ -16,13 +16,12 @@ Kind-branching:
   own ``agent_id``.
 * ``kind="message"`` (ambient — non-slash, non-@-mention text from a
   human): published to the router's ambient ingress
-  (``discord.ambient.in``) with the original wire packed into
-  ``state.metadata`` via
-  :func:`calfcord._compat.invoke.invoke_node_with_metadata`.
-  The router decides which assistants should respond and its fan-out
-  consumer republishes synthesized ``kind="slash"`` wires through
-  ``bridge.synthesized.in``, which loops back to this class's
-  :meth:`handle` via the bridge's synthesized-in consumer.
+  (``discord.ambient.in``) with the original wire, the phonebook, and
+  the channel history on ``deps``. The router's fan-out consumer reads
+  them back from ``result.deps`` (calfkit ≥ 0.4.0), decides which
+  assistants should respond, and republishes synthesized ``kind="slash"``
+  wires through ``bridge.synthesized.in``, which loops back to this
+  class's :meth:`handle` via the bridge's synthesized-in consumer.
 
 Two pieces of state cross the ingress→egress boundary:
 
@@ -68,10 +67,6 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit.client import Client, InvocationHandle
 
-from calfcord._compat.invoke import (
-    MetadataEnvelope,
-    invoke_node_with_metadata,
-)
 from calfcord.agents.definition import Provider
 from calfcord.agents.factory import DEFAULT_PROVIDER, resolve_provider
 from calfcord.agents.memory import memory_prompt_deps_for_registry
@@ -350,16 +345,16 @@ class BridgeIngress:
         slashes, parsed @-mentions, and the router's synthesized
         fan-out wires — go to the per-channel ingress topic. Ambient
         wires (``kind="message"``) go to the router's ambient ingress
-        with the wire packed into ``state.metadata`` so the router's
-        fan-out consumer can recover it.
+        with the wire packed onto ``deps`` so the router's
+        fan-out consumer can recover it from ``result.deps``.
 
         ``prefetched_history`` is populated only by the synthesized-in
         consumer (:mod:`calfcord.bridge.synthesized`) which
-        reads the history off the ``MetadataEnvelope`` and forwards it
+        reads the history off ``deps["history"]`` and forwards it
         here. This avoids a redundant per-target Discord fetch when one
         ambient publish fans out to multiple agents — the bridge made
-        a single fetch at ambient publish time, packed it into the
-        envelope, and the synthesized-in consumer hands the same raw
+        a single fetch at ambient publish time, packed it onto
+        ``deps``, and the synthesized-in consumer hands the same raw
         records to each target's invocation here. The per-agent POV
         projection happens locally in this method.
 
@@ -535,22 +530,15 @@ class BridgeIngress:
     ) -> InvocationHandle[Any]:
         """Publish an ambient wire to the router's ingress topic.
 
-        Uses :func:`invoke_node_with_metadata` to pack the original
-        wire into ``state.metadata`` — calfkit's stock
-        :meth:`Client.invoke_node` doesn't expose a ``metadata``
-        parameter, and the router's fan-out consumer (a stock
-        ``@consumer``) needs to recover the wire from ``NodeResult``
-        which doesn't expose ``deps``. The helper is documented in
-        :mod:`calfcord._compat.invoke` as a temporary
-        workaround until upstream calfkit exposes ``deps`` on
-        ``NodeResult`` (or accepts ``metadata=`` on ``invoke_node``).
-
-        The wire is ALSO included in ``deps={"discord": ...}`` so the
-        downstream synthesized-assistant chain (which goes through
-        :meth:`handle` again with ``kind="slash"``) sees it in the
-        usual place. This mirrors how slashes carry the wire in deps;
-        the synthesized-in consumer reuses :meth:`handle`'s slash
-        branch unchanged, and that branch reads from deps.
+        The original wire, the publisher's phonebook snapshot, and the
+        channel-history slice all ride on a single ``deps`` dict. The
+        router run carries those deps forward, so the fan-out consumer
+        reads them back from ``result.deps`` (calfkit ≥ 0.4.0 exposes
+        inbound producer deps on ``NodeResult.deps``). The wire under
+        ``deps["discord"]`` also mirrors how every other publish path
+        carries the wire — the synthesized-assistant chain that follows
+        re-enters :meth:`handle` with ``kind="slash"`` and reads the
+        wire from deps in the usual place.
 
         Operator-side health signal: we log INFO at every ambient
         publish. The synthesized-in consumer (in
@@ -558,14 +546,6 @@ class BridgeIngress:
         correlating those streams reveals a silent router. Per-reply
         WARN tracking is deferred for v1 (see module docstring).
         """
-        # ``wire_dict`` / ``phonebook_dict`` are kept as locals
-        # because the deps channel below carries the JSON-shaped
-        # projection (deps is a plain dict on the publish envelope,
-        # not a typed model). The MetadataEnvelope itself is built
-        # from the typed instances and pydantic handles the JSON dump
-        # at ``envelope.model_dump(mode="json")`` time — no duplicate
-        # serialization, but no conflation between the two channels
-        # either.
         wire_dict = wire.model_dump(mode="json")
         phonebook_dict = phonebook_to_deps(phonebook)
         temp_instructions = build_router_temp_instructions(phonebook)
@@ -622,23 +602,18 @@ class BridgeIngress:
             wire.channel_id,
             _AMBIENT_INGRESS_TOPIC,
         )
-        # MetadataEnvelope accepts typed instances directly — pydantic
-        # validates on construction (no-op for already-validated
-        # models) and serializes through to JSON via
-        # ``envelope.model_dump(mode="json")`` below. The wire shape on
-        # the Kafka envelope is identical to the pre-typed
-        # implementation.
         # Router POV is "outside observer" (no self-classification);
         # everything in the projected list is a ``ModelRequest``.
         router_history = project_history(records, self_agent_id=None)
         router_history_turns = self._router_history_turns()
         if router_history_turns < len(router_history):
             router_history = router_history[-router_history_turns:]
-        envelope = MetadataEnvelope(
-            wire=wire,
-            phonebook=tuple(phonebook),
-            history=tuple(records),
-        )
+        # The raw (unprojected) history rides on deps so each fan-out
+        # target can build its OWN POV projection at invocation time —
+        # the same records the router's ``message_history`` above is
+        # projected from, but shipped unprojected so a fan-out to N
+        # agents keeps N separable perspectives off one fetch.
+        history_dump = [r.model_dump(mode="json") for r in records]
         # Use a FRESH correlation_id (not ``wire.event_id``) for the
         # ambient publish. The router's reply lands on the discard
         # topic and is never looked up by event_id, and the fan-out
@@ -651,15 +626,14 @@ class BridgeIngress:
         # ``cancel()`` had popped the prior entry, causing
         # ``_ReplyDispatcher.expect`` to raise. A fresh uuid7
         # decouples this path from the wire's identity entirely.
-        return await invoke_node_with_metadata(
-            self._client,
+        return await self._client.invoke_node(
             user_prompt=wire.content,
             topic=_AMBIENT_INGRESS_TOPIC,
             reply_topic=_AMBIENT_REPLY_DISCARD_TOPIC,
-            metadata=envelope.model_dump(mode="json"),
             deps={
                 "discord": wire_dict,
                 "phonebook": phonebook_dict,
+                "history": history_dump,
             },
             temp_instructions=temp_instructions,
             message_history=router_history,
@@ -731,7 +705,7 @@ class BridgeIngress:
         * ``prefetched_history is not None`` — synthesized-in path. The
           ambient → router → fan-out chain has already fetched the
           channel history (eagerly, at ambient publish time) and packed
-          it into the :class:`MetadataEnvelope`. The synthesized-in
+          it onto ``deps["history"]``. The synthesized-in
           consumer hands those records here so we don't refetch once
           per fan-out target. An empty tuple is a legitimate "no
           records" value — *not* a signal to refetch.

@@ -162,7 +162,6 @@ def _fresh_handle() -> Any:
 def client() -> MagicMock:
     c = MagicMock()
     c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c._invoke = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
     c.reply_topic = "discord.outbox"
     return c
 
@@ -572,7 +571,7 @@ class TestSlashReplay:
         # Router path never touches the transcript store.
         store.get_by_final_message_ids.assert_not_called()
         # And the router's message_history carries no tool parts.
-        router_msgs = client._invoke.call_args.kwargs["state"].message_history
+        router_msgs = client.invoke_node.call_args.kwargs["message_history"]
         assert all(isinstance(m, ModelRequest) for m in router_msgs)
 
 

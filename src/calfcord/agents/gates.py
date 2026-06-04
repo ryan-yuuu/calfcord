@@ -9,7 +9,7 @@ Two predicates, both factory-bound to a specific ``agent_id``:
   topic — including raw ambient ``kind="message"`` — is rejected.
 
 Both gates read the bridge's :class:`~calfcord.bridge.wire.WireMessage`
-out of ``ctx.deps.provided_deps["discord"]``. A missing or non-mapping
+out of ``ctx.deps["discord"]``. A missing or non-mapping
 ``"discord"`` dep is treated as a reject — the agent must not act on events
 that did not originate from the bridge.
 
@@ -66,7 +66,7 @@ def make_addressable_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
     """
 
     def addressable(ctx: SessionRunContext) -> bool:
-        discord = ctx.deps.provided_deps.get("discord")
+        discord = ctx.deps.get("discord")
         if not isinstance(discord, dict):
             return False
         author = discord.get("author", {})
@@ -114,7 +114,7 @@ def make_addressed_to_me_gate(agent_id: str) -> Callable[[SessionRunContext], bo
     """
 
     def addressed_to_me(ctx: SessionRunContext) -> bool:
-        discord = ctx.deps.provided_deps.get("discord")
+        discord = ctx.deps.get("discord")
         if not isinstance(discord, dict):
             return False
         kind = discord.get("kind")

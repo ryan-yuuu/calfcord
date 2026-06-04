@@ -3,17 +3,17 @@
 Drives a single ambient wire through every seam:
 
     Bridge ingress (ambient publish)
-        ↓ state.metadata channel
+        ↓ deps channel
     Fan-out @consumer (synthesized publishes)
-        ↓ state.metadata channel
+        ↓ deps channel
     Bridge synthesized-in @consumer (ingress.handle invocation)
         ↓ pending_wires + channel topic publish
     Bridge slash path (the assistant-bound invocation)
 
-The Kafka edges (``Client.invoke_node`` / ``Client._invoke``) are
-faked. Everything else — the consumer machinery, the metadata
-packing/unpacking, the gate, the state propagation, the
-synthesized-wire mutation, the pending_wires bookkeeping — is real.
+The Kafka edges (``Client.invoke_node``) are faked. Everything else —
+the consumer machinery, the deps packing/unpacking, the gate, the deps
+propagation, the synthesized-wire mutation, the pending_wires
+bookkeeping — is real.
 
 This test catches seam-mismatch regressions that the per-module tests
 miss: a key-name typo on one side, a topic name drifting, a wire
@@ -34,12 +34,10 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
-    Deps,
     SessionRunContext,
     WorkflowState,
 )
 
-from calfcord._compat.invoke import METADATA_KEY_WIRE, MetadataEnvelope
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.routing import RoutingDecision
 from calfcord.bridge.ingress import (
@@ -106,27 +104,20 @@ def _registry() -> AgentRegistry:
     )
 
 
-def _captured_state_from_invoke(client: MagicMock, index: int = 0) -> State:
-    """Extract the ``State`` from a recorded ``Client._invoke`` call."""
-    return client._invoke.await_args_list[index].kwargs["state"]
-
-
 def _build_fanout_envelope_from_router_output(
     *,
-    ambient_state: State,
+    ambient_deps: dict[str, Any],
     decision: RoutingDecision,
-    correlation_id: str,
 ) -> Envelope:
     """Construct the envelope the fan-out @consumer would see.
 
     Mirrors what calfkit's ``BaseAgentNodeDef._publish_action`` would
-    produce for a router ReturnCall — it forwards
-    ``envelope.context.deps`` AND ``state.metadata``. We carry only the
-    metadata channel because the consume_fn reads from there; the wire
-    rides under METADATA_KEY_WIRE thanks to the bridge ingress.
+    produce for a router ReturnCall — it forwards ``envelope.context.deps``
+    on every publish, so the consumer reads the original wire / phonebook
+    / history from ``result.deps``. We carry the SAME deps dict the bridge
+    ingress published on the ambient hop.
     """
     state = State()
-    state.metadata = ambient_state.metadata
     # The router's terminal output is parsed as RoutingDecision via the
     # ToolOutput pattern; the consumer's output_type triggers
     # _extract_data which expects the DataPart payload.
@@ -142,27 +133,20 @@ def _build_fanout_envelope_from_router_output(
                 ]
             )
         ),
-        context=SessionRunContext(
-            state=state,
-            deps=Deps(correlation_id=correlation_id, provided_deps={}),
-        ),
+        context=SessionRunContext(state=state, deps=ambient_deps),
     )
 
 
-def _build_synthesized_envelope(*, synthesized_wire_dict: dict[str, Any], correlation_id: str) -> Envelope:
+def _build_synthesized_envelope(*, synth_deps: dict[str, Any]) -> Envelope:
     """Construct the envelope the synthesized-in @consumer would see.
 
-    Equivalent to what ``invoke_node_with_metadata`` writes to
-    ``bridge.synthesized.in`` — the wire travels in ``state.metadata``
-    via :class:`MetadataEnvelope`. Build the metadata by round-tripping
-    through ``MetadataEnvelope.model_dump`` rather than hand-rolling
-    the dict: if the envelope ever grows a custom serializer (alias,
-    computed field, key transform), a hand-rolled dict here would
-    mask a real bridge-side extraction bug.
+    Equivalent to what the fan-out's ``invoke_node`` writes to
+    ``bridge.synthesized.in`` — the synthesized wire and forwarded
+    history travel on ``deps``. We carry the SAME deps dict the fan-out
+    published, so any key-name drift between the fan-out and the
+    synthesized-in consumer surfaces here.
     """
     state = State()
-    wire = WireMessage.model_validate(synthesized_wire_dict)
-    state.metadata = MetadataEnvelope(wire=wire).model_dump(mode="json")
     return Envelope(
         internal_workflow_state=WorkflowState(
             call_stack=CallFrameStack(
@@ -174,10 +158,7 @@ def _build_synthesized_envelope(*, synthesized_wire_dict: dict[str, Any], correl
                 ]
             )
         ),
-        context=SessionRunContext(
-            state=state,
-            deps=Deps(correlation_id=correlation_id, provided_deps={}),
-        ),
+        context=SessionRunContext(state=state, deps=synth_deps),
     )
 
 
@@ -190,7 +171,6 @@ def _fresh_handle() -> MagicMock:
 def _fresh_client() -> MagicMock:
     c = MagicMock()
     c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c._invoke = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
     c.reply_topic = "discord.outbox"
     return c
 
@@ -206,7 +186,7 @@ class TestAmbientRoutingEndToEnd:
         ingress.handle → channel topic, all wired up correctly.
 
         Pins the seam contract: the original ambient's channel_id /
-        message_id / author survive the metadata-pack/unpack hop and
+        message_id / author survive the deps pack/unpack hops and
         end up on the synthesized invocation that the bridge
         republishes to ``discord.channel.{cid}.in``. Under the
         single-agent routing policy, exactly one synthesized publish
@@ -223,23 +203,25 @@ class TestAmbientRoutingEndToEnd:
         await ingress.handle(ambient_wire)
 
         # Step 2: verify the ambient publish landed on the ambient
-        # topic with the wire packed into state.metadata.
-        bridge_client._invoke.assert_awaited_once()
-        ambient_call = bridge_client._invoke.await_args
+        # topic with the wire packed onto deps. (Only the ambient hop
+        # has fired so far — the slash branch also uses invoke_node but
+        # runs later, in Step 5.)
+        bridge_client.invoke_node.assert_awaited_once()
+        ambient_call = bridge_client.invoke_node.await_args
         assert ambient_call.kwargs["topic"] == _AMBIENT_INGRESS_TOPIC
-        ambient_state = ambient_call.kwargs["state"]
-        assert ambient_state.metadata[METADATA_KEY_WIRE]["event_id"] == "evt-original-1"
+        ambient_deps = ambient_call.kwargs["deps"]
+        assert ambient_deps["discord"]["event_id"] == "evt-original-1"
         # Ambient publish must NOT populate pending_wires (Group C).
         assert pending_wires.get("evt-original-1") is None
 
         # Step 3: build the fan-out @consumer (router process) and
-        # feed it an envelope mimicking the router agent's ReturnCall.
+        # feed it an envelope mimicking the router agent's ReturnCall —
+        # carrying forward the ambient deps.
         fanout = build_fanout_consumer(router_client, router_agent_id=ROUTER_AGENT_ID)
         decision = RoutingDecision(agent_id="scribe", reasoning="scribe is the addressee")
         fanout_envelope = _build_fanout_envelope_from_router_output(
-            ambient_state=ambient_state,
+            ambient_deps=ambient_deps,
             decision=decision,
-            correlation_id="evt-original-1",
         )
         broker = MagicMock()
         broker.publish = AsyncMock()
@@ -253,58 +235,60 @@ class TestAmbientRoutingEndToEnd:
         # Step 4: verify the fan-out emitted exactly one publish to
         # the synthesized topic for the chosen agent, with a fresh
         # event_id and the original ambient's channel/message/author
-        # preserved.
-        assert router_client._invoke.await_count == 1
-        synth_publishes = [router_client._invoke.await_args_list[0].kwargs]
-        assert synth_publishes[0]["topic"] == SYNTHESIZED_INGRESS_TOPIC
-        synth_wires = [synth_publishes[0]["state"].metadata[METADATA_KEY_WIRE]]
-        assert synth_wires[0]["slash_target"] == "scribe"
+        # preserved on deps["discord"].
+        assert router_client.invoke_node.await_count == 1
+        synth_publish = router_client.invoke_node.await_args_list[0].kwargs
+        assert synth_publish["topic"] == SYNTHESIZED_INGRESS_TOPIC
+        synth_deps = synth_publish["deps"]
+        synth_wire_dict = synth_deps["discord"]
+        assert synth_wire_dict["slash_target"] == "scribe"
         # Fresh event_id (not the original).
-        synth_event_id = synth_wires[0]["event_id"]
+        synth_event_id = synth_wire_dict["event_id"]
         assert synth_event_id != "evt-original-1"
         # Channel / message / author preserved.
-        w = synth_wires[0]
-        assert w["channel_id"] == 12345
-        assert w["message_id"] == 98765
-        assert w["author"]["display_name"] == "alice"
-        assert w["kind"] == "slash"
+        assert synth_wire_dict["channel_id"] == 12345
+        assert synth_wire_dict["message_id"] == 98765
+        assert synth_wire_dict["author"]["display_name"] == "alice"
+        assert synth_wire_dict["kind"] == "slash"
 
         # Step 5: build the synthesized-in @consumer wired to the
-        # same BridgeIngress, feed each synthesized envelope, and
-        # verify the bridge re-publishes each as a slash wire on the
-        # channel topic with pending_wires populated.
+        # same BridgeIngress, feed it the synthesized envelope (carrying
+        # the fan-out's exact deps), and verify the bridge re-publishes
+        # it as a slash wire on the channel topic with pending_wires
+        # populated.
         synthesized_consumer = build_synthesized_consumer(ingress)
-        for synth_wire_dict in synth_wires:
-            envelope = _build_synthesized_envelope(
-                synthesized_wire_dict=synth_wire_dict,
-                correlation_id=synth_wire_dict["event_id"],
-            )
-            await synthesized_consumer.handler(
-                envelope=envelope,
-                correlation_id=synth_wire_dict["event_id"],
-                headers=_headers(),
-                broker=broker,
-            )
+        envelope = _build_synthesized_envelope(synth_deps=synth_deps)
+        await synthesized_consumer.handler(
+            envelope=envelope,
+            correlation_id=synth_event_id,
+            headers=_headers(),
+            broker=broker,
+        )
 
         # Step 6: the bridge's ingress should have published exactly
-        # one slash invocation for the chosen agent on top of the
-        # original ambient publish. invoke_node is the slash branch.
-        assert bridge_client.invoke_node.await_count == 1
-        slash_publishes = [bridge_client.invoke_node.await_args_list[0].kwargs]
-        assert slash_publishes[0]["topic"] == "discord.channel.12345.in"
+        # one slash invocation for the chosen agent on the channel
+        # topic. Both the ambient (Step 1) and slash hops use
+        # invoke_node, so filter by the channel-topic prefix to isolate
+        # the slash publish.
+        slash_calls = [
+            c.kwargs
+            for c in bridge_client.invoke_node.await_args_list
+            if c.kwargs["topic"].startswith("discord.channel.")
+        ]
+        assert len(slash_calls) == 1
+        assert slash_calls[0]["topic"] == "discord.channel.12345.in"
         # PendingWires should have an entry for the synthesized
         # event_id (so the outbox can correlate the reply back).
         # Asserting on the exact slash_target pins identity — a
         # regression that wrote the wrong wire under this event_id
         # would silently misattribute the reply.
-        for synth_wire_dict in synth_wires:
-            entry = pending_wires.get(synth_wire_dict["event_id"])
-            assert entry is not None
-            assert entry.wire.channel_id == 12345
-            assert entry.wire.message_id == 98765
-            assert entry.wire.slash_target == synth_wire_dict["slash_target"]
+        entry = pending_wires.get(synth_event_id)
+        assert entry is not None
+        assert entry.wire.channel_id == 12345
+        assert entry.wire.message_id == 98765
+        assert entry.wire.slash_target == "scribe"
 
-        # Step 7: drive the outbox consumer for each synthesized
+        # Step 7: drive the outbox consumer for the synthesized
         # event_id and verify the agent reply is anchored to the
         # ORIGINAL ambient's Discord message_id, not a fresh
         # synthesized event_id.
@@ -335,38 +319,32 @@ class TestAmbientRoutingEndToEnd:
         )
 
         # The outbox reads ``emitter_node_id`` from the envelope
-        # headers; map each synthesized wire to its target agent so
+        # headers; map the synthesized wire to its target agent so
         # the persona resolves correctly.
-        for synth_wire_dict in synth_wires:
-            target = synth_wire_dict["slash_target"]
-            synth_event_id = synth_wire_dict["event_id"]
-            reply_state = State()
-            reply_state.final_output_parts = [TextPart(text=f"{target}'s reply")]
-            reply_envelope = Envelope(
-                internal_workflow_state=WorkflowState(
-                    call_stack=CallFrameStack(
-                        _internal_list=[
-                            CallFrame(
-                                target_topic="discord.outbox",
-                                callback_topic="discord.outbox",
-                            )
-                        ]
-                    )
-                ),
-                context=SessionRunContext(
-                    state=reply_state,
-                    deps=Deps(correlation_id=synth_event_id, provided_deps={}),
-                ),
-            )
-            await outbox.handler(
-                envelope=reply_envelope,
-                correlation_id=synth_event_id,
-                headers={
-                    "x-calf-emitter": target,
-                    "x-calf-emitter-kind": "agent",
-                },
-                broker=broker,
-            )
+        reply_state = State()
+        reply_state.final_output_parts = [TextPart(text="scribe's reply")]
+        reply_envelope = Envelope(
+            internal_workflow_state=WorkflowState(
+                call_stack=CallFrameStack(
+                    _internal_list=[
+                        CallFrame(
+                            target_topic="discord.outbox",
+                            callback_topic="discord.outbox",
+                        )
+                    ]
+                )
+            ),
+            context=SessionRunContext(state=reply_state, deps={}),
+        )
+        await outbox.handler(
+            envelope=reply_envelope,
+            correlation_id=synth_event_id,
+            headers={
+                "x-calf-emitter": "scribe",
+                "x-calf-emitter-kind": "agent",
+            },
+            broker=broker,
+        )
 
         # One send for the single synthesized reply — no dedupe, no
         # silent-drop.
@@ -376,20 +354,19 @@ class TestAmbientRoutingEndToEnd:
         # message_id (98765 from the human ambient fixture), NOT a
         # fresh synthesized event_id. This is the load-bearing
         # invariant of the multi-hop seam.
-        send_calls = persona_sender.send.await_args_list
-        for call in send_calls:
-            reply_to = call.kwargs["reply_to"]
-            assert reply_to.message_id == 98765, (
-                f"reply anchored to {reply_to.message_id!r}; "
-                f"expected the original ambient message_id 98765 — "
-                f"a future refactor likely added message_id to the "
-                f"fanout's wire.model_copy update dict"
-            )
-            assert reply_to.channel_id == 12345
+        send_call = persona_sender.send.await_args
+        reply_to = send_call.kwargs["reply_to"]
+        assert reply_to.message_id == 98765, (
+            f"reply anchored to {reply_to.message_id!r}; "
+            f"expected the original ambient message_id 98765 — "
+            f"a future refactor likely added message_id to the "
+            f"fanout's wire.model_copy update dict"
+        )
+        assert reply_to.channel_id == 12345
 
         # Persona name resolves from the registry's display_name for
         # the chosen agent — scribe's reply goes under "Scribe". This
         # pins that ``emitter_node_id`` (from the outbox headers)
         # correctly drives persona projection at the end of the chain.
-        persona_names_by_content = {call.kwargs["content"]: call.kwargs["persona"].name for call in send_calls}
-        assert persona_names_by_content["scribe's reply"] == "Scribe"
+        assert send_call.kwargs["content"] == "scribe's reply"
+        assert send_call.kwargs["persona"].name == "Scribe"

@@ -47,12 +47,12 @@ decision echoed to the bridge's outbox or anywhere visible, so we
 direct it to this no-subscriber topic.
 
 **Retention / privacy warning.** The router's ``ReturnCall``
-envelope carries ``state.metadata`` containing the original Discord
-wire (author info, message content) and phonebook. The same envelope
-lands on BOTH ``routing.decisions`` AND this discard topic via
-FastStream's publisher mirroring — we cannot strip the metadata
-from the discard side without also losing it from the consumed side
-(the fan-out needs it). Operators MUST configure short retention or
+envelope carries ``deps`` containing the original Discord
+wire (author info, message content), phonebook, and channel history.
+The same envelope lands on BOTH ``routing.decisions`` AND this discard
+topic via FastStream's publisher mirroring — we cannot strip the deps
+from the discard side without also losing them from the consumed side
+(the fan-out needs them). Operators MUST configure short retention or
 ``cleanup.policy=delete`` with a low ``retention.ms`` on this topic;
 the cluster default (7 days) would persist a copy of every ambient
 message in plaintext on a topic nobody reads. Recommended setting:

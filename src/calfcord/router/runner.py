@@ -70,7 +70,7 @@ _REPLY_TOPIC = "calfkit.router.reply"
 """Named reply topic for the router client. ``Client.connect``
 requires a reply topic; no envelope is ever actually delivered here
 because the router process never makes an outgoing call that
-returns to itself (the fan-out's ``invoke_node_with_metadata`` calls
+returns to itself (the fan-out's ``invoke_node`` calls
 target ``bridge.synthesized.in``, and the synthesized-in consumer
 neither replies nor produces a ReturnCall on the router's
 correlation_id). Picking a unique name keeps the dispatcher

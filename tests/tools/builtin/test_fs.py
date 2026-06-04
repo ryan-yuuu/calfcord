@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 
 from calfcord.tools.builtin import fs, workspace
 
 
 def _ctx() -> ToolContext:
     return ToolContext(
-        deps=Deps(correlation_id="c", provided_deps={}),
+        deps={},
+        run_id="c",
         agent_name="alice",
     )
 

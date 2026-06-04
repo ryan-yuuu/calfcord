@@ -94,13 +94,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from calfcord.agents.identifier import AGENT_ID_PATTERN
 
 if TYPE_CHECKING:
-    # Top-level import would cycle: ``bridge.registry`` imports
-    # ``router.definition``, ``router.fanout`` imports
-    # ``_compat.invoke``, and ``_compat.invoke`` bottom-imports
-    # :class:`HistoryRecord` for its ``model_rebuild``. Lazy import
-    # via ``TYPE_CHECKING`` keeps the type hint without triggering the
-    # cycle — at runtime the ``from __future__ import annotations``
-    # directive above keeps ``AgentRegistry`` as a string.
+    # Top-level import would cycle: this module loads early in the
+    # ``bridge`` package init (via ``bridge.ingress``), while
+    # ``bridge.registry`` — which defines ``AgentRegistry`` and pulls in
+    # ``router.definition`` — loads later in the same init. Importing it
+    # here at runtime would re-enter a partially-initialized module.
+    # Lazy import via ``TYPE_CHECKING`` keeps the type hint without
+    # triggering the cycle — at runtime the ``from __future__ import
+    # annotations`` directive above keeps ``AgentRegistry`` as a string.
     from calfcord.bridge.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,7 @@ class HistoryRecord(BaseModel):
 
     Built once by :class:`ChannelHistoryFetcher` at fetch time. Downstream
     consumers (router, fan-out, synthesized-in, assistant invocations)
-    receive these in :attr:`MetadataEnvelope.history` or via
+    receive these on ``deps["history"]`` or via
     :class:`BridgeIngress.handle`'s ``prefetched_history`` kwarg, and
     pass them straight to :func:`project_history` without needing
     registry access of their own.
@@ -772,7 +773,7 @@ def project_history(
     Args:
         records: Oldest-first :class:`HistoryRecord` list, typically
             from :meth:`ChannelHistoryFetcher.fetch` or
-            ``MetadataEnvelope.history``.
+            ``deps["history"]``.
         self_agent_id: The agent the resulting history will be sent to.
             Records whose ``author_agent_id`` matches become
             :class:`ModelResponse` (the agent's own prior turns); all

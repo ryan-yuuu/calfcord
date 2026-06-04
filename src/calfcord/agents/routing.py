@@ -71,10 +71,9 @@ class RoutingDecision(BaseModel):
       ``router_agent_id`` is closure-bound at consumer construction.
     * Phonebook membership (``agent_id`` exists in the current
       registry) — the fan-out validates the chosen id against the
-      ``phonebook`` field of the publisher's
-      :class:`~calfcord._compat.invoke.MetadataEnvelope`
-      and skips with an ERROR log on miss (catches LLM
-      hallucinations and post-publish registry drift). See
+      publisher's ``deps["phonebook"]`` snapshot and skips with an
+      ERROR log on miss (catches LLM hallucinations and post-publish
+      registry drift). See
       :func:`~calfcord.router.fanout.build_fanout_consumer`.
     """
 

@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "authlib>=1.7.2",
-    "calfkit[mcp-codegen]~=0.3.6",
+    "calfkit[mcp-codegen]~=0.4.0",
     "discord-py>=2.7.1",
     "openhands-sdk>=1.23.1",
     "openhands-tools>=1.23.1",

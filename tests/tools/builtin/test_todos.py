@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 
 from calfcord.tools.builtin import todos
 
 
 def _ctx(agent: str) -> ToolContext:
     return ToolContext(
-        deps=Deps(correlation_id="c", provided_deps={}),
+        deps={},
+        run_id="c",
         agent_name=agent,
     )
 
@@ -96,7 +96,8 @@ class TestPerAgentIsolation:
         rather than silently sharing one task list across "different"
         callers."""
         ctx = ToolContext(
-            deps=Deps(correlation_id="c", provided_deps={}),
+            deps={},
+            run_id="c",
             agent_name=None,
         )
         with pytest.raises(RuntimeError, match="agent_name"):

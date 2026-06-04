@@ -1,14 +1,13 @@
 """Unit tests for the fan-out consumer built by :func:`build_fanout_consumer`.
 
 Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
-so we exercise the gate, the metadata lookup, the router-self-filter,
-and the per-target ``invoke_node_with_metadata`` publish — all without
-Kafka, FastStream, or an LLM.
+so we exercise the gate, the deps lookup, the router-self-filter, and
+the per-target ``invoke_node`` publish — all without Kafka, FastStream,
+or an LLM.
 
-The original :class:`WireMessage` rides on ``state.metadata`` (the
-mechanism :mod:`calfcord._compat.invoke` provides);
-``deps.provided_deps`` is intentionally NOT used here because
-@consumer's consume_fn never sees deps.
+The original :class:`WireMessage`, phonebook, and history ride on the
+envelope's ``context.deps`` and reach the consumer via ``result.deps``
+(calfkit ≥ 0.4.0 exposes inbound producer deps on ``NodeResult.deps``).
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
-    Deps,
     SessionRunContext,
     WorkflowState,
 )
@@ -72,13 +70,13 @@ _HISTORY_UNSET = "<unset>"
 def _phonebook_dict(agent_id: str) -> dict[str, Any]:
     """Build a minimal valid :class:`PhonebookEntry`-shaped dict.
 
-    The typed ``MetadataEnvelope`` parses ``envelope.phonebook`` entries
-    through :class:`PhonebookEntry`'s validators, so a bare
-    ``{"agent_id": ...}`` dict no longer suffices — ``display_name``
-    and ``description`` are required. This helper pads the missing
-    fields with placeholders so tests can focus on ``agent_id``
-    membership behavior without re-stating persona fields they don't
-    care about.
+    The fan-out validates ``deps["phonebook"]`` through
+    :func:`phonebook_from_deps`, which parses each entry via
+    :class:`PhonebookEntry`'s validators, so a bare ``{"agent_id": ...}``
+    dict no longer suffices — ``display_name`` and ``description`` are
+    required. This helper pads the missing fields with placeholders so
+    tests can focus on ``agent_id`` membership behavior without
+    re-stating persona fields they don't care about.
     """
     return {
         "agent_id": agent_id,
@@ -101,9 +99,8 @@ def _default_phonebook() -> list[dict[str, Any]]:
 
 def _envelope(
     *,
-    correlation_id: str = _CORRELATION_ID,
     decision: Any = _DEFAULT_DECISION_SENTINEL,
-    metadata: Any = "<use-wire>",
+    deps: Any = "<use-wire>",
     wire_content: str = "hello",
     phonebook: Any = _PHONEBOOK_UNSET,
     history: Any = _HISTORY_UNSET,
@@ -117,25 +114,26 @@ def _envelope(
     ``scribe`` (sentinel pattern keeps ruff B008 happy — no function
     call in argument defaults).
 
-    ``metadata`` defaults to a dict containing the original wire and
-    a phonebook covering the default decision's agent_id. This
-    mirrors production: the bridge ALWAYS packs the phonebook on
-    ambient publishes. Pass ``None``, ``{}``, or a malformed dict to
-    exercise envelope-extract error paths. When
-    ``metadata == "<use-wire>"``, the ``phonebook`` arg controls the
-    phonebook field on the constructed envelope:
+    ``deps`` defaults to a dict carrying the original wire under
+    ``"discord"`` plus a phonebook covering the default decision's
+    agent_id. This mirrors production: the bridge ALWAYS packs the wire
+    and phonebook on ambient publishes, and the router run carries those
+    deps forward to the fan-out. Pass ``None``, ``{}``, or a malformed
+    dict to exercise the deps-read error paths. When
+    ``deps == "<use-wire>"``, the ``phonebook`` arg controls the
+    ``"phonebook"`` key on the constructed deps:
 
     * ``_PHONEBOOK_UNSET`` (default) — populates with
       :func:`_default_phonebook` so the default decision's agent is
       "known" and the fan-out's happy path runs.
     * ``None`` — deliberately omits the phonebook key. The fan-out's
-      fail-closed-on-None path treats this as an infra bug.
-    * any other value — packed as ``envelope.phonebook`` verbatim.
+      fail-closed-on-missing path treats this as an infra bug.
+    * any other value — packed as ``deps["phonebook"]`` verbatim.
       Use :func:`_phonebook_dict` to produce minimal valid entries.
 
     ``wire_content`` overrides the default content on the default
-    wire used when ``metadata == "<use-wire>"`` — useful for tests
-    that need to assert non-leakage of unrelated strings into the
+    wire used when ``deps == "<use-wire>"`` — useful for tests that
+    need to assert non-leakage of unrelated strings into the
     synthesized wire.
     """
     if decision == _DEFAULT_DECISION_SENTINEL:
@@ -148,22 +146,25 @@ def _envelope(
         # pattern); the consumer's output_type=RoutingDecision triggers
         # _extract_data which validates against the model.
         state.final_output_parts = [DataPart(data=decision.model_dump(mode="json"))]
-    if metadata == "<use-wire>":
-        metadata = {"wire": _wire(content=wire_content).model_dump(mode="json")}
+    if deps == "<use-wire>":
+        deps = {"discord": _wire(content=wire_content).model_dump(mode="json")}
         if phonebook is _PHONEBOOK_UNSET:
-            metadata["phonebook"] = _default_phonebook()
+            deps["phonebook"] = _default_phonebook()
         elif phonebook is None:
             # Explicit None — caller wants to exercise the fail-closed
             # path; deliberately do NOT add the key.
             pass
         else:
-            metadata["phonebook"] = phonebook
+            deps["phonebook"] = phonebook
         if history is _HISTORY_UNSET:
-            # Default: empty history (matches rolling-deploy default).
+            # Default: no history key (matches rolling-deploy default).
             pass
         else:
-            metadata["history"] = history
-    state.metadata = metadata
+            deps["history"] = history
+    # Error-path callers pass deps=None / a non-dict; the envelope's
+    # context.deps must be a dict, so normalize to {} (the consumer then
+    # reads a missing "discord" key and fails closed).
+    context_deps = deps if isinstance(deps, dict) else {}
 
     call_stack = CallFrameStack()
     call_stack.push(
@@ -174,13 +175,7 @@ def _envelope(
     )
     return Envelope(
         internal_workflow_state=WorkflowState(call_stack=call_stack),
-        context=SessionRunContext(
-            state=state,
-            deps=Deps(
-                correlation_id=correlation_id,
-                provided_deps={},
-            ),
-        ),
+        context=SessionRunContext(state=state, deps=context_deps),
     )
 
 
@@ -190,10 +185,10 @@ def _headers(*, emitter: str = ROUTER_AGENT_ID, emitter_kind: str = "agent") -> 
 
 @pytest.fixture
 def client() -> MagicMock:
-    """Fake calfkit Client with the attributes invoke_node_with_metadata touches.
+    """Fake calfkit Client with the attributes the fan-out publish touches.
 
-    Attaches a fresh-future side-effect on _invoke so the consumer's
-    ``handle._future.cancel()`` runs against a real awaitable.
+    Attaches a fresh-future side-effect on ``invoke_node`` so the
+    consumer's ``handle._future.cancel()`` runs against a real awaitable.
     """
     c = MagicMock()
     c.reply_topic = "calfkit.router.reply"
@@ -203,7 +198,7 @@ def client() -> MagicMock:
         handle._future = asyncio.get_event_loop().create_future()
         return handle
 
-    c._invoke = AsyncMock(side_effect=_invoke_handle)
+    c.invoke_node = AsyncMock(side_effect=_invoke_handle)
     return c
 
 
@@ -223,7 +218,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        assert client._invoke.await_count == 1
+        assert client.invoke_node.await_count == 1
 
     async def test_publishes_to_synthesized_ingress_topic(
         self, client: MagicMock, broker: MagicMock
@@ -237,7 +232,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client._invoke.await_args_list[0].kwargs
+        kwargs = client.invoke_node.await_args_list[0].kwargs
         assert kwargs["topic"] == SYNTHESIZED_INGRESS_TOPIC
         assert kwargs["topic"] == "bridge.synthesized.in"
 
@@ -258,8 +253,8 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client._invoke.await_args_list[0].kwargs
-        synth_event_id = kwargs["state"].metadata["wire"]["event_id"]
+        kwargs = client.invoke_node.await_args_list[0].kwargs
+        synth_event_id = kwargs["deps"]["discord"]["event_id"]
         # Fresh — not the original ambient's event_id.
         assert synth_event_id != _CORRELATION_ID
 
@@ -275,9 +270,9 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client._invoke.await_args_list[0].kwargs
-        # state.metadata carries the synthesized wire dict.
-        wire = kwargs["state"].metadata["wire"]
+        kwargs = client.invoke_node.await_args_list[0].kwargs
+        # deps["discord"] carries the synthesized wire dict.
+        wire = kwargs["deps"]["discord"]
         assert wire["kind"] == "slash"
         assert wire["slash_target"] == "scribe"
         # Other fields preserved from the original.
@@ -299,8 +294,8 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client._invoke.await_args_list[0].kwargs
-        assert kwargs["correlation_id"] == kwargs["state"].metadata["wire"]["event_id"]
+        kwargs = client.invoke_node.await_args_list[0].kwargs
+        assert kwargs["correlation_id"] == kwargs["deps"]["discord"]["event_id"]
 
     async def test_cancels_handle_future(
         self, client: MagicMock, broker: MagicMock
@@ -315,7 +310,7 @@ class TestHappyPath:
             captured.append(handle)
             return handle
 
-        client._invoke.side_effect = _invoke
+        client.invoke_node.side_effect = _invoke
 
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
@@ -334,14 +329,13 @@ class TestHappyPath:
 
 
 class TestHistoryForwarding:
-    """The fan-out forwards ``envelope.history`` from its INPUT envelope
+    """The fan-out forwards ``deps["history"]`` from its INPUT envelope
     (the parent that the router consumed) to the OUTPUT envelope it
     publishes to ``bridge.synthesized.in``.
 
     Without this forwarding, the synthesized-in consumer would receive
-    an empty ``envelope.history``, pass ``prefetched_history=()`` to
-    ``BridgeIngress.handle``, and the addressed assistant would run
-    with no channel history.
+    no history, pass ``prefetched_history=()`` to ``BridgeIngress.handle``,
+    and the addressed assistant would run with no channel history.
     """
 
     def _record_dicts(self) -> list[dict[str, Any]]:
@@ -367,7 +361,7 @@ class TestHistoryForwarding:
         self, client: MagicMock, broker: MagicMock
     ) -> None:
         """The synthesized publish must include the parent's history
-        records in its ``state.metadata["history"]``."""
+        records under ``deps["history"]``."""
         records = self._record_dicts()
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
@@ -380,10 +374,10 @@ class TestHistoryForwarding:
             broker=broker,
         )
 
-        kwargs = client._invoke.await_args_list[0].kwargs
-        envelope_metadata = kwargs["state"].metadata
-        assert "history" in envelope_metadata
-        forwarded = envelope_metadata["history"]
+        kwargs = client.invoke_node.await_args_list[0].kwargs
+        published_deps = kwargs["deps"]
+        assert "history" in published_deps
+        forwarded = published_deps["history"]
         assert len(forwarded) == 2
         assert forwarded[0]["content"] == "hi from ryan"
         assert forwarded[1]["author_agent_id"] == "scribe"
@@ -399,15 +393,15 @@ class TestHistoryForwarding:
         await consumer.handler(
             envelope=_envelope(
                 decision=RoutingDecision(agent_id="scribe", reasoning="m"),
-                # history defaults to _HISTORY_UNSET → no history key in metadata
+                # history defaults to _HISTORY_UNSET → no history key in deps
             ),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
             broker=broker,
         )
 
-        forwarded = client._invoke.await_args_list[0].kwargs["state"].metadata["history"]
-        # MetadataEnvelope.history defaults to (); model_dump emits [].
+        forwarded = client.invoke_node.await_args_list[0].kwargs["deps"]["history"]
+        # No input history key → fan-out forwards deps.get("history", []).
         assert forwarded == []
 
 
@@ -433,7 +427,7 @@ class TestRouterSelfFilter:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warn_records, "expected a WARN log line"
         msg = warn_records[0].message
@@ -475,7 +469,7 @@ class TestErrorPaths:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warn_records, "expected a WARN log line"
         msg = warn_records[0].message
@@ -491,18 +485,18 @@ class TestErrorPaths:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A broker hiccup, serialization error, or connection drop
-        during ``invoke_node_with_metadata`` would otherwise silently
-        drop the user's ambient message — the envelope is ACKed under
+        during ``invoke_node`` would otherwise silently drop the user's
+        ambient message — the envelope is ACKed under
         ``AckPolicy.ACK_FIRST`` so the consumer harness won't
         redeliver. The fan-out logs ERROR with full operator-debuggable
         context (channel, author, correlation_id, event_id, agent_id)
         and re-raises so the harness's own consume_fn-raised ERROR
         also fires (two signals: rich operator-greppable line from us
         + harness's traceback). The harness catches the re-raise
-        (matches the legacy ``raise_envelope_error`` paths)."""
+        (matches the ``raise_routing_contract_error`` paths)."""
         client = MagicMock()
         client.reply_topic = "calfkit.router.reply"
-        client._invoke = AsyncMock(
+        client.invoke_node = AsyncMock(
             side_effect=RuntimeError("broker hiccup")
         )
 
@@ -511,7 +505,7 @@ class TestErrorPaths:
             logging.ERROR, logger="calfcord.router.fanout"
         ):
             # The harness swallows the raise (matches the established
-            # pattern in this file — e.g. test_missing_metadata_logs_
+            # pattern in this file — e.g. test_missing_discord_dep_logs_
             # infra_error). We assert the ERROR log fires instead of
             # relying on propagation.
             await consumer.handler(
@@ -550,38 +544,37 @@ class TestErrorPaths:
             headers=_headers(),
             broker=broker,
         )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
 
-    async def test_missing_metadata_logs_infra_error(
+    async def test_missing_discord_dep_logs_infra_error(
         self,
         client: MagicMock,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A missing ``state.metadata`` is an infrastructure contract
-        violation (the bridge ingress always packs a
-        :class:`MetadataEnvelope`). ``_raise_infra`` logs at ERROR
-        and raises; calfkit's consumer framework catches the raise
-        (Worker uses ``AckPolicy.ACK_FIRST`` so the envelope was
-        already ACKed regardless), but the operator-visible ERROR
-        log surfaces the violation. Test the log + the no-publish
-        guarantee."""
+        """Missing ``deps["discord"]`` is an infrastructure contract
+        violation (the bridge ingress always packs the wire on deps).
+        ``raise_routing_contract_error`` logs at ERROR and raises;
+        calfkit's consumer framework catches the raise (Worker uses
+        ``AckPolicy.ACK_FIRST`` so the envelope was already ACKed
+        regardless), but the operator-visible ERROR log surfaces the
+        violation. Test the log + the no-publish guarantee."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
-                envelope=_envelope(metadata=None),
+                envelope=_envelope(deps={}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         assert any(
             "infra error" in r.message
-            and "MetadataEnvelope" in r.message
+            and "deps['discord']" in r.message
             for r in caplog.records
         )
 
-    async def test_metadata_without_wire_key_logs_infra_error(
+    async def test_deps_without_discord_key_logs_infra_error(
         self,
         client: MagicMock,
         broker: MagicMock,
@@ -590,15 +583,15 @@ class TestErrorPaths:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
-                envelope=_envelope(metadata={"other": "stuff"}),
+                envelope=_envelope(deps={"other": "stuff"}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         assert any(
             "infra error" in r.message
-            and "MetadataEnvelope" in r.message
+            and "deps['discord']" in r.message
             for r in caplog.records
         )
 
@@ -610,67 +603,66 @@ class TestErrorPaths:
     ) -> None:
         """A malformed wire dict (the bridge serializing the wrong
         thing) is an infra contract violation — ERROR log + raise
-        (framework swallows the raise). With the typed envelope,
-        :class:`WireMessage` validation now happens during
-        :meth:`MetadataEnvelope.extract`, so the error message
-        identifies the failure at the envelope level."""
+        (framework swallows the raise). ``WireMessage.model_validate``
+        raises on the bad dict, so the error message identifies the
+        failing ``deps["discord"]`` key."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
-                envelope=_envelope(metadata={"wire": {"bogus": "data"}}),
+                envelope=_envelope(deps={"discord": {"bogus": "data"}}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         assert any(
             "infra error" in r.message
-            and "MetadataEnvelope" in r.message
+            and "deps['discord']" in r.message
             for r in caplog.records
         )
 
 
-class TestTypedEnvelopeError:
-    """The infra-error helper now raises a typed
-    :class:`MetadataEnvelopeError` with structured attributes. Tests
+class TestRoutingContractError:
+    """The infra-error helper raises a typed
+    :class:`RoutingContractError` with structured attributes. Tests
     can assert on attributes (``site``, ``correlation_id``, ``reason``)
     instead of substring-matching log messages — same context, more
     refactor-resilient."""
 
-    def test_raise_envelope_error_carries_attributes(self) -> None:
-        from calfcord._compat.invoke import (
-            MetadataEnvelopeError,
-            raise_envelope_error,
+    def test_raise_routing_contract_error_carries_attributes(self) -> None:
+        from calfcord.ambient_routing import (
+            RoutingContractError,
+            raise_routing_contract_error,
         )
 
-        with pytest.raises(MetadataEnvelopeError) as exc_info:
-            raise_envelope_error(
+        with pytest.raises(RoutingContractError) as exc_info:
+            raise_routing_contract_error(
                 correlation_id="evt-fanout-test",
                 site="fanout",
-                reason="missing phonebook on ambient envelope",
+                reason="missing deps['phonebook'] on ambient envelope",
             )
         assert exc_info.value.site == "fanout"
         assert exc_info.value.correlation_id == "evt-fanout-test"
-        assert exc_info.value.reason == "missing phonebook on ambient envelope"
+        assert exc_info.value.reason == "missing deps['phonebook'] on ambient envelope"
         # Subclass of RuntimeError (not ValueError) so the consumer
         # framework treats it as an infrastructure contract violation
         # rather than an input-validation outcome.
         assert isinstance(exc_info.value, RuntimeError)
 
-    def test_raise_envelope_error_chains_cause(self) -> None:
+    def test_raise_routing_contract_error_chains_cause(self) -> None:
         """When a ``cause`` is provided, ``__cause__`` is set so the
         framework's exc_info trace surfaces the original error."""
-        from calfcord._compat.invoke import (
-            MetadataEnvelopeError,
-            raise_envelope_error,
+        from calfcord.ambient_routing import (
+            RoutingContractError,
+            raise_routing_contract_error,
         )
 
         original = ValueError("the underlying validation failure")
-        with pytest.raises(MetadataEnvelopeError) as exc_info:
-            raise_envelope_error(
+        with pytest.raises(RoutingContractError) as exc_info:
+            raise_routing_contract_error(
                 correlation_id="evt-test",
                 site="fanout",
-                reason="failed to extract MetadataEnvelope",
+                reason="invalid/missing deps['discord']",
                 cause=original,
             )
         assert exc_info.value.__cause__ is original
@@ -678,14 +670,14 @@ class TestTypedEnvelopeError:
 
 class TestPhonebookValidation:
     """The fan-out validates the chosen ``agent_id`` against the
-    publisher's phonebook snapshot in ``envelope.phonebook``. An
+    publisher's phonebook snapshot in ``deps["phonebook"]``. An
     LLM-hallucinated agent_id (passes regex, not in the registry)
     is skipped at the fan-out before any synthesized publish so it
     can't orphan in :class:`PendingWires` with no operator signal.
 
-    Phonebook entries are now typed :class:`PhonebookEntry` instances
-    on the envelope — these helpers build minimum-valid dicts that
-    pydantic validates into the typed model at envelope construction.
+    Phonebook entries are validated through :func:`phonebook_from_deps`,
+    so these helpers build minimum-valid dicts that pydantic parses into
+    the typed :class:`PhonebookEntry` model.
     """
 
     @staticmethod
@@ -730,7 +722,7 @@ class TestPhonebookValidation:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         assert any(
             "unknown agent_id" in r.message
             and "hallucinated_agent" in r.message
@@ -765,7 +757,7 @@ class TestPhonebookValidation:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
 
     async def test_missing_phonebook_logs_infra_error(
         self,
@@ -778,15 +770,10 @@ class TestPhonebookValidation:
         fan-out can validate the chosen ``agent_id``. The fan-out
         fails closed (logs ERROR and raises) rather than silently
         skipping validation, which would let LLM hallucinations
-        through. This replaces the older "skip validation on None"
-        behavior; the rolling-deploy hazard that justified the
-        skip was solved by dropping ``extra="forbid"`` on the
-        envelope (so envelopes still round-trip across mixed
-        deployments)."""
+        through."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        # ``phonebook=None`` omits the phonebook key, which
-        # MetadataEnvelope parses as ``phonebook=None`` — the
-        # fail-closed path.
+        # ``phonebook=None`` omits the phonebook key from deps — the
+        # fan-out's fail-closed path.
         with caplog.at_level(
             logging.ERROR, logger="calfcord.router.fanout"
         ):
@@ -803,9 +790,9 @@ class TestPhonebookValidation:
                 broker=broker,
             )
         # Fail-closed: nothing published.
-        assert client._invoke.await_count == 0
+        assert client.invoke_node.await_count == 0
         assert any(
-            "missing phonebook" in r.message for r in caplog.records
+            "missing deps['phonebook']" in r.message for r in caplog.records
         )
 
     async def test_known_agent_publishes(
@@ -825,25 +812,20 @@ class TestPhonebookValidation:
             headers=_headers(),
             broker=broker,
         )
-        assert client._invoke.await_count == 1
+        assert client.invoke_node.await_count == 1
 
-    async def test_malformed_phonebook_entry_fails_at_envelope_extract(
+    async def test_malformed_phonebook_entry_logs_infra_error(
         self,
         client: MagicMock,
         broker: MagicMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A phonebook entry that fails :class:`PhonebookEntry`
-        validation (missing required fields, wrong types) now fails
-        at envelope extract — pydantic validates the entire
-        ``list[PhonebookEntry]`` on construction. This is stricter
-        than the legacy defensive-drop behavior: a malformed entry
-        no longer silently disappears from the known-ids set, it
-        surfaces immediately as an infra error.
-
-        The producer-side ``PhonebookEntry`` schema validator should
-        make this unreachable; this test pins the consumer-side
-        symmetry."""
+        validation (missing required fields, wrong types) fails when
+        the fan-out calls :func:`phonebook_from_deps` — ERROR log +
+        raise (framework swallows the raise). The producer-side
+        ``PhonebookEntry`` schema validator should make this
+        unreachable; this test pins the consumer-side symmetry."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         phonebook = [
             self._entry("scribe"),
@@ -863,10 +845,10 @@ class TestPhonebookValidation:
                 headers=_headers(),
                 broker=broker,
             )
-        # Envelope extract fails → infra error → nothing published.
-        assert client._invoke.await_count == 0
+        # phonebook_from_deps raises → infra error → nothing published.
+        assert client.invoke_node.await_count == 0
         assert any(
-            "MetadataEnvelope" in r.message for r in caplog.records
+            "deps['phonebook']" in r.message for r in caplog.records
         )
 
 
@@ -887,7 +869,7 @@ class TestReasoningIsolation:
             handle._future = asyncio.get_event_loop().create_future()
             return handle
 
-        client._invoke = AsyncMock(side_effect=_invoke)
+        client.invoke_node = AsyncMock(side_effect=_invoke)
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
 
         secret = "SECRET_REASONING_DO_NOT_LEAK"
@@ -905,12 +887,12 @@ class TestReasoningIsolation:
         )
         # The synthesized wire should carry the ORIGINAL ambient
         # content, never the reasoning.
-        synth_wire = client._invoke.await_args.kwargs["state"].metadata["wire"]
+        synth_wire = client.invoke_node.await_args.kwargs["deps"]["discord"]
         assert synth_wire["content"] == "please summarize the meeting notes"
         assert secret not in synth_wire["content"]
         # Belt-and-suspenders: nothing in the published kwargs should
         # contain the secret.
-        all_kwargs_repr = repr(client._invoke.await_args.kwargs)
+        all_kwargs_repr = repr(client.invoke_node.await_args.kwargs)
         assert secret not in all_kwargs_repr
 
 
@@ -942,25 +924,3 @@ class TestTopicContract:
         )
 
         assert _AMBIENT_INGRESS_TOPIC == AMBIENT_INGRESS_TOPIC
-
-
-class TestMetadataKeyContract:
-    """Drift guard for the metadata-dict keys the producer
-    (``BridgeIngress._publish_ambient`` / this fan-out) and the consumers
-    (this fan-out / bridge synthesized-in) all agree on.
-
-    The keys are defined centrally in
-    :mod:`calfcord._compat.invoke` so all sites import from
-    there. This test pins the contract at the symbol level — if the
-    constants are ever renamed or split, the test surfaces the change.
-    """
-
-    def test_metadata_key_wire_is_canonical_string(self) -> None:
-        from calfcord._compat.invoke import METADATA_KEY_WIRE
-
-        assert METADATA_KEY_WIRE == "wire"
-
-    def test_metadata_key_phonebook_is_canonical_string(self) -> None:
-        from calfcord._compat.invoke import METADATA_KEY_PHONEBOOK
-
-        assert METADATA_KEY_PHONEBOOK == "phonebook"
