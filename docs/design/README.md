@@ -42,3 +42,7 @@ In approximate chronological order (oldest first):
 - [`step-transcripts-and-live-streaming-plan.md`](./step-transcripts-and-live-streaming-plan.md) —
   ephemeral per-step status display, live step streaming, and the SQLite
   transcript store backing tool-call replay.
+- [`end-user-onboarding-plan.md`](./end-user-onboarding-plan.md) — making the
+  native installer the primary onboarding path: a stable agents/state home, a
+  provider-agnostic starter agent, and the guided `calfcord init` /
+  `calfcord agent tools` sub-commands.
