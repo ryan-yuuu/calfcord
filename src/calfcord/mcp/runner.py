@@ -62,12 +62,14 @@ def _resolve_mcp_nodes(servers: Mapping[str, McpServer], config_path: Path) -> l
     topics while appearing healthy in production logs — so an empty ``mcp.json``
     is surfaced at boot rather than served silently.
 
-    The former key/``name=`` mismatch guard is gone: :func:`load_mcp_servers`
-    builds every server via :meth:`calfkit.mcp.McpServers.from_file`, which sets
-    ``name=<config key>``, and the key is validated against ``MCP_CATALOG``
-    (whose keys obey the ``mcp/<server>`` selector grammar that name
-    normalization leaves untouched). So the bridge's ``mcp.<name>.<tool>.*``
-    topics always match the agents' schema-only nodes by construction.
+    The former key/``name=`` mismatch guard is gone. ``McpServer.name`` is the
+    *normalized* name (``.``/``-`` → ``_``), so ``from_file`` setting
+    ``name=<config key>`` is not alone sufficient — the guarantee rests on
+    :func:`load_mcp_servers` requiring every key to exist in ``MCP_CATALOG``,
+    whose keys are constrained to ``[a-z0-9_]`` (the chars topic normalization
+    leaves untouched). So ``server.name == key`` for every loadable server and
+    the bridge's ``mcp.<name>.<tool>.*`` topics match the agents' schema-only
+    nodes by construction.
     """
     nodes = list(servers.values())
     if not nodes:
@@ -90,8 +92,9 @@ async def _amain() -> None:
     except McpConfigError as e:
         raise SystemExit(
             f"failed to load MCP servers from {config_path}: {e}\n"
-            "If a server is missing its committed schema, generate it with: "
-            "uv run calfcord-mcp-codegen <server> --command ... (or --url ...)"
+            "Check the file path, JSON syntax, and that every referenced $VAR is set; "
+            "if a server has no committed schema, run "
+            "`uv run calfcord-mcp-codegen <server> --command ... (or --url ...)`."
         ) from e
     mcp_nodes = _resolve_mcp_nodes(servers, config_path)
 

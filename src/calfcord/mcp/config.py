@@ -6,11 +6,12 @@ environment at *parse* time); the tool *schemas* continue to come from the
 committed, codegen-generated :data:`~calfcord.mcp.catalog.MCP_CATALOG`.
 calfkit's :class:`~calfkit.mcp.McpServers` marries the two.
 
-This module is read only by a *deployment* process (the MCP / tools runner)
-when it calls :func:`load_mcp_servers`. The agent path never calls it, so no
-MCP credential is ever required to import or run an agent — the boundary the
-deleted ``servers.py`` enforced via an import guard is now enforced simply by
-not calling this loader.
+This module is read only by a *deployment* process when it calls
+:func:`load_mcp_servers` — today the ``calfkit-mcp`` bridge runner (the unified
+tools-host will reuse it). The agent path never calls it, so no MCP credential
+is ever required to import or run an agent — the boundary the deleted
+``servers.py`` documented (and ``test_import_isolation.py`` asserts) is now
+enforced simply by not calling this loader.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ def resolve_config_path() -> Path:
 
 
 def load_mcp_servers(
-    path: Path,
+    path: str | Path,
     catalog: Mapping[str, list[McpToolDef]] | None = None,
 ) -> McpServers:
     """Build the live :class:`~calfkit.mcp.McpServers` from ``path``.

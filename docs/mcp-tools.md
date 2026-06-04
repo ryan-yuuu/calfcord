@@ -262,7 +262,7 @@ with `CALFCORD_MCP_CONFIG`). They are **bridge-only** — the agent deployment
 never reads this file. The bridge loads it via
 `calfcord.mcp.config.load_mcp_servers`, which attaches each entry's committed
 schema from `MCP_CATALOG`. The file uses the de-facto `mcpServers` format
-(Claude Desktop / Cursor / VS Code):
+(Claude Desktop / Cursor / Cline / Gemini CLI):
 
 ```json
 {
@@ -392,3 +392,9 @@ Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.
   matches the live server (a tool was added, removed, or its schema
   changed). Fix: regenerate locally (§4), review the diff, and commit the
   refreshed module.
+- **Boot WARNING: `schemas supplied for servers not in mcp.json`.** Benign.
+  The bridge attaches the whole committed catalog, so any server with a
+  committed schema that *this* `mcp.json` doesn't host is named once at boot.
+  Expected when a host deliberately serves a subset of the catalog (another
+  bridge serves the rest) — it is **not** an error, and the bridge still hosts
+  everything declared in `mcp.json`.

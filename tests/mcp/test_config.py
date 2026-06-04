@@ -36,6 +36,9 @@ def test_loads_stdio_server_and_sets_name(tmp_path: Path) -> None:
     assert set(servers) == {"demo"}
     # calfkit sets name=<config key>; the runner relies on this for wire topics.
     assert servers["demo"].name == "demo"
+    # the transport carries the command + args through verbatim
+    assert servers["demo"].transport.command == "echo"
+    assert servers["demo"].transport.args == ("hi",)
 
 
 def test_accepts_bare_shape_without_wrapper(tmp_path: Path) -> None:
@@ -59,6 +62,8 @@ def test_loads_http_server_with_header_auth(tmp_path: Path) -> None:
     )
     servers = load_mcp_servers(cfg, catalog={"web": _DEMO_TOOLS})
     assert servers["web"].name == "web"
+    assert servers["web"].transport.url == "https://example.test/mcp"
+    assert servers["web"].transport.headers["Authorization"] == "Bearer tok"
 
 
 def test_empty_config_yields_empty_registry(tmp_path: Path) -> None:
@@ -70,6 +75,13 @@ def test_empty_config_yields_empty_registry(tmp_path: Path) -> None:
 def test_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(McpConfigError):
         load_mcp_servers(tmp_path / "absent.json", catalog={})
+
+
+def test_malformed_json_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text("{ this is not valid json", encoding="utf-8")
+    with pytest.raises(McpConfigError):
+        load_mcp_servers(cfg, catalog={})
 
 
 def test_server_without_committed_schema_raises(tmp_path: Path) -> None:
@@ -98,6 +110,8 @@ def test_set_env_var_expands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     )
     servers = load_mcp_servers(cfg, catalog={"demo": _DEMO_TOOLS})
     assert set(servers) == {"demo"}
+    # the $VAR resolved to its env value in the built transport
+    assert "s3cret" in servers["demo"].transport.args
 
 
 def test_resolve_config_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
