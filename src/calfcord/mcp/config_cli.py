@@ -22,8 +22,9 @@ Three things this command owns so the operator can't get them wrong:
   expands from the *bridge's* environment at load time (see
   ``docs/mcp-tools.md`` §5/§6). A value with no ``$VAR`` is refused unless
   ``--allow-literal`` is passed for a genuinely non-secret value (e.g. a
-  ``Content-Type`` header), making it structurally impossible to commit a secret
-  by accident.
+  ``Content-Type`` header). The check accepts exactly the values calfkit will
+  expand (escapes like ``$$`` and malformed refs like ``${VAR`` are refused), so
+  the common slip — pasting a raw token — can't reach the committed file.
 * **The on-disk shape stays valid.** The constructed entry is validated against
   calfkit's reference schema (:func:`calfkit.mcp.mcp_json_schema`, new in 0.4.1)
   before the file is touched. The schema validates the *un-expanded* file, so the
@@ -57,11 +58,28 @@ from calfcord.mcp.catalog import MCP_CATALOG
 from calfcord.mcp.config import resolve_config_path
 from calfcord.mcp.selector import is_valid_server_name
 
-# A ``$VAR`` / ``${VAR}`` reference — the only form a committed secret may take
-# (calfkit expands it from the bridge env at load). Mirrors calfkit's expansion
-# grammar so "looks like a reference" here matches "will expand" there; written
-# locally rather than imported because calfkit's pattern is private.
-_VAR_REF = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+# calfkit's ``$VAR`` expansion grammar, replicated so this command accepts a
+# secret reference iff calfkit will actually expand it. Three alternatives, with
+# the ``$$`` escape matched FIRST (calfkit turns it into a literal ``$`` — NOT a
+# reference) so an escaped dollar can't masquerade as a secret, and a balanced
+# ``${VAR}`` required (a bare ``${VAR`` matches nothing here, exactly as in
+# calfkit, so it would ship literal and is refused). Written locally rather than
+# imported because calfkit's pattern is private; kept in lockstep on purpose.
+_VAR_PATTERN = re.compile(r"\$\$|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _references_var(value: str) -> bool:
+    """True iff ``value`` contains a real ``$VAR`` / ``${VAR}`` reference.
+
+    Mirrors calfkit's expander: a match counts as a reference unless it is the
+    ``$$`` escape (which calfkit collapses to a literal ``$``). So this returns
+    True for exactly the values calfkit will expand to a secret, and False for
+    plain tokens, ``$$``-escaped literals, and malformed refs like ``${VAR``
+    that calfkit leaves verbatim — the cases a naive "contains a $" check would
+    wrongly wave through.
+    """
+    return any(m.group(0) != "$$" for m in _VAR_PATTERN.finditer(value))
+
 
 # A bare ``--env NAME`` shorthand must be a valid env var name so the ``$NAME``
 # reference it expands to actually resolves.
@@ -195,7 +213,7 @@ def _kv_pairs(
             raise SystemExit(f"error: {flag} {raw!r} has an empty key")
         if key in out:
             raise SystemExit(f"error: {flag} sets {key!r} more than once")
-        if not allow_literal and not _VAR_REF.search(value):
+        if not allow_literal and not _references_var(value):
             raise SystemExit(
                 f"error: {flag} value for {key!r} has no $VAR reference: {value!r}. "
                 "mcp.json is committed, so secrets must be $VAR references expanded "
@@ -210,17 +228,23 @@ def _build_entry(args: argparse.Namespace) -> dict[str, Any]:
     """Build the mcp.json server spec from the parsed flags.
 
     stdio: ``--command "npx -y x"`` → ``{"command": "npx", "args": ["-y", "x"]}``
-    (shlex-split, the inverse of calfkit's parser). HTTP: ``--url`` → an explicit
+    (shlex-split into the discrete ``command`` + ``args`` fields the mcp.json
+    parser reads already-split). HTTP: ``--url`` → an explicit
     ``{"type": "http", "url": ...}`` (the documented form; the explicit ``type``
     removes any command/url ambiguity). ``args`` / ``env`` / ``headers`` are
     emitted only when non-empty.
 
     Raises:
-        SystemExit: an ``--command`` that is empty after shell-splitting, or a
-            secret-policy violation surfaced by :func:`_kv_pairs`.
+        SystemExit: an ``--command`` that is empty or not valid shell syntax, or
+            a secret-policy violation surfaced by :func:`_kv_pairs`.
     """
     if args.command is not None:
-        parts = shlex.split(args.command)
+        try:
+            parts = shlex.split(args.command)
+        except ValueError as e:
+            raise SystemExit(
+                f"error: --command is not valid shell syntax ({e}): {args.command!r}. Check your quoting."
+            ) from e
         if not parts:
             raise SystemExit(f"error: --command is empty after parsing: {args.command!r}")
         entry: dict[str, Any] = {"command": parts[0]}
@@ -273,7 +297,13 @@ def _load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"mcpServers": {}}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        # A path that exists() can still fail to read — a directory, or a
+        # permission-denied file. calfkit's own loader catches this; mirror it.
+        raise SystemExit(f"error: cannot read {path}: {e}") from e
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise SystemExit(f"error: {path} is not valid JSON: {e}") from e
     if not isinstance(data, dict):
@@ -345,7 +375,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"(dry-run: {path} not modified)", file=sys.stderr)
         return
 
-    _write_config(path, data)
+    try:
+        _write_config(path, data)
+    except OSError as e:
+        # An operator-supplied CALFCORD_MCP_CONFIG can point at a missing parent
+        # dir or an unwritable location — a clean error, not a raw traceback.
+        raise SystemExit(f"error: cannot write {path}: {e}") from e
     print(f"{'updated' if existed else 'added'} server {args.server!r} in {path}")
     _warn_if_no_schema(args.server)
 

@@ -55,6 +55,14 @@ def test_build_entry_empty_command_exits() -> None:
         config_cli._build_entry(args)
 
 
+def test_build_entry_unbalanced_quote_exits() -> None:
+    # A shlex.split ValueError must surface as a clean error, not a traceback.
+    args = config_cli._parse_args(["srv", "--command", "npx 'unbalanced"])
+    with pytest.raises(SystemExit) as ei:
+        config_cli._build_entry(args)
+    assert "valid shell syntax" in str(ei.value)
+
+
 # --------------------------------------------------------------------------
 # secret policy — literals refused unless explicitly allowed
 # --------------------------------------------------------------------------
@@ -93,6 +101,30 @@ def test_header_without_equals_is_refused() -> None:
     with pytest.raises(SystemExit) as ei:
         config_cli._build_entry(args)
     assert "must be KEY=VALUE" in str(ei.value)
+
+
+def test_dollar_dollar_escape_is_refused() -> None:
+    # calfkit collapses $$ to a literal $, so $$VAR ships as the literal "$VAR",
+    # never an expanded secret — the guard must refuse it like any other literal.
+    args = config_cli._parse_args(["srv", "--command", "x", "--env", "TOK=$$VAR"])
+    with pytest.raises(SystemExit) as ei:
+        config_cli._build_entry(args)
+    assert "no $VAR reference" in str(ei.value)
+
+
+def test_unbalanced_brace_reference_is_refused() -> None:
+    # ${VAR (no closing brace) matches nothing in calfkit's grammar → stays literal.
+    args = config_cli._parse_args(["drive", "--url", "https://x", "--header", "X=Bearer ${VAR"])
+    with pytest.raises(SystemExit) as ei:
+        config_cli._build_entry(args)
+    assert "no $VAR reference" in str(ei.value)
+
+
+def test_reference_with_trailing_brace_is_accepted() -> None:
+    # $VAR} is a real reference ($VAR) with a literal trailing } — calfkit expands
+    # it, so the guard accepts it (parity with calfkit, not a naive "$" check).
+    args = config_cli._parse_args(["drive", "--url", "https://x", "--header", "X=$VAR}"])
+    assert config_cli._build_entry(args)["headers"] == {"X": "$VAR}"}
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +202,16 @@ def test_load_config_bare_shape_is_refused(tmp_path: Path) -> None:
     assert "bare/legacy" in str(ei.value)
 
 
+def test_load_config_unreadable_path_exits(tmp_path: Path) -> None:
+    # A directory at the config path exists() but read_text raises OSError —
+    # which must become a clean error, not an IsADirectoryError traceback.
+    d = tmp_path / "mcp.json"
+    d.mkdir()
+    with pytest.raises(SystemExit) as ei:
+        config_cli._load_config(d)
+    assert "cannot read" in str(ei.value)
+
+
 # --------------------------------------------------------------------------
 # main — end-to-end against a tmp mcp.json
 # --------------------------------------------------------------------------
@@ -241,3 +283,67 @@ def test_main_warns_when_no_schema_committed(
     err = capsys.readouterr().err
     assert "no schema module is committed" in err
     assert "calfcord-mcp-codegen gmail" in err
+
+
+def test_main_writes_http_with_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The credential-carrying HTTP path, asserted on disk through validate + write.
+    path = _cfg(tmp_path, monkeypatch)
+    config_cli.main(["drive", "--url", "https://x/d", "--header", "Authorization=Bearer $TOK"])
+    assert json.loads(path.read_text())["mcpServers"]["drive"] == {
+        "type": "http",
+        "url": "https://x/d",
+        "headers": {"Authorization": "Bearer $TOK"},
+    }
+
+
+def test_main_preserves_unrelated_top_level_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A committed mcp.json may carry a "$schema" editor pointer — merging a server
+    # must not drop it (the loader returns and rewrites the whole top-level dict).
+    path = _cfg(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"$schema": "https://x/schema", "mcpServers": {}}), encoding="utf-8")
+    config_cli.main(["drive", "--url", "https://x/d"])
+    assert json.loads(path.read_text())["$schema"] == "https://x/schema"
+
+
+def test_main_unwritable_path_exits_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A CALFCORD_MCP_CONFIG into a missing parent dir is operator-recoverable: a
+    # clean error, not a raw FileNotFoundError traceback.
+    path = tmp_path / "missing_dir" / "mcp.json"
+    monkeypatch.setenv("CALFCORD_MCP_CONFIG", str(path))
+    monkeypatch.setattr(config_cli, "MCP_CATALOG", {"gmail": []})
+    with pytest.raises(SystemExit) as ei:
+        config_cli.main(["gmail", "--command", "npx -y srv"])
+    assert "cannot write" in str(ei.value)
+
+
+def test_main_dry_run_suppresses_no_schema_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Dry-run writes nothing, so it must not warn about a schema for a file it
+    # never wrote — the warning lives after the dry-run early return.
+    path = tmp_path / "mcp.json"
+    monkeypatch.setenv("CALFCORD_MCP_CONFIG", str(path))
+    monkeypatch.setattr(config_cli, "MCP_CATALOG", {})
+    config_cli.main(["ghost", "--command", "npx -y srv", "--dry-run"])
+    assert "no schema module is committed" not in capsys.readouterr().err
+    assert not path.exists()
+
+
+def test_main_dry_run_on_existing_without_force_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The conflict gate precedes the dry-run branch, so dry-run can't be used to
+    # preview an overwrite the operator hasn't authorized with --force.
+    path = _cfg(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {"gmail": {"command": "old"}}}), encoding="utf-8")
+    with pytest.raises(SystemExit) as ei:
+        config_cli.main(["gmail", "--command", "new", "--dry-run"])
+    assert "--force" in str(ei.value)
+
+
+def test_main_force_dry_run_previews_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _cfg(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {"gmail": {"command": "old"}}}), encoding="utf-8")
+    config_cli.main(["gmail", "--command", "new", "--force", "--dry-run"])
+    assert json.loads(path.read_text())["mcpServers"]["gmail"] == {"command": "old"}  # disk untouched
+    assert '"new"' in capsys.readouterr().out  # but the preview shows the overwrite
