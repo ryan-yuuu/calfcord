@@ -42,6 +42,12 @@ class Prompter(Protocol):
         """Yes/no prompt. Returns the boolean answer."""
         ...
 
+    def checkbox(
+        self, message: str, choices: list[tuple[str, str, bool]], *, instruction: str = ""
+    ) -> list[str]:
+        """Multi-select. ``choices`` are ``(value, label, checked)`` triples; returns the selected VALUES."""
+        ...
+
 
 class InquirerPrompter:
     """Real :class:`Prompter` backed by InquirerPy.
@@ -78,6 +84,20 @@ class InquirerPrompter:
         from InquirerPy import inquirer
 
         return inquirer.confirm(message=message, default=default).execute()
+
+    def checkbox(
+        self, message: str, choices: list[tuple[str, str, bool]], *, instruction: str = ""
+    ) -> list[str]:
+        from InquirerPy import inquirer
+        from InquirerPy.base.control import Choice
+
+        # ``enabled`` pre-checks a row; ``.execute()`` on a checkbox returns the
+        # list of selected ``Choice.value``s — i.e. our triples' first element.
+        return inquirer.checkbox(
+            message=message,
+            choices=[Choice(value=value, name=label, enabled=checked) for value, label, checked in choices],
+            instruction=instruction,
+        ).execute()
 
 
 def make_prompter() -> Prompter:

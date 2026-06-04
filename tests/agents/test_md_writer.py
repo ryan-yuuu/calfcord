@@ -7,7 +7,7 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from calfcord.agents.md_writer import update_thinking_effort
+from calfcord.agents.md_writer import _update_fields, update_thinking_effort, update_tools
 
 
 def _seed_md(
@@ -160,6 +160,102 @@ def test_validation_failure_does_not_touch_disk(
 
     with pytest.raises(ValueError, match="simulated validation"):
         update_thinking_effort(md_path, "high")
+
+    assert md_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+# --------------------------------------------------------------- _update_fields ---
+
+
+def test_update_fields_is_the_shared_write_path(tmp_path: Path) -> None:
+    """``_update_fields`` is the generic mutator both wrappers delegate to.
+
+    Driving it directly (with the same dict ``update_thinking_effort`` builds)
+    must produce an identical result, proving the wrapper adds nothing beyond
+    the dict it passes.
+    """
+    md_path = _seed_md(tmp_path)
+    via_generic = _update_fields(md_path, {"thinking_effort": "high"})
+    assert via_generic.thinking_effort == "high"
+    assert frontmatter.load(md_path).metadata["thinking_effort"] == "high"
+
+
+def test_update_thinking_effort_still_works_via_shared_path(tmp_path: Path) -> None:
+    """The thinking-effort wrapper is behaviour-preserved post-generalization."""
+    md_path = _seed_md(tmp_path, thinking_effort="low")
+    updated = update_thinking_effort(md_path, "max")
+    assert updated.thinking_effort == "max"
+    assert frontmatter.load(md_path).metadata["thinking_effort"] == "max"
+
+
+# ------------------------------------------------------------------ update_tools ---
+
+
+def test_update_tools_writes_explicit_list(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    updated = update_tools(md_path, ["read_file", "write_file"])
+    assert updated.tools == ("read_file", "write_file")
+
+    reloaded = frontmatter.load(md_path)
+    assert reloaded.metadata["tools"] == ["read_file", "write_file"]
+
+
+def test_update_tools_preserves_other_frontmatter_fields(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path, agent_id="scheduler", provider="anthropic")
+    update_tools(md_path, ["read_file"])
+
+    reloaded = frontmatter.load(md_path)
+    assert reloaded.metadata["name"] == "scheduler"
+    assert reloaded.metadata["display_name"] == "Scheduler"
+    assert reloaded.metadata["provider"] == "anthropic"
+
+
+def test_update_tools_is_reloadable_via_parse_agent_md(tmp_path: Path) -> None:
+    from calfcord.agents.definition import parse_agent_md
+
+    md_path = _seed_md(tmp_path)
+    update_tools(md_path, ["shell"])
+    re_parsed = parse_agent_md(md_path)
+    assert re_parsed.tools == ("shell",)
+
+
+def test_update_tools_empty_writes_empty_list(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    updated = update_tools(md_path, [])
+    assert updated.tools == ()
+    assert frontmatter.load(md_path).metadata["tools"] == []
+
+
+def test_update_tools_accepts_well_formed_mcp_selector(tmp_path: Path) -> None:
+    """A syntactically valid ``mcp/...`` selector passes even with no catalog.
+
+    Catalog existence is a deployment concern the writer deliberately does not
+    check — mirroring the frontmatter validator's syntax-only stance.
+    """
+    md_path = _seed_md(tmp_path)
+    updated = update_tools(md_path, ["read_file", "mcp/gmail", "mcp/gmail/search"])
+    assert updated.tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
+
+
+def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path, thinking_effort="low")
+    original = md_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown tool 'not_a_real_tool'"):
+        update_tools(md_path, ["read_file", "not_a_real_tool"])
+
+    assert md_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_update_tools_malformed_mcp_selector_raises_and_leaves_file(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path, thinking_effort="low")
+    original = md_path.read_text(encoding="utf-8")
+
+    # ``mcp/a/b/c`` has too many segments — rejected by parse_mcp_selector.
+    with pytest.raises(ValueError, match="mcp/a/b/c"):
+        update_tools(md_path, ["mcp/a/b/c"])
 
     assert md_path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob(".*.tmp")) == []

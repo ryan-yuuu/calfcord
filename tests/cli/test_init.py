@@ -61,6 +61,14 @@ class FakePrompter:
             raise AssertionError(f"unexpected confirm(): {message!r}")
         return self._confirms.popleft()
 
+    def checkbox(
+        self, message: str, choices: list[tuple[str, str, bool]], *, instruction: str = ""
+    ) -> list[str]:
+        # The init flow never multi-selects; this exists only so the fake stays
+        # structurally compatible with the (now checkbox-bearing) Prompter
+        # Protocol — see the agent-tools tests for the driven version.
+        return []
+
 
 def test_fake_prompter_satisfies_protocol() -> None:
     """Guard that the test fake stays structurally compatible with the seam."""

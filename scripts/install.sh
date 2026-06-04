@@ -251,6 +251,7 @@ usage:
                                    calfcord calfkit-router
                                    calfcord calfkit-tools
   calfcord init                  guided first-run config (provider, Discord, broker)
+  calfcord agent tools [<name>]  interactively edit an agent's tool list
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
   exit 2
@@ -284,7 +285,7 @@ _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 # Management subcommands dispatch to the calfcord-cli argparse entry point,
 # exec'd through the SAME locked-venv `uv run` as the runners below.
 case "${1:-}" in
-  init) set -- calfcord-cli "$@" ;;
+  init|agent) set -- calfcord-cli "$@" ;;
 esac
 
 if [ -f "$ENVF" ]; then

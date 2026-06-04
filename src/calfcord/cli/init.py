@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 
 from calfcord.cli import _envfile
+from calfcord.cli._agents import detect_agents
 from calfcord.cli._prompts import Prompter
 
 # (value, label) pairs; values match the ``provider:`` frontmatter Literal and
@@ -84,21 +85,6 @@ def resolve_paths(home: Path | None) -> tuple[Path, Path]:
 def _set_label(value: str) -> str:
     """Render a secret's presence without leaking it: '(currently set)' / '(not set)'."""
     return "(currently set)" if value else "(not set)"
-
-
-def _detect_agents(agents_dir: Path) -> list[str]:
-    """Return the agent names (``.md`` stems) the install would load, sorted.
-
-    Mirrors the loader's skip rules (dotfiles and ``*.template.md`` are not live
-    agents) so the count we report matches what ``calfkit-agent`` would run.
-    """
-    if not agents_dir.is_dir():
-        return []
-    return sorted(
-        p.stem
-        for p in agents_dir.glob("*.md")
-        if not p.name.startswith(".") and not p.name.endswith(".template.md")
-    )
 
 
 def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
@@ -185,7 +171,7 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     print()
 
     # 4. Detect agents ------------------------------------------------------
-    agents = _detect_agents(agents_dir)
+    agents = detect_agents(agents_dir)
     if agents:
         print(f"Found {len(agents)} agent(s) in {agents_dir}: {', '.join(agents)}")
     else:
