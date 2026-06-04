@@ -49,7 +49,7 @@ ensures the provider's credentials, and writes these two vars for you.
 
 | Variable | Required | Description |
 |---|---|---|
-| `CALFKIT_ROUTER_PROVIDER` | optional | Overrides the router's provider. Resolution is `this var → router.md frontmatter → in-code default`. The bundled `router.md` pins `openai-codex`, so out of the box the router needs ChatGPT-Codex auth (`codex-auth.md`); set this to `anthropic`/`openai` to retarget without replacing `router.md`. |
+| `CALFKIT_ROUTER_PROVIDER` | optional | Overrides the router's provider. Resolution is `this var → router.md frontmatter → in-code default`. The bundled `router.md` pins `openai-codex`, so out of the box the router needs Codex (ChatGPT-subscription) auth (`codex-auth.md`); set this to `anthropic`/`openai` to retarget without replacing `router.md`. |
 | `CALFKIT_ROUTER_MODEL` | optional | Overrides the router's model. Same `this var → router.md frontmatter → in-code default` precedence; the bundled `router.md` pins `gpt-5.4-mini`. An invalid value fails loudly at boot, not silently. |
 
 ## Kafka
