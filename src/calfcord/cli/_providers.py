@@ -403,17 +403,18 @@ def _codex_login() -> None:
 
     1. If cached credentials are still valid (or can be silently refreshed),
        report that and stop — re-running the wizard must not force a re-login.
-    2. Otherwise open a browser straight into the login — picking Codex is itself
-       the consent, so there is no extra yes/no prompt. If no browser can open
-       (a headless box), the OAuth helper prints the URL to visit, and a failure
-       still degrades gracefully below.
+    2. Otherwise log in straight away — picking Codex is itself the consent, so
+       there is no extra yes/no prompt. We always use the **device-code** flow:
+       it prints a URL + one-time code to open on any device and polls for
+       completion, with no localhost OAuth callback, so it works identically on a
+       local desktop and over SSH / a headless VM (the browser flow binds a
+       localhost callback the operator's machine can't reach over SSH).
 
-    Any failure (no browser, network, OAuth error) is *caught*, surfaced as a
-    warning with a resume hint (``calfcord calfkit-auth login``, which also
-    offers a device-code flow), and swallowed — the wizard must still proceed to
-    write the rest of the config. Auth is never the thing that aborts setup.
-    The OAuth machinery is imported lazily so this module stays SDK-free at
-    import time.
+    Any failure (network, OAuth error) is *caught*, surfaced as a warning with a
+    resume hint (``calfcord calfkit-auth login``), and swallowed — the wizard
+    must still proceed to write the rest of the config. Auth is never the thing
+    that aborts setup. The OAuth machinery is imported lazily so this module
+    stays SDK-free at import time.
     """
     from openhands.sdk.llm.auth import OpenAISubscriptionAuth
 
@@ -432,9 +433,9 @@ def _codex_login() -> None:
         print("Already authenticated with ChatGPT.")
         return
 
-    print("Logging in to ChatGPT (opening a browser)…")
+    print("Logging in to ChatGPT — open the URL below and enter the code:")
     try:
-        asyncio.run(auth.login(auth_method="browser", open_browser=True))
+        asyncio.run(auth.login(auth_method="device_code", open_browser=False))
     except Exception as exc:
         # Broad on purpose: a declined/failed/aborted OAuth login must never
         # tear down the wizard — warn with a resume hint and let setup finish.

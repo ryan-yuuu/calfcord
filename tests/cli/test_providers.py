@@ -502,11 +502,11 @@ def test_codex_login_already_authenticated_skips_login(
     assert _FakeAuth.login_calls == []  # login NOT attempted
 
 
-def test_codex_login_opens_browser_without_a_prompt(
+def test_codex_login_uses_device_code_without_a_prompt(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Picking Codex is itself the consent — login goes straight to the browser
-    # flow with no yes/no prompt (FakePrompter has no confirms scripted).
+    # Picking Codex is itself the consent — login goes straight to the
+    # device-code flow (works locally and over SSH) with no yes/no prompt.
     _patch_codex_auth(monkeypatch)
     _FakeAuth.refresh_result = None  # not logged in → must log in
     _FakeAuth.refresh_raises = None
@@ -514,7 +514,7 @@ def test_codex_login_opens_browser_without_a_prompt(
 
     _providers.ensure_credentials(FakePrompter(), "openai-codex", env_path=Path("/unused"), current={})
 
-    assert _FakeAuth.login_calls == [{"auth_method": "browser", "open_browser": True}]
+    assert _FakeAuth.login_calls == [{"auth_method": "device_code", "open_browser": False}]
     assert "Logged in to ChatGPT." in capsys.readouterr().out
 
 
@@ -525,8 +525,8 @@ def test_codex_login_refresh_failure_treated_as_not_logged_in(monkeypatch: pytes
     _FakeAuth.login_error = None
 
     _providers.ensure_credentials(FakePrompter(), "openai-codex", env_path=Path("/unused"), current={})
-    # Refresh exception did not abort; the browser login still ran.
-    assert _FakeAuth.login_calls == [{"auth_method": "browser", "open_browser": True}]
+    # Refresh exception did not abort; the device-code login still ran.
+    assert _FakeAuth.login_calls == [{"auth_method": "device_code", "open_browser": False}]
 
 
 def test_codex_login_failure_warns_and_does_not_raise(
