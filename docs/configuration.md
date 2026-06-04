@@ -33,7 +33,7 @@ LLM).
 |---|---|---|
 | `ANTHROPIC_API_KEY` | one of these | API key for `provider: anthropic` agents. |
 | `OPENAI_API_KEY` | one of these | API key for `provider: openai` agents. |
-| `CALFKIT_AGENT_DEFAULT_PROVIDER` | optional | Provider fallback when an agent's `.md` omits `provider:`. Resolution is `frontmatter → this var → anthropic`. The shipped starter agent `assistant` omits `provider:`, so it follows this var; `calfcord init` sets it. |
+| `CALFKIT_AGENT_DEFAULT_PROVIDER` | optional | Provider fallback for any agent whose `.md` omits `provider:` (e.g. the untouched seeded `assistant` before `calfcord init` runs). Resolution is `frontmatter → this var → anthropic`. `calfcord init` both sets this var *and* writes an explicit `provider:` into the agent it creates — so that agent no longer follows the var; the var remains the fallback for any other `.md` that omits `provider:`. |
 | `CALFKIT_AGENT_DEFAULT_MODEL` | optional | Model fallback when an agent's `.md` omits `model:`. Lets a team track its preferred model from one place instead of editing every `.md`. Defaults to the chosen provider's project default. |
 
 The `openai-codex` provider routes through a ChatGPT Plus/Pro subscription

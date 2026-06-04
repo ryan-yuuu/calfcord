@@ -40,15 +40,15 @@ When it finishes, **restart your shell** (or open a new terminal) so the
 `calfcord` command is on your `PATH`.
 
 **3. Configure.** Run the guided setup — it sets up your first agent *and* the
-install's `.env`. It asks for a model provider (Anthropic / OpenAI / Codex
-subscription) and its API key, your Discord bot token and application ID, and a
-Kafka broker, then walks you through your first agent: a name (default
-`assistant`), a description, a model **picked from a live list fetched from the
-provider** (you select one — you can't mistype an invalid slug), and its tools
-(every built-in, **all selected by default** — deselect any you don't want). It
-writes `~/.calfcord/config/.env` plus `~/.calfcord/agents/<name>.md`. Pick
-**Codex** and it logs you in inline via a device code — a URL + one-time code
-you open on any device, so it works the same locally or over SSH:
+install's `.env`. It starts with the agent: a name (default `assistant`), a
+description, a model provider (Anthropic / OpenAI / Codex subscription) and its
+API key, a model **picked from a live list fetched from the provider** (you
+select one — you can't mistype an invalid slug), and its tools (every built-in,
+**all selected by default** — deselect any you don't want). Then it asks for
+your Discord bot token and application ID, and finally a Kafka broker. It writes
+`~/.calfcord/config/.env` plus `~/.calfcord/agents/<name>.md`. Pick **Codex** and
+it logs you in inline via a device code — a URL + one-time code you open on any
+device, so it works the same locally or over SSH:
 
 ```bash
 calfcord init
