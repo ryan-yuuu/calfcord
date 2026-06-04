@@ -39,9 +39,15 @@ curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/ins
 When it finishes, **restart your shell** (or open a new terminal) so the
 `calfcord` command is on your `PATH`.
 
-**3. Configure.** Run the guided setup — it asks for a model provider
-(Anthropic / OpenAI / ChatGPT-Codex) and its API key, your Discord bot token and
-application ID, and a Kafka broker, then writes `~/.calfcord/config/.env`:
+**3. Configure.** Run the guided setup — it sets up your first agent *and* the
+install's `.env`. It asks for a model provider (Anthropic / OpenAI /
+ChatGPT-Codex) and its API key, your Discord bot token and application ID, and a
+Kafka broker, then walks you through your first agent: a name (default
+`assistant`), a description, a model **picked from a live list fetched from the
+provider** (you select one — you can't mistype an invalid slug), and its tools
+(every built-in, **all selected by default** — deselect any you don't want). It
+writes `~/.calfcord/config/.env` plus `~/.calfcord/agents/<name>.md`. Pick
+ChatGPT-Codex and it runs the ChatGPT login inline (no separate command):
 
 ```bash
 calfcord init
@@ -83,6 +89,10 @@ A reply appears from your starter agent. You're live. 🎉
 > - **Customize your agent / add tools** → `calfcord agent tools`, then restart
 >   `calfcord calfkit-agent`. Field reference:
 >   [`docs/authoring-agents.md`](./docs/authoring-agents.md).
+> - **Enable ambient routing (optional)** → `@mentions` work without it;
+>   un-mentioned messages just go unanswered. To have an agent answer those too,
+>   run `calfcord router setup` and start `calfcord calfkit-router`. Details:
+>   [`docs/ambient-routing.md`](./docs/ambient-routing.md).
 > - **Run agents across machines** → install calfcord on each host and point
 >   them all at one shared broker URL —
 >   [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
@@ -94,9 +104,10 @@ A reply appears from your starter agent. You're live. 🎉
 ## Define your own agent
 
 The installer seeds a provider-agnostic starter, `assistant`, in
-`~/.calfcord/agents/` (it follows the provider you chose in `calfcord init` and
-is text-only by default). Your agents live there and survive
-`calfcord self update`.
+`~/.calfcord/agents/` — text-only **until** `calfcord init` configures it (init
+bakes in the provider, model, and tools you picked, replacing the pristine
+seed). Your agents live there and survive `calfcord self update`. This section
+is the guide for adding *more* agents by hand.
 
 An agent is one Markdown file. Drop a new one into `~/.calfcord/agents/`:
 

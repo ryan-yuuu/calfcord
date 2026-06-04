@@ -40,6 +40,18 @@ The `openai-codex` provider routes through a ChatGPT Plus/Pro subscription
 instead of API credits and needs a one-time OAuth login on the host — see
 [`codex-auth.md`](./codex-auth.md).
 
+## Ambient router
+
+Needed on the **`calfkit-router` host only** (the optional ambient-message
+router — see [`ambient-routing.md`](./ambient-routing.md)). The easiest way to
+set both is the `calfcord router setup` wizard, which picks a fast/cheap model,
+ensures the provider's credentials, and writes these two vars for you.
+
+| Variable | Required | Description |
+|---|---|---|
+| `CALFKIT_ROUTER_PROVIDER` | optional | Overrides the router's provider. Resolution is `this var → router.md frontmatter → in-code default`. The bundled `router.md` pins `openai-codex`, so out of the box the router needs ChatGPT-Codex auth (`codex-auth.md`); set this to `anthropic`/`openai` to retarget without replacing `router.md`. |
+| `CALFKIT_ROUTER_MODEL` | optional | Overrides the router's model. Same `this var → router.md frontmatter → in-code default` precedence; the bundled `router.md` pins `gpt-5.4-mini`. An invalid value fails loudly at boot, not silently. |
+
 ## Kafka
 
 | Variable | Required | Description |

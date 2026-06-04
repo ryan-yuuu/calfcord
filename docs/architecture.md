@@ -15,8 +15,11 @@ they share the same `.env` and `agents/*.md`.
   agent subscribes to its configured channel topics plus a private
   `agent.{agent_id}.in` inbox used for direct agent-to-agent (A2A) calls.
 - **`calfkit-router`** — the ambient-channel router. Decides which agent (if
-  any) should handle a non-`@`-mentioned message in a watched channel. See
-  [`ambient-routing.md`](./ambient-routing.md).
+  any) should handle a non-`@`-mentioned message in a watched channel. It is
+  **optional** — without it, `@mention` and slash messages still route directly
+  to agents and only ambient messages go unanswered. Configure it with
+  `calfcord router setup` (which sets `CALFKIT_ROUTER_PROVIDER` /
+  `CALFKIT_ROUTER_MODEL`). See [`ambient-routing.md`](./ambient-routing.md).
 - **`calfkit-tools`** — runs the A2A `private_chat` tool plus the built-in
   filesystem / shell / search / web / todo tools. Intentionally decoupled from
   the bridge (see below).

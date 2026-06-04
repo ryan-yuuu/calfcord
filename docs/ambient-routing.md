@@ -202,6 +202,20 @@ Its history window is intentionally smaller than per-agent assistants
 (default 30) because the router only needs enough context to recognize
 follow-ups vs. fresh topics, not to carry the conversation.
 
+The `calfkit-router` process is **optional**: without it, `@mention` and
+slash messages still route directly to agents (the bridge does that itself);
+only un-`@mentioned` ambient messages go unanswered, and nothing errors (see
+"Hard cutover" below).
+
+`provider` and `model` additionally honor two env-var overrides, so you can
+retarget the router without editing or mounting a replacement `router.md`:
+`CALFKIT_ROUTER_PROVIDER` and `CALFKIT_ROUTER_MODEL`. Their precedence is
+**env var → `router.md` front matter → in-code default**; an unset/empty value
+is ignored, and an invalid value fails loudly at boot. The easiest way to set
+them is the `calfcord router setup` wizard — it defaults to your agent provider
+plus a fast/cheap model, ensures the provider's credentials, and writes both
+vars for you.
+
 The body references the structured-output tool name and the
 `RoutingDecision` field names via `{{ROUTER_OUTPUT_TOOL}}` /
 `{{AGENT_ID_FIELD}}` / `{{REASONING_FIELD}}` placeholders, which the

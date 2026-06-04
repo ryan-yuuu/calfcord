@@ -15,6 +15,14 @@ is the system prompt fed verbatim to the LLM on every run. The format
 parallels Claude Code's `.claude/agents/*.md` convention so the same
 mental model carries over.
 
+Besides hand-writing the file, you can create and configure an agent
+interactively with `calfcord init`: it prompts for the agent's name and
+description, lets you pick a model from a live provider list (a selection, not
+free-text), and offers a tools checkbox (all builtins pre-selected), then writes
+the `<name>.md` for you (under `~/.calfcord/agents/` on a native install). Re-run
+it to update an existing agent's frontmatter in place. To adjust just the tool
+list of a deployed agent, see `calfcord agent tools <name>` in §3.3.
+
 At boot, the bridge scans `agents/` via
 `calfcord.agents.loader.load_agents_dir` and parses each
 `<name>.md` into an `AgentDefinition` (see

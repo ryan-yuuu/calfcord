@@ -18,21 +18,57 @@ so the `calfcord` command is on your `PATH`.
 
 ## 2. Configure
 
-The guided setup asks for a model provider (Anthropic / OpenAI / ChatGPT-Codex)
-and its API key, your Discord bot token and application ID, and a Kafka broker,
-then writes `~/.calfcord/config/.env`:
+The guided setup configures your first agent **and** the install's `.env` in one
+pass:
 
 ```bash
 calfcord init
 ```
 
-It's idempotent — re-run it any time to change a setting. Prefer to edit by
-hand? Open `~/.calfcord/config/.env` directly (it's commented; the full list is
-in [`configuration.md`](configuration.md)):
+It asks for:
+
+- A **model provider** (Anthropic / OpenAI / ChatGPT-Codex) and its API key. If
+  you pick **ChatGPT-Codex**, it runs the ChatGPT login inline — a browser flow,
+  or a headless device-code option — instead of pointing you at a separate
+  command.
+- Your **first agent**: a name (default `assistant`), a description, a **model
+  picked from a live list fetched from the provider** (you select one, so you
+  can't enter a slug the provider would reject), and its **tools** — a checkbox
+  of every built-in with **all pre-selected**; deselect any you don't want, or
+  keep them all.
+- Your **Discord bot token and application ID**.
+- A **Kafka broker** (see [Pick a broker](#pick-a-broker)).
+
+It writes `~/.calfcord/config/.env` plus the agent at
+`~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because the
+tools step defaults to *every* tool, a freshly-configured agent has shell,
+file-write, and web reach — see [`security.md`](security.md#33-tools-native-broker--others-in-docker)
+before exposing it.
+
+It's idempotent — re-run it any time to change a setting (an existing agent of
+the same name is updated in place, body preserved). Prefer to edit by hand? Open
+`~/.calfcord/config/.env` directly (it's commented; the full list is in
+[`configuration.md`](configuration.md)):
 
 ```bash
 $EDITOR ~/.calfcord/config/.env
 ```
+
+### Enable ambient routing (optional)
+
+By default an agent answers only when you `@mention` it; messages **without** an
+`@mention` simply go unanswered (nothing errors). To have an agent also answer
+those ambient messages, run the optional router wizard:
+
+```bash
+calfcord router setup
+```
+
+It explains the router, defaults to **your agent's provider** plus a fast/cheap
+model (the router runs one LLM call per ambient message), ensures that provider's
+credentials, and saves the choice. Then start `calfcord calfkit-router` (step 3)
+alongside the other processes. Skip the wizard and `@mentions` still work. See
+[`ambient-routing.md`](ambient-routing.md) for how routing decides who answers.
 
 ### Pick a broker
 
@@ -64,11 +100,12 @@ install calfcord on each host and point them all at the same broker. See
 
 ## Where your agents live
 
-The installer seeds a provider-agnostic starter agent at
-`~/.calfcord/agents/assistant.md`. Your agents live in `~/.calfcord/agents/` and
-survive `calfcord self update`. To add or remove an agent's tools interactively,
-run `calfcord agent tools [<name>]`, then restart `calfcord calfkit-agent`
-(tools are loaded at agent boot). See
+The installer seeds a text-only starter agent at
+`~/.calfcord/agents/assistant.md`; `calfcord init` (step 2) writes or updates the
+agent there with the provider, model, and tools you chose. Your agents live in
+`~/.calfcord/agents/` and survive `calfcord self update`. To add or remove an
+agent's tools interactively, run `calfcord agent tools [<name>]`, then restart
+`calfcord calfkit-agent` (tools are loaded at agent boot). See
 [`authoring-agents.md`](authoring-agents.md) for the full field reference.
 
 The tools process's workspace defaults to **the directory you launch

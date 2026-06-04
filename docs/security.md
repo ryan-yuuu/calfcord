@@ -235,6 +235,18 @@ process can now reach `$HOME`, `/etc`, and so on), but *more*
 predictable in operational terms — the host user's permissions are
 exactly the boundary.
 
+**`calfcord init` configures the agent with *all* tools selected by
+default.** Its tools step pre-checks every built-in — including `shell`,
+`write_file`, `edit_file`, and the web tools — so a freshly-configured
+agent has the full shell + file-write + web reach described above,
+running in the directory you launch `calfcord calfkit-tools` from and
+drivable by anyone who can `@mention` it. The wizard prints a caution
+when those tools are kept. Deselect what the agent doesn't need (or trim
+later with `calfcord agent tools`), and keep the deployment on a
+trusted/private server, never public Discord (§ 3.4). (The
+installer-seeded `assistant.md` is text-only until you run
+`calfcord init`.)
+
 ### 3.4 Don't expose calfcord to public Discord servers
 
 **Best for:** Any deployment where you don't want every Discord user
