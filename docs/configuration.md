@@ -33,7 +33,8 @@ LLM).
 |---|---|---|
 | `ANTHROPIC_API_KEY` | one of these | API key for `provider: anthropic` agents. |
 | `OPENAI_API_KEY` | one of these | API key for `provider: openai` agents. |
-| `CALFKIT_AGENT_DEFAULT_PROVIDER` | optional | Provider fallback when an agent's `.md` omits `provider:`. Defaults to `anthropic`. |
+| `CALFKIT_AGENT_DEFAULT_PROVIDER` | optional | Provider fallback when an agent's `.md` omits `provider:`. Resolution is `frontmatter → this var → anthropic`. The shipped starter agent `assistant` omits `provider:`, so it follows this var; `calfcord init` sets it. |
+| `CALFKIT_AGENT_DEFAULT_MODEL` | optional | Model fallback when an agent's `.md` omits `model:`. Lets a team track its preferred model from one place instead of editing every `.md`. Defaults to the chosen provider's project default. |
 
 The `openai-codex` provider routes through a ChatGPT Plus/Pro subscription
 instead of API credits and needs a one-time OAuth login on the host — see
@@ -49,11 +50,13 @@ instead of API credits and needs a one-time OAuth login on the host — see
 
 | Variable | Required | Description |
 |---|---|---|
+| `CALFKIT_AGENTS_DIR` | optional | Directory the bridge/agent processes scan for agent `.md` files. On a native install the `calfcord` shim defaults it to `~/.calfcord/agents` (so definitions survive `calfcord self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
+| `CALFKIT_STATE_DIR` | optional | Directory holding per-agent channel-subscription JSON. On a native install the shim defaults it to `~/.calfcord/state/agents` (so it persists regardless of launch directory); dev and Docker keep the CWD-relative `state/agents/`. |
 | `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` | optional | Comma-separated channel IDs seeded on an agent's **first** boot (e.g. `CALFKIT_AGENT_SCRIBE_BOOTSTRAP_CHANNELS`). Falls back to `DISCORD_DEFAULT_CHANNEL_ID`. After first boot, subscriptions live in `state/agents/<name>.json`. |
 | `CALFKIT_TOOLS_TIMEOUT_SECONDS` | optional | Per-call timeout for `private_chat` (default `60`). Other built-in tools have no default per-call timeout at the calfkit layer. |
 | `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel. Code default is `private-a2a-chats`; the bundled `docker-compose.yml` overrides it to `private-a2a`. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
-| `CALFCORD_WORKSPACE_DIR` | optional | Host path the filesystem/search/shell tools resolve against. Native: defaults to `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md). |
+| `CALFCORD_WORKSPACE_DIR` | optional | Host path the filesystem/search/shell tools resolve against. Native install: the `calfcord` shim defaults it to **the directory `calfcord calfkit-tools` was launched from** (`$PWD`, the Claude-Code model — not a hidden dir). Bare `uv run` keeps the CWD-relative `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md) § 3.3. |
 | `CALFCORD_SHELL_BACKEND` | optional | Force the `shell` tool backend: `tmux` \| `subprocess` \| `powershell`. Default auto-detects (tmux if installed, else subprocess). |
 
 ## Per-agent runtime state

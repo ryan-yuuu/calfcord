@@ -172,8 +172,10 @@ INFO calfcord.tools.discovery: registered builtin
      tool=pypi_info from=calfcord.tools.builtin.pypi:pypi_info_tool
 ```
 
-Add the tool to an agent by listing it in the agent's `.md` frontmatter
-`tools:` array — see `agents/agent.template.md`:
+An agent opts into the tool either by listing its name in the agent's
+`.md` frontmatter `tools:` array — see `agents/agent.template.md` — or
+interactively via `calfcord agent tools <name>` (which writes the same
+list back to the `.md`):
 
 ```yaml
 ---

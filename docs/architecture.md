@@ -66,8 +66,21 @@ auth/TLS), see [`distributed-deployment.md`](./distributed-deployment.md).
 
 ## Running modes
 
-The [README quick start](../README.md#quick-start) covers the Docker Compose
-path. Two more modes work with the same `.env` and `agents/*.md`:
+The primary end-user path is the **native installer**: `curl … | bash` drops a
+`calfcord` shim under `~/.calfcord/`, then `calfcord init` walks you through
+first-run config (provider, Discord, broker). On a native install the agent and
+state directories are pinned under the install home — `CALFKIT_AGENTS_DIR` →
+`~/.calfcord/agents` (your `.md` files survive `calfcord self update`) and
+`CALFKIT_STATE_DIR` → `~/.calfcord/state/agents` — while the tools
+**workspace follows the launch directory** (`CALFCORD_WORKSPACE_DIR` → the
+`$PWD` of `calfcord calfkit-tools`, the Claude-Code model). See the
+[README quick start](../README.md#quick-start) and
+[`installation.md`](./installation.md) for the full walkthrough, and
+[`configuration.md`](./configuration.md) for overriding any of those dirs.
+
+Three modes work with the same `.env` and `agents/*.md`. The bare `uv run` and
+Docker Compose paths below never see the shim and keep their CWD-relative
+defaults (`agents/`, `state/agents/`, `state/workspace/`):
 
 ### Native (no Docker for calfcord)
 

@@ -157,6 +157,13 @@ entirely is the opposite** — it grants every registered builtin
 (including `shell` / `write_file` / `edit_file`), per the security note
 above.
 
+Besides hand-editing this array, you can edit a deployed agent's tool
+list interactively with `calfcord agent tools <name>` (an
+InquirerPy multi-select over the builtin + MCP tool universe). It writes
+an explicit `tools:` list back to the `.md`. Because the tool set is
+baked into the calfkit `Agent` at boot, the edit takes effect on the
+next `calfcord calfkit-agent` restart — there is no live reload.
+
 ### 3.4 Behavior (optional)
 
 | Field           | Type | Default | Range  | Effect                                                                      |

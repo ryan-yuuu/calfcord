@@ -23,67 +23,82 @@ Distributed by design: agents and tools are independently deployable anywhere. H
 
 ## Quick start
 
-You'll need [Docker](https://docs.docker.com/get-docker/) and a Discord server
-you own.
+You'll need a Discord server you own. [Docker](https://docs.docker.com/get-docker/)
+is optional — only for running a Kafka broker locally (step 5).
 
 **1. Set up the Discord app** (~5 min, one time) — follow
-[`docs/discord-setup.md`](./docs/discord-setup.md). It gives you the `DISCORD_*`
-values below.
+[`docs/discord-setup.md`](./docs/discord-setup.md). It gives you the bot token
+and application ID you'll enter in step 4.
 
-**2. Configure.** Copy the template and fill in the four essentials:
-
-```bash
-cp .env.example .env
-```
-
-```dotenv
-DISCORD_BOT_TOKEN=...            # from the Discord setup
-DISCORD_APPLICATION_ID=...       # from the Discord setup
-DISCORD_GUILD_ID=...             # your server (for instant slash commands)
-ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY
-```
-
-**3. Add your first agent.** Calfcord ships only a Codex demo agent, so create
-your own — drop a Markdown file at `agents/scribe.md`:
-
-```markdown
----
-name: scribe
-display_name: Scribe
-description: Friendly assistant that answers concisely.
-provider: anthropic
-tools: []
----
-
-You are Scribe, a friendly AI agent. Reply concisely (1–3 sentences).
-```
-
-`tools: []` keeps this first agent text-only; [Define your own agent](#define-your-own-agent)
-below shows how to add tools.
-
-**4. Launch.**
+**2. Install.** One line, no Python/Docker/git needed first:
 
 ```bash
-docker compose up --build
+curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
 ```
 
-This starts the four processes plus a Calfkit broker — five containers in total.
+When it finishes, **restart your shell** (or open a new terminal) so the
+`calfcord` command is on your `PATH`.
 
-**5. Say hello.** In any channel the bot can see:
+**3. Configure.** Run the guided setup — it asks for a model provider
+(Anthropic / OpenAI / ChatGPT-Codex) and its API key, your Discord bot token and
+application ID, and a Kafka broker, then writes `~/.calfcord/config/.env`:
+
+```bash
+calfcord init
+```
+
+**4. Start a broker.** Calfcord's processes talk over Kafka. The easy local
+option is one Redpanda container (`calfcord init` selects
+`CALF_HOST_URL=localhost:19092` and prints this command):
+
+```bash
+docker run -d --name calfcord-redpanda -p 19092:19092 \
+  docker.redpanda.com/redpandadata/redpanda:latest \
+  redpanda start --mode dev-container --smp 1 \
+  --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+  --advertise-kafka-addr internal://localhost:9092,external://localhost:19092
+```
+
+Already have a broker? Pick "I have a broker URL" in `calfcord init`, or run
+`calfcord self set-broker <host:port>`.
+
+**5. Run the four processes** (each in its own terminal, or under a supervisor):
+
+```bash
+calfcord calfkit-bridge     # the Discord gateway
+calfcord calfkit-agent      # runs your agents
+calfcord calfkit-router     # routes un-mentioned messages
+calfcord calfkit-tools      # tools + the agent-to-agent channel
+```
+
+**6. Say hello.** In any channel the bot can see:
 
 ```
-@scribe hello
+@assistant hello
 ```
 
-A reply appears from the agent. You're live. 🎉
+A reply appears from your starter agent. You're live. 🎉
 
-> Prefer running without Docker, or splitting processes across hosts? Use the
-> [one-line native installer](./docs/installation.md), and see
-> [running modes](./docs/architecture.md#running-modes).
+> **Next steps**
+> - **Customize your agent / add tools** → `calfcord agent tools`, then restart
+>   `calfcord calfkit-agent`. Field reference:
+>   [`docs/authoring-agents.md`](./docs/authoring-agents.md).
+> - **Run agents across machines** → install calfcord on each host and point
+>   them all at one shared broker URL —
+>   [`docs/distributed-deployment.md`](./docs/distributed-deployment.md).
+> - **Developing calfcord?** Don't use the installer — clone the repo and use
+>   the `uv` / `docker compose` workflow:
+>   [`CONTRIBUTING.md`](./CONTRIBUTING.md) and
+>   [running modes](./docs/architecture.md#running-modes).
 
 ## Define your own agent
 
-An agent is one Markdown file in `agents/`:
+The installer seeds a provider-agnostic starter, `assistant`, in
+`~/.calfcord/agents/` (it follows the provider you chose in `calfcord init` and
+is text-only by default). Your agents live there and survive
+`calfcord self update`.
+
+An agent is one Markdown file. Drop a new one into `~/.calfcord/agents/`:
 
 ```markdown
 ---
@@ -102,8 +117,12 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sente
 
 The frontmatter declares identity and runtime hints; the body is the system
 prompt. The filename must match `name`, and the slash command is always
-`/<name>`. Drop the file in, restart `calfkit-bridge` and `calfkit-agent`, and
-it's live.
+`/<name>`. Drop the file in, restart `calfcord calfkit-bridge` and
+`calfcord calfkit-agent`, and it's live.
+
+To add or remove an agent's tools interactively, run
+`calfcord agent tools [<name>]` and restart `calfcord calfkit-agent` (tools are
+loaded at agent boot).
 
 Full field reference (providers, models, tool scoping, thinking effort) →
 [`docs/authoring-agents.md`](./docs/authoring-agents.md).
@@ -121,9 +140,11 @@ Any process can run anywhere.
 
 ## Configuration
 
-`.env.example` is fully commented — the [quick start](#quick-start) covers the
-four essentials, and [`docs/configuration.md`](./docs/configuration.md) is the
-complete environment-variable reference.
+`calfcord init` (from the [quick start](#quick-start)) writes
+`~/.calfcord/config/.env` with the essentials. To edit settings later, re-run
+`calfcord init` or open that file directly;
+[`docs/configuration.md`](./docs/configuration.md) is the complete
+environment-variable reference.
 
 ## Documentation
 
@@ -136,7 +157,7 @@ complete environment-variable reference.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
 - [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
-- [`docs/installation.md`](./docs/installation.md) — install & run calfcord natively (no Docker), the `calfcord` CLI, updates/rollback.
+- [`docs/installation.md`](./docs/installation.md) — install, configure (`calfcord init`), and run calfcord; the `calfcord` CLI, updates/rollback.
 - [`docs/design/`](./docs/design/) — historical design notes.
 
 ## Contributing

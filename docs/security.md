@@ -37,7 +37,8 @@ This is deliberately narrow. By default, an agent with `read_file`,
 **cannot** read `agents/*.md`, `state/`, `src/`, or a root-level `.env`,
 because none of those are mounted into the tools container. (Running
 natively instead of in Docker, the default workspace is
-`<cwd>/state/workspace/`; see § 3.3.)
+`<cwd>/state/workspace/` under bare `uv run`, or the launch directory
+under a `calfcord` install; see § 3.3.)
 
 Two things that narrow mount does *not* contain — they define the real
 default blast radius:
@@ -219,6 +220,15 @@ same machine. Isolate by running the tools process under a dedicated
 unprivileged user account, in a VM, or under a container runtime that
 applies stricter syscall filtering than the default
 calfkit-tools image.
+
+A **native install** lands squarely in this model. The `calfcord` shim
+defaults `CALFCORD_WORKSPACE_DIR` to **the directory `calfcord
+calfkit-tools` was launched from** (not a hidden dir), so running it
+inside a project dir gives every agent the same blast radius as Claude
+Code on that machine over that project. Launch the tools process from
+the narrowest directory the agents actually need, and keep the
+deployment off public Discord (§ 3.4) — anyone who can `@mention` an
+agent drives that surface.
 
 Note that this is *less* isolated than 3.1 in absolute terms (the
 process can now reach `$HOME`, `/etc`, and so on), but *more*
