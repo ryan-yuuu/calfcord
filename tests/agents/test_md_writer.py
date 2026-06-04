@@ -7,7 +7,12 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from calfcord.agents.md_writer import _update_fields, update_thinking_effort, update_tools
+from calfcord.agents.md_writer import (
+    _update_fields,
+    update_system_prompt,
+    update_thinking_effort,
+    update_tools,
+)
 
 
 def _seed_md(
@@ -187,6 +192,78 @@ def test_update_thinking_effort_still_works_via_shared_path(tmp_path: Path) -> N
     updated = update_thinking_effort(md_path, "max")
     assert updated.thinking_effort == "max"
     assert frontmatter.load(md_path).metadata["thinking_effort"] == "max"
+
+
+# ------------------------------------------------------------ update_system_prompt ---
+
+
+def test_update_system_prompt_rewrites_body(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path, body="Old body.")
+    updated = update_system_prompt(md_path, "You are Scribe. Be concise.")
+    assert updated.system_prompt == "You are Scribe. Be concise."
+
+    reloaded = frontmatter.load(md_path)
+    assert reloaded.content.strip() == "You are Scribe. Be concise."
+
+
+def test_update_system_prompt_preserves_frontmatter(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path, agent_id="scheduler", provider="anthropic", thinking_effort="high")
+    update_system_prompt(md_path, "Fresh prompt body.")
+
+    reloaded = frontmatter.load(md_path)
+    assert reloaded.metadata["name"] == "scheduler"
+    assert reloaded.metadata["provider"] == "anthropic"
+    assert reloaded.metadata["thinking_effort"] == "high"
+
+
+def test_update_system_prompt_is_reloadable_via_parse_agent_md(tmp_path: Path) -> None:
+    from calfcord.agents.definition import parse_agent_md
+
+    md_path = _seed_md(tmp_path)
+    update_system_prompt(md_path, "Multi-line body.\n\nSecond paragraph.")
+    re_parsed = parse_agent_md(md_path)
+    assert re_parsed.agent_id == "scribe"
+    assert re_parsed.system_prompt == "Multi-line body.\n\nSecond paragraph."
+
+
+def test_update_system_prompt_empty_body_raises_and_leaves_file(tmp_path: Path) -> None:
+    """An empty/whitespace-only body fails the pydantic system_prompt validator
+    before any disk write, leaving the original file untouched."""
+    md_path = _seed_md(tmp_path, body="Original body.")
+    original = md_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="system_prompt"):
+        update_system_prompt(md_path, "   \n  ")
+
+    assert md_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_update_system_prompt_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        update_system_prompt(tmp_path / "ghost.md", "body")
+
+
+def test_update_system_prompt_write_failure_leaves_original_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash during the atomic rename leaves the original unchanged and cleans
+    up the .tmp sibling — same atomic guarantee the field mutators give."""
+    import os
+
+    md_path = _seed_md(tmp_path, body="Original body.")
+    original = md_path.read_text(encoding="utf-8")
+
+    def _raise_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(os, "replace", _raise_replace)
+
+    with pytest.raises(OSError):
+        update_system_prompt(md_path, "New body.")
+
+    assert md_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".*.tmp")) == []
 
 
 # ------------------------------------------------------------------ update_tools ---

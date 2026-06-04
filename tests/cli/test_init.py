@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from calfcord.agents.definition import parse_agent_md
-from calfcord.cli import init
+from calfcord.cli import _agents, agent_create, init
 from calfcord.cli._envfile import read_env, upsert
 from calfcord.cli._prompts import Choice, Prompter
 
@@ -85,15 +85,16 @@ class FakePrompter:
 def _stub_configure_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace the provider sub-flow with a fixed ``(provider, model)``.
 
-    ``configure_provider`` is imported into ``init``'s namespace, so the stub is
-    installed there. It consumes no prompts, so tests don't script provider
-    answers — keeping every wizard test free of any provider SDK / network.
+    ``init`` now delegates agent creation to ``agent_create.create_agent``, which
+    is where ``configure_provider`` is called, so the stub is installed there. It
+    consumes no prompts, so tests don't script provider answers — keeping every
+    wizard test free of any provider SDK / network.
     """
 
     def _fixed(prompter: object, **_: object) -> tuple[str, str]:
         return _FIXED_PROVIDER
 
-    monkeypatch.setattr(init, "configure_provider", _fixed)
+    monkeypatch.setattr(agent_create, "configure_provider", _fixed)
 
 
 def test_fake_prompter_satisfies_protocol() -> None:
@@ -183,7 +184,7 @@ def test_blank_description_uses_default(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(name="scribe", description="")
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    assert parse_agent_md(agents_dir / "scribe.md").description == init._DEFAULT_DESCRIPTION
+    assert parse_agent_md(agents_dir / "scribe.md").description == _agents.DEFAULT_DESCRIPTION
 
 
 # --- tools checkbox ---------------------------------------------------------
@@ -357,18 +358,26 @@ def test_next_steps_name_agent_and_mention_router_setup(
     assert "calfcord router setup" in out
 
 
-# --- _write_agent: branch-level unit tests ----------------------------------
+# --- write_agent: branch-level unit tests -----------------------------------
 
 
-def _write(agents_dir: Path, *, name: str, tools: list[str] | None = None, description: str = "desc") -> Path:
-    """Invoke ``_write_agent`` with sensible fixed provider/model for brevity."""
-    return init._write_agent(
+def _write(
+    agents_dir: Path,
+    *,
+    name: str,
+    tools: list[str] | None = None,
+    description: str = "desc",
+    prune: bool = False,
+) -> Path:
+    """Invoke ``_agents.write_agent`` with sensible fixed provider/model for brevity."""
+    return _agents.write_agent(
         agents_dir,
         name=name,
         description=description,
         provider="anthropic",
         model="claude-haiku-4-5",
         tools=tools if tools is not None else ["read_file"],
+        prune_seed=prune,
     )
 
 
@@ -417,7 +426,7 @@ def test_run_aborts_without_success_banner_when_write_fails(
     def _boom(path: Path, payload: str) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(init, "_atomic_write", _boom)
+    monkeypatch.setattr(_agents, "atomic_write", _boom)
 
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(name="scribe", description="d")
@@ -425,7 +434,7 @@ def test_run_aborts_without_success_banner_when_write_fails(
 
     out = capsys.readouterr().out
     assert rc != 0
-    assert "error: could not create agent 'scribe'" in out
+    assert "error: could not create agent" in out
     assert "Set up agent" not in out
     assert not (agents_dir / "scribe.md").exists()
 
@@ -441,7 +450,7 @@ def test_write_agent_create_assistant_keeps_everything(tmp_path: Path) -> None:
 
 
 def test_write_agent_create_prunes_pristine_seed(tmp_path: Path) -> None:
-    """Naming a new agent deletes a *pristine* seeded assistant.md."""
+    """With ``prune_seed`` (init's first-run), naming a new agent deletes a *pristine* seed."""
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     seed = agents_dir / "assistant.md"
@@ -449,16 +458,37 @@ def test_write_agent_create_prunes_pristine_seed(tmp_path: Path) -> None:
         "---\n"
         "name: assistant\n"
         "display_name: Assistant\n"
-        f"description: {init._DEFAULT_DESCRIPTION}\n"
+        f"description: {_agents.DEFAULT_DESCRIPTION}\n"
         "tools: []\n"
         "---\n\n"
         "You are Assistant, a helpful general-purpose AI teammate. Answer clearly.\n"
     )
 
-    _write(agents_dir, name="scribe")
+    _write(agents_dir, name="scribe", prune=True)
 
     assert (agents_dir / "scribe.md").is_file()
     assert not seed.exists()  # pristine seed pruned
+
+
+def test_write_agent_create_keeps_seed_without_prune_opt_in(tmp_path: Path) -> None:
+    """Without ``prune_seed`` (e.g. ``agent create``), a pristine seed is left untouched."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    seed = agents_dir / "assistant.md"
+    seed.write_text(
+        "---\n"
+        "name: assistant\n"
+        "display_name: Assistant\n"
+        f"description: {_agents.DEFAULT_DESCRIPTION}\n"
+        "tools: []\n"
+        "---\n\n"
+        "You are Assistant, a helpful general-purpose AI teammate. Answer clearly.\n"
+    )
+
+    _write(agents_dir, name="scribe")  # prune defaults off
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert seed.exists()  # starter preserved when not opting in
 
 
 def test_write_agent_create_keeps_customized_seed(tmp_path: Path) -> None:
@@ -476,10 +506,10 @@ def test_write_agent_create_keeps_customized_seed(tmp_path: Path) -> None:
         "You are Assistant, customized. Answer clearly.\n"
     )
 
-    _write(agents_dir, name="scribe")
+    _write(agents_dir, name="scribe", prune=True)  # prune requested, but seed is customized
 
     assert (agents_dir / "scribe.md").is_file()
-    assert seed.exists()  # customized seed kept
+    assert seed.exists()  # customized seed kept even when pruning is requested
     assert parse_agent_md(seed).description == "My custom assistant for our team workflow."
 
 
@@ -490,10 +520,10 @@ def test_write_agent_create_keeps_malformed_seed(tmp_path: Path) -> None:
     seed = agents_dir / "assistant.md"
     seed.write_text("not valid frontmatter at all\n")
 
-    _write(agents_dir, name="scribe")
+    _write(agents_dir, name="scribe", prune=True)  # prune requested, but seed won't parse
 
     assert (agents_dir / "scribe.md").is_file()
-    assert seed.exists()  # malformed → left untouched
+    assert seed.exists()  # malformed → never deleted on a guess
 
 
 def test_write_agent_update_in_place_preserves_body_and_display_name(tmp_path: Path) -> None:

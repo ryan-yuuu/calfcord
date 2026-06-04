@@ -120,6 +120,54 @@ def _update_fields(md_path: Path, updates: dict[str, object]) -> AgentDefinition
     return validated
 
 
+def update_system_prompt(md_path: Path, body: str) -> AgentDefinition:
+    """Rewrite the system-prompt **body** of ``md_path``, validating before write.
+
+    The system prompt is the Markdown body (``post.content``), not a frontmatter
+    metadata field, so it cannot ride :func:`_update_fields`'s metadata-overlay
+    path — it sets ``post.content`` directly instead. Everything else mirrors
+    :func:`_update_fields` exactly: build and validate a synthetic
+    :class:`AgentDefinition` from the mutated state **in memory** (the
+    ``system_prompt`` validator rejects an empty/whitespace-only body, so a bad
+    value raises before any disk write), then atomically rewrite. The on-disk
+    file is left untouched on any failure, keeping a caller's registry copy from
+    diverging from disk — the same desync-prevention invariant the rest of the
+    module upholds. The returned definition is the validated in-memory object,
+    not a re-parse, so a transient post-write read error can't break it either.
+
+    Raises:
+        FileNotFoundError: ``md_path`` does not exist.
+        ValueError: the existing ``.md`` is unparseable YAML, the new ``body`` is
+            empty/whitespace-only, or the mutated metadata otherwise fails
+            :class:`AgentDefinition` validation. The on-disk file is unchanged.
+        OSError: a filesystem error during the atomic write (e.g. permission
+            denied, no space). The on-disk file is unchanged.
+    """
+    try:
+        post = frontmatter.load(md_path)
+    except yaml.YAMLError as e:
+        raise ValueError(f"{md_path}: existing frontmatter is malformed YAML: {e}") from e
+
+    post.content = body
+
+    # Validate the mutated state in memory FIRST, mirroring _update_fields: the
+    # body becomes ``system_prompt`` (stripped, as parse_agent_md does), so an
+    # empty/whitespace-only body fails here — before any bytes touch disk.
+    candidate_metadata = dict(post.metadata)
+    candidate_metadata["system_prompt"] = post.content.strip()
+    candidate_metadata["source_path"] = md_path
+    validated = AgentDefinition(**candidate_metadata)
+
+    payload = frontmatter.dumps(post)
+    if not payload.endswith("\n"):
+        payload += "\n"
+
+    _atomic_write_text(md_path, payload)
+    logger.info("rewrote system_prompt in %s", md_path)
+
+    return validated
+
+
 def update_thinking_effort(md_path: Path, value: ThinkingEffort) -> AgentDefinition:
     """Rewrite the ``thinking_effort`` frontmatter field in ``md_path``.
 

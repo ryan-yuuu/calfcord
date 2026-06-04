@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.cli import init, router_setup
+from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, init, router_setup
 from calfcord.cli.main import main
 
 
@@ -93,3 +93,147 @@ def test_resolve_paths_agents_dir_override_wins(monkeypatch: pytest.MonkeyPatch,
     _, dev_agents = init.resolve_paths(None)
     assert native_agents == Path(os.environ["CALFKIT_AGENTS_DIR"])
     assert dev_agents == Path(os.environ["CALFKIT_AGENTS_DIR"])
+
+
+# --- agent verb group: help + dispatch -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ["create", "list", "show", "edit", "set", "rename", "delete", "tools"],
+)
+def test_main_agent_subcommand_help_exits_zero(verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["agent", verb, "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_agent_requires_subcommand() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["agent"])
+    assert exc.value.code != 0
+
+
+def _use_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point the resolver at temp agents/state dirs via the env overrides."""
+    monkeypatch.setenv("CALFKIT_AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setenv("CALFKIT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+
+def test_main_agent_list_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def _run_list(agents_dir: Path, *, as_json: bool) -> int:
+        captured.update(agents_dir=agents_dir, as_json=as_json)
+        return 0
+
+    monkeypatch.setattr(agent_inspect, "run_list", _run_list)
+    assert main(["agent", "list", "--json"]) == 0
+    assert captured == {"agents_dir": tmp_path / "agents", "as_json": True}
+
+
+def test_main_agent_set_collects_flags_and_provider_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def _run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
+        captured.update(name=name, updates=updates)
+        return 0
+
+    monkeypatch.setattr(agent_lifecycle, "run_set", _run_set)
+    rc = main([
+        "agent", "set", "scribe",
+        "--description", "Has: colon",
+        "--thinking-effort", "high",
+        "--tools", "read_file,shell",
+        "--provider", "openai",
+        "--model", "gpt-5-nano",
+    ])
+    assert rc == 0
+    assert captured["name"] == "scribe"
+    assert captured["updates"] == {
+        "description": "Has: colon",
+        "thinking_effort": "high",
+        "tools": "read_file,shell",
+        "provider": "openai",
+        "model": "gpt-5-nano",
+    }
+
+
+def test_main_agent_set_expands_prompt_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are Scribe.\nBe terse.\n")
+    captured: dict[str, object] = {}
+
+    def _run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
+        captured.update(updates=updates)
+        return 0
+
+    monkeypatch.setattr(agent_lifecycle, "run_set", _run_set)
+    assert main(["agent", "set", "scribe", f"--system-prompt=@{prompt_file}"]) == 0
+    assert captured["updates"] == {"system_prompt": "You are Scribe.\nBe terse.\n"}
+
+
+def test_main_agent_set_missing_prompt_file_errors_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    assert main(["agent", "set", "scribe", "--system-prompt=@/no/such/file.md"]) == 1
+    assert "error:" in capsys.readouterr().out
+
+
+def test_main_agent_rename_passes_state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def _run_rename(agents_dir: Path, state_dir: Path, old: str, new: str) -> int:
+        captured.update(agents_dir=agents_dir, state_dir=state_dir, old=old, new=new)
+        return 0
+
+    monkeypatch.setattr(agent_lifecycle, "run_rename", _run_rename)
+    assert main(["agent", "rename", "scribe", "penny"]) == 0
+    assert captured == {
+        "agents_dir": tmp_path / "agents",
+        "state_dir": tmp_path / "state",
+        "old": "scribe",
+        "new": "penny",
+    }
+
+
+def test_main_agent_delete_passes_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def _run_delete(
+        prompter: object, agents_dir: Path, state_dir: Path, name: str, *, yes: bool, keep_state: bool
+    ) -> int:
+        captured.update(name=name, yes=yes, keep_state=keep_state)
+        return 0
+
+    monkeypatch.setattr(agent_lifecycle, "run_delete", _run_delete)
+    assert main(["agent", "delete", "scribe", "--yes", "--keep-state"]) == 0
+    assert captured == {"name": "scribe", "yes": True, "keep_state": True}
+
+
+def test_main_agent_create_and_edit_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_dirs(monkeypatch, tmp_path)
+    seen: list[tuple[str, str | None]] = []
+
+    def _create(prompter: object, *, agents_dir: Path, env_path: Path, name: str | None) -> int:
+        seen.append(("create", name))
+        return 0
+
+    def _edit(prompter: object, *, agents_dir: Path, env_path: Path, name: str | None) -> int:
+        seen.append(("edit", name))
+        return 0
+
+    monkeypatch.setattr(agent_create, "run", _create)
+    monkeypatch.setattr(agent_edit, "run", _edit)
+    assert main(["agent", "create", "scribe"]) == 0
+    assert main(["agent", "edit"]) == 0
+    assert seen == [("create", "scribe"), ("edit", None)]
