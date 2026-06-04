@@ -540,6 +540,7 @@ dependencies = [
     { name = "authlib" },
     { name = "calfkit", extra = ["mcp-codegen"] },
     { name = "discord-py" },
+    { name = "jsonschema" },
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
     { name = "pydantic-settings" },
@@ -561,6 +562,7 @@ requires-dist = [
     { name = "authlib", specifier = ">=1.7.2" },
     { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.4.0" },
     { name = "discord-py", specifier = ">=2.7.1" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
     { name = "openhands-tools", specifier = ">=1.23.1" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
@@ -578,7 +580,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.4.0"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -597,9 +599,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/96/ed/e9c61e57b07f1062d75f67a286db39d1933e0ef1b121e3306edc01d7d7cb/calfkit-0.4.0.tar.gz", hash = "sha256:33f2feae39df7527dc17698ebadc6030bf51e68ae4fa0ff26c7161b6e3f5d7ed", size = 705734, upload-time = "2026-06-04T07:08:31.735Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/65/5758c54d840d0a3a035172856f62f7f7769db2fd2419fbccf9639d1f2b6e/calfkit-0.4.1.tar.gz", hash = "sha256:2d3b7dea768ab577276b29e6aaaf1a5ed10c895f7f2d32efdd23859272f2021a", size = 719666, upload-time = "2026-06-04T09:05:28.112Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/fe/23ee8252b21b2e539ba6fe683633a7f3755f1869126bd09cbcff5876eee8/calfkit-0.4.0-py3-none-any.whl", hash = "sha256:30cffc883abaff08d3a63ac44cd66788a8d5c7c75e2794bcc6195d6c75ae5f0f", size = 631277, upload-time = "2026-06-04T07:08:29.914Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/9a/8b0ea7fb833ad163b11696e74250c49495a9b6dd8137a2bcc4d0407b6a24/calfkit-0.4.1-py3-none-any.whl", hash = "sha256:3948dbd10a9219ba529c6c94c2db9a8bdb61d5148a2e2045eadf3354551f36d9", size = 634430, upload-time = "2026-06-04T09:05:26.44Z" },
 ]
 
 [package.optional-dependencies]

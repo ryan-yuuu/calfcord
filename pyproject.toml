@@ -9,6 +9,7 @@ dependencies = [
     "authlib>=1.7.2",
     "calfkit[mcp-codegen]~=0.4.0",
     "discord-py>=2.7.1",
+    "jsonschema>=4.26.0",
     "openhands-sdk>=1.23.1",
     "openhands-tools>=1.23.1",
     "pydantic-settings>=2.14.1",
@@ -28,6 +29,7 @@ calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-package-tools = "calfcord.packaging.cli_tools:main"
 calfcord-package-agents = "calfcord.packaging.cli_agents:main"
 calfcord-mcp-codegen = "calfcord.mcp.codegen_cli:main"
+calfcord-mcp-add = "calfcord.mcp.config_cli:main"
 
 [build-system]
 requires = ["hatchling"]

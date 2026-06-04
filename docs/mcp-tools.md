@@ -299,6 +299,49 @@ Things to note:
   is no separate `token` field. Set the real values in the bridge's
   environment.
 
+### Generating the entry with `calfcord-mcp-add`
+
+You can hand-write the entry above, or generate it with **`calfcord-mcp-add`**
+— the bridge-side companion to `calfcord-mcp-codegen` (§4). Codegen writes the
+*schema* the agent reads; this writes the *transport* entry the bridge reads.
+Both are keyed by the same server name. Unlike codegen, this command **never
+connects to the server** — the entry is built purely from the flags, so it is
+offline and instant.
+
+```bash
+# stdio — the secret is referenced by env-var NAME and written as a $VAR
+uv run calfcord-mcp-add gmail \
+  --command "npx -y @some-org/gmail-mcp-server" \
+  --env GMAIL_OAUTH_TOKEN
+
+# HTTP — auth as a header whose value MUST contain a $VAR reference
+uv run calfcord-mcp-add drive \
+  --url https://mcp.example.com/drive \
+  --header "Authorization=Bearer $DRIVE_MCP_TOKEN"
+```
+
+What it owns so you can't get it wrong:
+
+- **It refuses to write a literal secret.** Every `--env` / `--header` value
+  must carry a `$VAR` reference (the bullet above); a literal value is rejected
+  unless you pass `--allow-literal` for a genuinely non-secret value (e.g.
+  `--header "Content-Type=application/json"`). `--env NAME` is shorthand for
+  `NAME=$NAME`; use `--env KEY=$HOST_VAR` when the subprocess key and the host
+  variable differ.
+- **It validates the entry** against calfkit's reference schema
+  (`calfkit.mcp.mcp_json_schema()`) before writing — the *un-expanded* shape, so
+  none of the `$VAR` secrets need to be set in your shell.
+- **It merges, never clobbers.** The entry is added under `mcpServers`
+  (creating `mcp.json` if absent, honoring `CALFCORD_MCP_CONFIG`); an existing
+  server is left alone unless you pass `--force`. Use `--dry-run` to print the
+  merged result without writing.
+- **It warns if you haven't codegen'd the schema yet** — the inverse of
+  codegen's verify, so the two-command pair stays in sync.
+
+The server name is validated against the same selector grammar codegen enforces
+(`[a-z0-9_]{1,64}`), so a typo fails here rather than as an `unknown server` at
+bridge boot.
+
 ## 6. Required environment (bridge only)
 
 The agent deployment needs **nothing new** for MCP — no Node, no MCP
@@ -324,7 +367,8 @@ isolation guarantee from §3.
 
 1. **Codegen the schema module** into `src/calfcord/mcp/schemas/<server>.py`
    (§4), and commit it.
-2. **Declare the server** in `mcp.json` — add an entry under `mcpServers`
+2. **Declare the server** in `mcp.json` — run `calfcord-mcp-add <server>
+   --command/--url …` (or hand-write the entry) to add it under `mcpServers`
    with its command/url plus `$VAR` secret references (§5). The bridge
    attaches `MCP_CATALOG["<server>"]` automatically.
 3. **Reference it from an agent** by adding `mcp/<server>` or
