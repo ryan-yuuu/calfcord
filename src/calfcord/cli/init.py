@@ -38,8 +38,11 @@ import re
 import tempfile
 from pathlib import Path
 
+import frontmatter
+
 from calfcord.agents import md_writer
-from calfcord.agents.definition import parse_agent_md
+from calfcord.agents.definition import AgentDefinition, parse_agent_md
+from calfcord.agents.identifier import AGENT_ID_PATTERN
 from calfcord.cli import _envfile
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._prompts import Choice, Prompter
@@ -47,24 +50,6 @@ from calfcord.cli._providers import configure_provider
 from calfcord.cli.agent_tools import first_line
 
 logger = logging.getLogger(__name__)
-
-# Selectable providers; values match the ``provider:`` frontmatter Literal
-# (:data:`calfcord.agents.definition.Provider`) and the
-# ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env var that drives the default. A drift
-# guard test keeps this list in sync with the Literal.
-PROVIDERS: list[Choice] = [
-    Choice("anthropic", "Anthropic (Claude)"),
-    Choice("openai", "OpenAI (GPT)"),
-    Choice("openai-codex", "ChatGPT subscription (Codex)"),
-]
-
-# Providers that authenticate via a plain API-key env var. ``openai-codex`` is
-# absent on purpose: it uses the OAuth flow behind ``calfcord calfkit-auth``,
-# not a key in ``.env``.
-PROVIDER_KEY_VAR: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-}
 
 # The one-liner that starts a throwaway local Redpanda matching
 # ``CALF_HOST_URL=localhost:19092``. Printed (never executed) so the operator
@@ -141,10 +126,16 @@ def _slug_stem(raw: str) -> str:
     """
     slug = _STEM_INVALID.sub("_", raw.strip().lower()).strip("_-")
     slug = slug[:32].strip("_-")
-    return slug or _STARTER_AGENT_NAME
+    result = slug or _STARTER_AGENT_NAME
+    # Postcondition: the stem is a valid agent id, so callers can write it as a
+    # filename without a second validation. The fallback guarantees non-empty,
+    # and slugification guarantees the charset/length, so this can only fire on
+    # a bug in those rules — assert rather than silently emit an invalid stem.
+    assert AGENT_ID_PATTERN.fullmatch(result), f"slugified stem {result!r} is not a valid agent id"
+    return result
 
 
-def _existing_agent(agents_dir: Path, name: str) -> object | None:
+def _existing_agent(agents_dir: Path, name: str) -> AgentDefinition | None:
     """Return the parsed agent at ``agents_dir/<name>.md`` if it parses, else ``None``.
 
     Used purely to pre-fill the description/model prompts with the operator's
@@ -211,7 +202,7 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     # Pre-fill from the agent we're about to write to, if it already exists, so
     # a re-run shows the current description; otherwise offer the seed default.
     prior = _existing_agent(agents_dir, name)
-    desc_default = getattr(prior, "description", None) or _DEFAULT_DESCRIPTION
+    desc_default = (prior.description if prior else None) or _DEFAULT_DESCRIPTION
     typed_desc = prompter.text("Agent description:", default=desc_default)
     description = typed_desc.strip() or _DEFAULT_DESCRIPTION
 
@@ -226,7 +217,7 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
         current=current,
         default_provider=current.get(_DEFAULT_PROVIDER_VAR) or "anthropic",
         cheap=False,
-        current_model=getattr(prior, "model", None),
+        current_model=prior.model if prior else None,
     )
     _envfile.upsert(env_path, {_DEFAULT_PROVIDER_VAR: provider})
 
@@ -238,14 +229,22 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     print()
 
     # 5. Write the agent file -----------------------------------------------
-    _write_agent(
-        agents_dir,
-        name=name,
-        description=description,
-        provider=provider,
-        model=model,
-        tools=selected,
-    )
+    # A validation or filesystem failure here means no usable agent landed on
+    # disk, so abort *before* prompting for Discord/broker and before the
+    # success banner — reporting success on a half-configured install would
+    # send the operator off to boot processes against an agent that won't load.
+    try:
+        _write_agent(
+            agents_dir,
+            name=name,
+            description=description,
+            provider=provider,
+            model=model,
+            tools=selected,
+        )
+    except (ValueError, OSError) as e:
+        print(f"error: could not create agent {name!r}: {e}")
+        return 1
 
     print()
 
@@ -339,9 +338,11 @@ def _pick_tools(prompter: Prompter, name: str) -> list[str]:
 
     try:
         catalog = discover_mcp_catalog(schemas_pkg)
-    except (ImportError, ValueError) as e:
+    except Exception as e:
         # A broken generated schema must not brick setup: degrade to builtins
-        # only, loudly, so the operator sees the cause.
+        # only, loudly, so the operator sees the cause. Broad on purpose — a
+        # corrupt generated module can raise SyntaxError / AttributeError too,
+        # not just ImportError / ValueError, and none of them should abort setup.
         print(f"warning: MCP catalog failed to load, showing builtins only: {e}")
         catalog = {}
 
@@ -371,28 +372,25 @@ def _pick_tools(prompter: Prompter, name: str) -> list[str]:
     return selected
 
 
-def _agent_template(*, name: str, description: str, provider: str, model: str, tools: list[str]) -> str:
-    """Render a fresh ``agents/<name>.md`` for a brand-new agent.
+def _display_name_for(name: str) -> str:
+    """Derive a sane default ``display_name`` from the agent's slug stem.
 
-    Only fields :class:`AgentDefinition` knows are emitted (it forbids extras),
-    so the result re-parses. ``display_name`` is the title-cased name — a sane
-    default the operator can refine later. ``tools`` renders as a YAML flow list
-    (``[a, b]`` / ``[]``); both forms are valid YAML the frontmatter validator
-    accepts. The body is a minimal, generic system prompt so the agent answers
-    sensibly from the first boot without further editing.
+    Title-casing the underscore/dash-split stem ("my_helper" → "My Helper")
+    gives a human-friendly default the operator can refine later, without
+    forcing a separate prompt during first-run setup.
     """
-    display_name = name.replace("_", " ").replace("-", " ").title()
-    tools_yaml = "[" + ", ".join(tools) + "]"
+    return name.replace("_", " ").replace("-", " ").title()
+
+
+def _agent_body(display_name: str) -> str:
+    """Render the generic system-prompt body for a brand-new agent.
+
+    A minimal, generic prompt so the agent answers sensibly from the first boot
+    without further editing. Kept separate from the frontmatter so the create
+    path can serialize identity fields through ``frontmatter.dumps`` (which
+    YAML-quotes free-text values safely) rather than string interpolation.
+    """
     return (
-        "---\n"
-        f"name: {name}\n"
-        f"display_name: {display_name}\n"
-        f"description: {description}\n"
-        f"provider: {provider}\n"
-        f"model: {model}\n"
-        f"tools: {tools_yaml}\n"
-        "---\n"
-        "\n"
         f"You are {display_name}, a helpful AI teammate in this Discord workspace. Answer\n"
         "questions and help with tasks clearly and concisely. If you don't know something,\n"
         "say so rather than guessing.\n"
@@ -453,46 +451,63 @@ def _write_agent(
 ) -> Path:
     """Create or update ``agents_dir/<name>.md`` for the wizard's agent.
 
-    Two paths:
+    Two paths, both validate-before-write so a bad value never lands on disk:
 
     * **Target exists** — update the agent in place, preserving its body and
       ``display_name``: rewrite ``description``/``provider``/``model`` via
       :func:`md_writer._update_fields`, then the tool list via
       :func:`md_writer.update_tools`. Both are validated-atomic, so a bad value
       leaves the file untouched.
-    * **Target missing** — write a fresh file from :func:`_agent_template`
-      atomically, then, when the operator named a *different* agent
-      (``name != "assistant"``) on an install that still carries the *pristine*
-      seeded ``assistant.md``, delete that seed so they end with one clean agent
-      rather than the starter plus their new one. A *customized* ``assistant.md``
-      (or naming the agent ``assistant`` itself) is never deleted.
+    * **Target missing** — build the frontmatter as a mapping and serialize it
+      with :func:`frontmatter.dumps` (NOT string interpolation), which
+      YAML-quotes free-text values so a description like ``"Calendar: book
+      meetings"`` or one carrying quotes/``#``/leading punctuation can't corrupt
+      the file. The synthetic :class:`AgentDefinition` is built *first* (mirroring
+      :func:`md_writer._update_fields`), so an invalid value raises before any
+      disk write. After the atomic write, when the operator named a *different*
+      agent (``name != "assistant"``) on an install still carrying the *pristine*
+      seeded ``assistant.md``, that seed is deleted so they end with one clean
+      agent. A *customized* ``assistant.md`` (or naming the agent ``assistant``
+      itself) is never deleted.
 
-    Finally the written file is re-parsed as a defensive check: the values all
-    came from validated picks, so a failure here is unexpected, but surfacing it
-    is better than reporting success on a file the loader would reject. The path
-    is returned regardless.
+    Raises:
+        ValueError: a field value fails :class:`AgentDefinition` validation
+            (create path) or the existing ``.md``/new value is invalid (update
+            path). No partial file is written.
+        OSError: a filesystem error during the atomic write. No partial file is
+            written.
     """
     target = agents_dir / f"{name}.md"
 
     if target.exists():
         md_writer._update_fields(target, {"description": description, "provider": provider, "model": model})
         md_writer.update_tools(target, tools)
-    else:
-        payload = _agent_template(
-            name=name, description=description, provider=provider, model=model, tools=tools
-        )
-        _atomic_write(target, payload)
-        # Prune the pristine starter only when a *different* agent was created;
-        # naming the agent ``assistant`` would have hit the update path above.
-        if name != _STARTER_AGENT_NAME and _is_pristine_seed(agents_dir):
-            (agents_dir / f"{_STARTER_AGENT_NAME}.md").unlink(missing_ok=True)
-            logger.info("pruned pristine seed assistant.md after creating %s", target)
+        return target
 
-    try:
-        parse_agent_md(target)
-    except (ValueError, OSError) as e:
-        # The values came from validated picks, so this is defensive only —
-        # report rather than crash, and still return the path the caller wrote.
-        print(f"error: wrote an invalid agent file: {e}")
+    display_name = _display_name_for(name)
+    body = _agent_body(display_name)
+    metadata = {
+        "name": name,
+        "display_name": display_name,
+        "description": description,
+        "provider": provider,
+        "model": model,
+        "tools": list(tools),
+    }
+    # Validate the full definition in memory FIRST (mirrors
+    # md_writer._update_fields): a bad free-text value raises here, before any
+    # bytes touch disk, so the create path can never leave an unloadable file.
+    AgentDefinition(**{**metadata, "system_prompt": body, "source_path": target})
+
+    payload = frontmatter.dumps(frontmatter.Post(body, **metadata))
+    if not payload.endswith("\n"):
+        payload += "\n"
+    _atomic_write(target, payload)
+
+    # Prune the pristine starter only when a *different* agent was created;
+    # naming the agent ``assistant`` would have hit the update path above.
+    if name != _STARTER_AGENT_NAME and _is_pristine_seed(agents_dir):
+        (agents_dir / f"{_STARTER_AGENT_NAME}.md").unlink(missing_ok=True)
+        logger.info("pruned pristine seed assistant.md after creating %s", target)
 
     return target

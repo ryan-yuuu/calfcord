@@ -357,25 +357,6 @@ def test_next_steps_name_agent_and_mention_router_setup(
     assert "calfcord router setup" in out
 
 
-# --- provider drift guard ---------------------------------------------------
-
-
-def test_providers_match_provider_literal() -> None:
-    """``init.PROVIDERS`` must stay in lockstep with the authoritative Literal.
-
-    ``Provider`` (a ``Literal``) is the single source of truth for supported
-    providers; ``PROVIDERS`` re-lists those values for the picker. A test (not a
-    production assert) catches the two drifting apart without coupling at import
-    time.
-    """
-    from typing import get_args
-
-    from calfcord.agents.definition import Provider
-
-    assert {c.value for c in init.PROVIDERS} == set(get_args(Provider))
-    assert set(init.PROVIDER_KEY_VAR) <= {c.value for c in init.PROVIDERS}
-
-
 # --- _write_agent: branch-level unit tests ----------------------------------
 
 
@@ -389,6 +370,64 @@ def _write(agents_dir: Path, *, name: str, tools: list[str] | None = None, descr
         model="claude-haiku-4-5",
         tools=tools if tools is not None else ["read_file"],
     )
+
+
+# Free-text descriptions that broke the old string-interpolated create path:
+# a colon-space pair starts a YAML mapping, leading ``-`` a sequence, ``"``/``#``
+# inject quoting/comment syntax. ``frontmatter.dumps`` must quote them so the
+# file round-trips with the description preserved verbatim.
+_TRICKY_DESCRIPTIONS = [
+    "Calendar: book and prep meetings",
+    'has "quotes" and #hash',
+    "leading: colon",
+    "- dashy",
+]
+
+
+@pytest.mark.parametrize("description", _TRICKY_DESCRIPTIONS)
+def test_write_agent_create_roundtrips_tricky_descriptions(tmp_path: Path, description: str) -> None:
+    """A free-text description with YAML-significant chars must survive the create path."""
+    agents_dir = tmp_path / "agents"
+    target = _write(agents_dir, name="scribe", description=description)
+    # The file the create path wrote must re-parse with the exact input.
+    assert parse_agent_md(target).description == description
+
+
+@pytest.mark.parametrize("description", _TRICKY_DESCRIPTIONS)
+def test_run_create_roundtrips_tricky_descriptions(tmp_path: Path, description: str) -> None:
+    """The full wizard create flow must also round-trip a tricky description."""
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description=description)
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert parse_agent_md(agents_dir / "scribe.md").description == description
+
+
+def test_run_aborts_without_success_banner_when_write_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed agent write must return non-zero and never print the success banner.
+
+    The create path validates before writing, so to force a *write* failure we
+    monkeypatch the atomic-write helper to raise ``OSError`` (e.g. permission
+    denied / no space). ``run`` must surface the error and stop — printing the
+    "Set up agent ..." banner / next-steps on a half-configured install would
+    send the operator off to boot processes against an agent that won't load.
+    """
+
+    def _boom(path: Path, payload: str) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(init, "_atomic_write", _boom)
+
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="d")
+    rc = _run(prompter, tmp_path, agents_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert "error: could not create agent 'scribe'" in out
+    assert "Set up agent" not in out
+    assert not (agents_dir / "scribe.md").exists()
 
 
 def test_write_agent_create_assistant_keeps_everything(tmp_path: Path) -> None:

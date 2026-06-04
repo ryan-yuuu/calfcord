@@ -272,6 +272,90 @@ def test_list_models_unknown_provider_raises_model_list_error() -> None:
         _providers.list_models("nope", api_key=None)
 
 
+# --- list_models: auth-error distinction (ModelAuthError) -------------------
+
+
+def _auth_error(provider: str) -> Exception:
+    """Build a real provider-SDK ``AuthenticationError`` (needs an httpx response)."""
+    import httpx
+
+    request = httpx.Request("GET", "https://example.invalid/v1/models")
+    response = httpx.Response(401, request=request)
+    if provider == "openai":
+        import openai
+
+        return openai.AuthenticationError("invalid api key", response=response, body=None)
+    import anthropic
+
+    return anthropic.AuthenticationError("invalid api key", response=response, body=None)
+
+
+def test_list_models_openai_auth_error_raises_model_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Reject:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            raise _auth_error("openai")
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _Reject)
+
+    with pytest.raises(_providers.ModelAuthError):
+        _providers.list_models("openai", api_key="sk-bad")
+    # ModelAuthError is a ModelListError, so the existing fall-back handler still catches it.
+    assert issubclass(_providers.ModelAuthError, _providers.ModelListError)
+
+
+def test_list_models_anthropic_auth_error_raises_model_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Reject:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            raise _auth_error("anthropic")
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _Reject)
+
+    with pytest.raises(_providers.ModelAuthError):
+        _providers.list_models("anthropic", api_key="sk-bad")
+
+
+def test_list_models_non_auth_failure_stays_generic_model_list_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-auth failure must remain a plain ModelListError, not a ModelAuthError."""
+
+    class _Boom:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            raise RuntimeError("no network")
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _Boom)
+
+    with pytest.raises(_providers.ModelListError) as excinfo:
+        _providers.list_models("openai", api_key="sk-test")
+    assert not isinstance(excinfo.value, _providers.ModelAuthError)
+
+
+def test_pick_model_auth_error_prints_loud_rejected_warning_then_falls_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rejected key must surface the LOUD REJECTED line before the curated fallback."""
+
+    def _raise(provider: str, *, api_key: str | None) -> list[Choice]:
+        raise _providers.ModelAuthError("rejected")
+
+    monkeypatch.setattr(_providers, "list_models", _raise)
+
+    fallback = _providers.fallback_models()["anthropic"]
+    prompter = FakePrompter(selects=[fallback[0]])
+    chosen = _providers.pick_model(prompter, "anthropic", api_key="sk-bad")
+
+    out = capsys.readouterr().out
+    assert "the API key for anthropic was REJECTED" in out
+    assert "re-run 'calfcord init'" in out
+    # Falls back to the curated list so the operator can still finish setup.
+    assert [c.value for c in prompter.last_select_choices] == fallback
+    assert chosen == fallback[0]
+
+
 # --- pick_model: fallback path ----------------------------------------------
 
 
@@ -518,3 +602,23 @@ def test_configure_provider_selects_provider_creds_and_model(
     assert read_env(env)["ANTHROPIC_API_KEY"] == "sk-key"
     # cheap=True biased the model default to the haiku tier.
     assert prompter.last_select_default == "claude-haiku-4-5"
+
+
+def test_configure_provider_warns_when_no_key_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key-based provider left without an effective key must warn loudly."""
+    env = tmp_path / ".env"
+    env.write_text("")
+    monkeypatch.setattr(
+        _providers,
+        "list_models",
+        lambda provider, *, api_key: [Choice("claude-sonnet-4-5", "x")],
+    )
+    # Empty secret with no prior key → ensure_credentials returns no key.
+    prompter = FakePrompter(selects=["anthropic", "claude-sonnet-4-5"], secrets=[""])
+    _providers.configure_provider(prompter, env_path=env, current={})
+
+    out = capsys.readouterr().out
+    assert "warning: no ANTHROPIC_API_KEY is set" in out
+    assert "anthropic won't work" in out

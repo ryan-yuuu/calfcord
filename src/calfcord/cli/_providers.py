@@ -88,6 +88,17 @@ class ModelListError(RuntimeError):
     """
 
 
+class ModelAuthError(ModelListError):
+    """The live model fetch failed *specifically* because the API key was rejected.
+
+    A subclass of :class:`ModelListError` so the existing fall-back-to-curated
+    handler still catches it, but distinct enough that :func:`pick_model` can
+    first print a LOUD, actionable warning: a rejected key means the agent will
+    not work at runtime, which a generic "couldn't fetch live models" line (the
+    same line an offline box prints) would dangerously understate.
+    """
+
+
 def _is_openai_chat_model(model_id: str) -> bool:
     """True when an OpenAI model id is a chat/completions model worth offering.
 
@@ -134,8 +145,10 @@ def list_models(provider: str, *, api_key: str | None) -> list[Choice]:
       catalog (no API key needed).
 
     Raises:
-        ModelListError: on any underlying fetch failure (network, auth, SDK), so
-            callers handle one exception type regardless of provider.
+        ModelAuthError: when the provider SDK rejected the API key, so callers
+            can warn the operator loudly that the agent won't work as configured.
+        ModelListError: on any other underlying fetch failure (network, SDK), so
+            callers handle one base exception type regardless of provider.
     """
     try:
         if provider == "anthropic":
@@ -162,10 +175,39 @@ def list_models(provider: str, *, api_key: str | None) -> list[Choice]:
     except Exception as exc:
         # Broad on purpose: each provider branch can fail in a different way
         # (httpx errors, auth errors, SDK-internal errors) and the callers want
-        # one exception type to fall back on. Re-raised as ModelListError below.
+        # one exception type to fall back on. A *rejected key* is singled out
+        # first (as ModelAuthError) because it means the agent won't work at
+        # runtime — the caller must warn louder than for a transient network
+        # blip. The SDK imports here are lazy and per-provider so a host missing
+        # one provider's SDK never trips over it when failing on another.
+        if _is_auth_error(provider, exc):
+            raise ModelAuthError(f"API key for {provider!r} was rejected: {exc}") from exc
         raise ModelListError(f"could not fetch models for {provider!r}: {exc}") from exc
 
     raise ModelListError(f"unknown provider {provider!r}")
+
+
+def _is_auth_error(provider: str, exc: BaseException) -> bool:
+    """True when ``exc`` is the provider SDK's authentication-rejected error.
+
+    Detection is provider-specific with lazy, guarded imports inside the caller's
+    ``except`` so this never forces a provider SDK to be installed (a host can run
+    the wizard for one provider without the other's SDK). ``ImportError`` from a
+    missing SDK simply means "can't be that SDK's auth error" → ``False``.
+    """
+    if provider == "anthropic":
+        try:
+            import anthropic
+        except ImportError:
+            return False
+        return isinstance(exc, anthropic.AuthenticationError)
+    if provider == "openai":
+        try:
+            import openai
+        except ImportError:
+            return False
+        return isinstance(exc, openai.AuthenticationError)
+    return False
 
 
 def _build_fallback_models() -> dict[str, list[str]]:
@@ -180,14 +222,20 @@ def _build_fallback_models() -> dict[str, list[str]]:
 
     The ``factory`` import is function-local on purpose: it transitively pulls
     in calfkit's provider machinery (and the OpenAI/Anthropic SDK modules), so
-    deferring it keeps merely importing *this* module SDK-free. :data:`_FALLBACK_MODELS`
-    is the cached, lazily-populated public view used by callers/tests.
+    deferring it keeps merely importing *this* module SDK-free. Callers reach the
+    mapping through :func:`fallback_models`, which caches the result of this
+    builder in :data:`_FALLBACK_MODELS_CACHE`.
+
+    Each ``or "<slug>"`` arm is an unreachable belt-and-suspenders default: the
+    factory constants are non-empty for the key-based providers today, so the
+    left operand always wins. Keeping the literals means a future ``None`` in the
+    factory still degrades to a known-good slug rather than crashing the wizard.
     """
     from calfcord.agents.factory import _PROVIDER_DEFAULT_MODELS
 
     return {
         "anthropic": [_PROVIDER_DEFAULT_MODELS["anthropic"] or "claude-sonnet-4-5", "claude-haiku-4-5"],
-        "openai": [_PROVIDER_DEFAULT_MODELS["openai"] or "gpt-5", "gpt-5-nano"],
+        "openai": [_PROVIDER_DEFAULT_MODELS["openai"] or "gpt-5-mini", "gpt-5-nano"],
         "openai-codex": ["gpt-5-codex-mini"],
     }
 
@@ -254,9 +302,12 @@ def pick_model(
 ) -> str:
     """Prompt the operator to *select* (never free-text) a model for ``provider``.
 
-    Tries :func:`list_models`; on a :class:`ModelListError` it prints a warning
-    and falls back to the curated :func:`fallback_models` list for the provider
-    so the wizard keeps working offline / with a bad key. The pre-selected default
+    Tries :func:`list_models`; on failure it falls back to the curated
+    :func:`fallback_models` list for the provider so the wizard keeps working
+    offline / with a bad key. A :class:`ModelAuthError` (rejected key) is caught
+    *first* and surfaced LOUDLY — a curated fallback still lets the operator
+    finish setup, but the agent won't actually work until the key is fixed, so
+    the generic offline-ish warning would understate it. The pre-selected default
     is chosen by :func:`_recommended_default` (cheap tier when ``cheap`` is set,
     otherwise the flagship, then the operator's ``current`` value, then the
     first row) and is always one of the offered values.
@@ -265,8 +316,14 @@ def pick_model(
     """
     try:
         choices = list_models(provider, api_key=api_key)
+    except ModelAuthError:
+        print(
+            f"warning: the API key for {provider} was REJECTED — the agent won't work "
+            f"until you fix it; re-run 'calfcord init' to re-enter it."
+        )
+        choices = [Choice(model_id, model_id) for model_id in fallback_models().get(provider, [])]
     except ModelListError as exc:
-        print(f"warning: couldn't fetch live models ({exc}); choose from known models")
+        print(f"warning: couldn't fetch live models for {provider} ({exc}); choose from known models")
         choices = [Choice(model_id, model_id) for model_id in fallback_models().get(provider, [])]
 
     ids = [c.value for c in choices]
@@ -327,6 +384,14 @@ def configure_provider(
     """
     provider = prompter.select("Model provider?", PROVIDERS, default=default_provider or "anthropic")
     api_key = ensure_credentials(prompter, provider, env_path=env_path, current=current)
+    # A key-based provider with no effective key (operator skipped a never-set
+    # field) will fail at runtime, so say so now rather than letting the curated
+    # fallback model list imply a working setup.
+    if provider in _PROVIDER_KEY_VAR and not api_key:
+        print(
+            f"warning: no {_PROVIDER_KEY_VAR[provider]} is set — {provider} won't work "
+            f"until you add one (re-run 'calfcord init')."
+        )
     model = pick_model(prompter, provider, api_key=api_key, cheap=cheap, current=current_model)
     return provider, model
 
