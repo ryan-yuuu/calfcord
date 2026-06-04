@@ -63,8 +63,8 @@ Discord ⇄ bridge ⇄ Kafka ⇄ { agents, router, tools } ; tools ⇄ Discord (
 - **The tools process is registry-free by design.** It has no read access to `agents/*.md`. Agent identities
   reach tools via a `phonebook` field the bridge places in every invocation's `deps`, which calfkit propagates
   agent → tool. Keep it this way so tools can run on a host with no shared filesystem.
-- **The agent deployment path imports only MCP *schemas*, never `calfcord.mcp.servers`** (which carries transport
-  and secrets). Server wiring is bridge-only.
+- **The agent deployment path imports only MCP *schemas*, never calls `calfcord.mcp.config.load_mcp_servers`**
+  (which reads `mcp.json` — transport and `$VAR` secrets). MCP server config is bridge-only.
 - Cross-process Kafka topic literals live in `src/calfcord/topics.py` and `src/calfcord/control_plane/topics.py`
   so producer and consumer can't drift. Per-agent / per-channel parameterized topics stay where they're consumed.
 - The Discord bridge has no shared filesystem access with agents, so it has no access to `agents/*.md` files. `agents/*.md`

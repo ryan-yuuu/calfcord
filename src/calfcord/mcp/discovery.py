@@ -19,7 +19,7 @@ This module mirrors the drop-in discovery used for builtin tools in
 name, with no edit to any registry module. The result is a
 ``{server: [McpToolDef, ...]}`` catalog consumed by both the agent path
 (:mod:`calfcord.mcp.schema_build`, schema-only) and the bridge path
-(:mod:`calfcord.mcp.servers`, real transport).
+(:mod:`calfcord.mcp.config`, real transport from ``mcp.json``).
 
 Design choices
 --------------

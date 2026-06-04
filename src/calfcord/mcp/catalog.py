@@ -16,8 +16,8 @@ Both deployments consume this catalog:
 
 * the **agent** path feeds it to :mod:`calfcord.mcp.schema_build` to build
   schema-only tool nodes, and
-* the **bridge** path feeds each server's list into a real
-  :class:`~calfkit.mcp.McpServer` in :mod:`calfcord.mcp.servers`.
+* the **bridge** path feeds it to :mod:`calfcord.mcp.config` to build real
+  :class:`~calfkit.mcp.McpServer` instances from ``mcp.json``.
 """
 
 from __future__ import annotations

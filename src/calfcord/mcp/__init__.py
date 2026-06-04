@@ -19,29 +19,32 @@ is shaped deliberately around it:
     nodes for the agent's LLM tool surface + Kafka routing.
 
 * **Bridge-only** modules host the *real* MCP servers and therefore
-  require their credentials at import time (calfkit expands ``$VAR`` at
-  :class:`~calfkit.mcp.McpServer` construction):
+  require their credentials when called (calfkit expands ``$VAR`` while
+  parsing ``mcp.json``):
 
-  - :mod:`calfcord.mcp.servers` — the credentialed ``McpServer`` registry.
-  - :mod:`calfcord.mcp.runner` — the ``calfkit-mcp`` bridge entry point.
+  - :mod:`calfcord.mcp.config` — loads the credentialed ``McpServers``
+    from ``mcp.json`` (transport + ``$VAR`` secrets, resolved at parse
+    time) via :func:`~calfcord.mcp.config.load_mcp_servers`.
+  - :mod:`calfcord.mcp.runner` — the ``calfkit-mcp`` bridge entry point
+    (the only caller of ``load_mcp_servers``).
 
-  The agent deployment must **never** import these two.
+  The agent deployment must **never** call ``load_mcp_servers``.
 
 This ``__init__`` is intentionally a *leaf*: it re-exports only the
 :mod:`~calfcord.mcp.selector` API. It does **not** import ``catalog``,
-``schema_build``, ``discovery``, ``servers``, or ``runner``. The reason is
+``schema_build``, ``discovery``, ``config``, or ``runner``. The reason is
 concrete — ``calfcord.agents.definition`` imports the selector helpers to
 validate frontmatter, and that import runs *this* module. If this module
 pulled in ``catalog`` it would build the schema catalog (and import
 :mod:`calfkit`) as a side effect of merely parsing a selector string, and
-if it pulled in ``servers`` it would breach the agent/bridge boundary
+if it pulled in ``config`` it would breach the agent/bridge boundary
 entirely. Keeping the package import cheap preserves both properties.
 
 Consumers therefore import the heavier modules *directly*::
 
     from calfcord.mcp.catalog import MCP_CATALOG
     from calfcord.mcp.schema_build import resolve_mcp_selectors
-    from calfcord.mcp.servers import MCP_SERVERS  # bridge process only
+    from calfcord.mcp.config import load_mcp_servers  # bridge process only
 """
 
 from __future__ import annotations

@@ -257,8 +257,8 @@ class BridgeIngress:
         # a top-level import would cycle at boot. The three `calfcord.mcp`
         # modules are agent-safe (selector is a pure leaf; catalog and
         # schema_build carry no transport / no `$VAR` secrets) and crucially
-        # must NOT pull in `calfcord.mcp.servers` (the credentialed,
-        # bridge-only registry) — they don't.
+        # must NOT pull in `calfcord.mcp.config` (which loads the credentialed,
+        # bridge-only `mcp.json`) — they don't.
         from calfcord.mcp.catalog import MCP_CATALOG
         from calfcord.mcp.schema_build import validate_mcp_references
         from calfcord.mcp.selector import is_mcp_selector

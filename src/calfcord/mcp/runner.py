@@ -1,18 +1,18 @@
 """CLI entry point for the ``calfkit-mcp`` MCP bridge deployment.
 
-Hosts every live :class:`~calfkit.mcp.McpServer` registered in
-:data:`calfcord.mcp.servers.MCP_SERVERS` on a single calfkit
-:class:`~calfkit.worker.Worker`. This is the **bridge** process: it owns
-the real MCP transport + credentials, consuming each tool's
-``mcp.<server>.<tool>.input`` topic and publishing results to
-``...output``. Agents never run MCP locally — they publish ``Call``
-messages onto those topics and this worker services them.
+Hosts every live :class:`~calfkit.mcp.McpServer` declared in the deployment's
+``mcp.json`` (resolved by :func:`calfcord.mcp.config.load_mcp_servers`) on a
+single calfkit :class:`~calfkit.worker.Worker`. This is the **bridge** process:
+it owns the real MCP transport + credentials, consuming each tool's
+``mcp.<server>.<tool>.input`` topic and publishing results to ``...output``.
+Agents never run MCP locally — they publish ``Call`` messages onto those topics
+and this worker services them.
 
-This deployment is intentionally minimal compared to ``calfkit-tools``: it
-has **no** Discord, persona, or A2A machinery. MCP tools are pure
-request/response over calfkit topics; there is no Discord projection and
-no agent phonebook to wire. The only resources are a calfkit
-:class:`~calfkit.client.Client` and the worker hosting the MCP servers.
+This deployment is intentionally minimal compared to ``calfkit-tools``: it has
+**no** Discord, persona, or A2A machinery. MCP tools are pure request/response
+over calfkit topics; there is no Discord projection and no agent phonebook to
+wire. The only resources are a calfkit :class:`~calfkit.client.Client` and the
+worker hosting the MCP servers.
 
 Run::
 
@@ -25,14 +25,17 @@ import argparse
 import asyncio
 import logging
 import os
+from collections.abc import Mapping
+from pathlib import Path
 
 from calfkit.client import Client
 from calfkit.mcp import McpServer
+from calfkit.mcp.exceptions import McpConfigError
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfcord._worker_runtime import run_worker_until_signal
-from calfcord.mcp.servers import MCP_SERVERS
+from calfcord.mcp.config import load_mcp_servers, resolve_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -51,58 +54,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _resolve_mcp_nodes(servers: dict[str, McpServer]) -> list[McpServer]:
-    """Validate the MCP server registry and return its values.
+def _resolve_mcp_nodes(servers: Mapping[str, McpServer], config_path: Path) -> list[McpServer]:
+    """Return the registry's servers, failing fast on an empty registry.
 
-    Extracted from ``_amain`` so the registry guards can be tested without
-    standing up Kafka. Two failure modes are caught here:
+    Extracted from ``_amain`` so the empty-registry guard can be tested without
+    standing up Kafka. A worker with zero nodes boots inert — subscribing to no
+    topics while appearing healthy in production logs — so an empty ``mcp.json``
+    is surfaced at boot rather than served silently.
 
-    * **Empty registry** — the worker would boot inert, subscribing to no
-      topics while appearing healthy in production logs, serving nothing.
-    * **Key/``name=`` mismatch** — calfkit derives a server's wire topics
-      (``mcp.<name>.<tool>.*``) from its :attr:`~calfkit.mcp.McpServer.name`
-      (the *normalized* name), but agents derive the *same* topics from the
-      ``<server>`` selector segment, which equals the schema-module name =
-      the registry key. If a registration's ``name=`` (or an inferred name)
-      does not equal its key, the bridge subscribes to one set of topics
-      while every agent publishes to another, so every call to that server
-      hangs forever with no error. We detect the mismatch at boot and fail
-      fast with the offending ``key != name`` pair(s).
-
-    Args:
-        servers: The ``server name -> McpServer`` registry (typically
-            :data:`calfcord.mcp.servers.MCP_SERVERS`).
-
-    Returns:
-        The registry's :class:`~calfkit.mcp.McpServer` values, suitable for
-        passing to :class:`~calfkit.worker.Worker`.
-
-    Raises:
-        SystemExit: When ``servers`` is empty (nothing to host), or when any
-            entry's :attr:`~calfkit.mcp.McpServer.name` differs from its
-            registry key (topics would not match the agents' nodes).
+    The former key/``name=`` mismatch guard is gone. ``McpServer.name`` is the
+    *normalized* name (``.``/``-`` → ``_``), so ``from_file`` setting
+    ``name=<config key>`` is not alone sufficient — the guarantee rests on
+    :func:`load_mcp_servers` requiring every key to exist in ``MCP_CATALOG``,
+    whose keys are constrained to ``[a-z0-9_]`` (the chars topic normalization
+    leaves untouched). So ``server.name == key`` for every loadable server and
+    the bridge's ``mcp.<name>.<tool>.*`` topics match the agents' schema-only
+    nodes by construction.
     """
     nodes = list(servers.values())
     if not nodes:
         raise SystemExit(
-            "no MCP servers configured in calfcord.mcp.servers.MCP_SERVERS; "
-            "nothing to host"
-        )
-    # Each server's wire topics derive from ``name=`` (calfkit normalizes it),
-    # but agents derive the same topics from the selector ``<server>`` segment,
-    # which equals the registry key. A key != name registration makes the
-    # bridge listen on different topics than the agents publish to, so every
-    # call to that server hangs silently. Surface it at boot.
-    mismatches = [(key, server.name) for key, server in servers.items() if server.name != key]
-    if mismatches:
-        detail = ", ".join(f"{key!r} (name={name!r})" for key, name in mismatches)
-        raise SystemExit(
-            f"MCP server registry key(s) do not match the server's name=: "
-            f"{detail}. The wire topics ``mcp.<name>.<tool>.*`` derive from "
-            f"name=, while agents derive them from the selector ``<server>`` "
-            f"segment (= the registry key), so a mismatch makes every call to "
-            f'that server hang. Pass name="<key>" explicitly so the topics '
-            f"match the agents' schema-only nodes."
+            f"no MCP servers configured in {config_path}; nothing to host. "
+            'Add a server under "mcpServers", or point CALFCORD_MCP_CONFIG at a populated file.'
         )
     return nodes
 
@@ -110,9 +83,20 @@ def _resolve_mcp_nodes(servers: dict[str, McpServer]) -> list[McpServer]:
 async def _amain() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    # Resolve nodes before connecting so an empty-registry misconfig fails
-    # fast (SystemExit) without opening a broker connection.
-    mcp_nodes = _resolve_mcp_nodes(MCP_SERVERS)
+    # Load + validate the registry before connecting so a misconfig (missing
+    # file, bad JSON, an unset $VAR, a server without a committed schema, or an
+    # empty registry) fails fast without opening a broker connection.
+    config_path = resolve_config_path()
+    try:
+        servers = load_mcp_servers(config_path)
+    except McpConfigError as e:
+        raise SystemExit(
+            f"failed to load MCP servers from {config_path}: {e}\n"
+            "Check the file path, JSON syntax, and that every referenced $VAR is set; "
+            "if a server has no committed schema, run "
+            "`uv run calfcord-mcp-codegen <server> --command ... (or --url ...)`."
+        ) from e
+    mcp_nodes = _resolve_mcp_nodes(servers, config_path)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client:
         # Eagerly start the broker so the reply dispatcher is live before
@@ -126,10 +110,11 @@ async def _amain() -> None:
 
         worker = Worker(client, mcp_nodes)
         logger.info(
-            "starting calfkit-mcp worker servers=%s broker=%s reply_topic=%s",
-            sorted(MCP_SERVERS),
+            "starting calfkit-mcp worker servers=%s broker=%s reply_topic=%s config=%s",
+            sorted(servers),
             server_urls,
             _REPLY_TOPIC,
+            config_path,
         )
         await run_worker_until_signal(worker, drain_label="mcp bridge worker")
 

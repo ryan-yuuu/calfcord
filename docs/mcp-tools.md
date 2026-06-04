@@ -52,7 +52,7 @@ The `tools:` entry forms, resolved at agent boot:
 A few rules worth internalizing:
 
 - **`<server>` is the schema module name**, which equals the key in
-  `MCP_SERVERS` (see §5). It is *not* arbitrary — it must resolve against
+  `mcp.json` (see §5). It is *not* arbitrary — it must resolve against
   the committed catalog.
 - **`<tool>` is the raw MCP tool name**, exactly as the server advertises
   it over the protocol. It is the name you see in the generated schema
@@ -141,7 +141,7 @@ MCP: the deployment that talks to an LLM holds nothing it doesn't need.
 
 The new **MCP bridge** deployment (`calfkit-mcp`, entry point
 `calfcord.mcp.runner:main`) is the half that does the real work. It reads
-the server declarations in `src/calfcord/mcp/servers.py`, and for each one:
+the server declarations from `mcp.json` (via `calfcord.mcp.config.load_mcp_servers`), and for each one:
 
 - spawns the MCP subprocess over stdio (for `--command` servers), or opens
   the Streamable HTTP connection (for `--url` servers), and
@@ -216,7 +216,7 @@ change here). Reach for the calfkit command directly only when you need to
 write somewhere other than the discovery directory — then *you* own the
 binding contract: the positional sets only the **generated class name**, and
 the **`-o` filename** is what's load-bearing (discovery keys the catalog by
-the module filename, which must equal the `MCP_SERVERS` key (§5) and the
+the module filename, which must equal the `mcp.json` server key (§5) and the
 `<server>` segment agents type in their selectors), so the two can silently
 diverge.
 
@@ -250,62 +250,53 @@ review what moved, and commit the refreshed module before the next deploy.
 (Note that `--check` still connects to the live server, so CI needs the
 same Node/`npx` and `$VAR` secrets the bridge needs — see §6.)
 
-## 5. Declaring a server in `servers.py`
+## 5. Declaring a server in `mcp.json`
 
-The schema module is what the *agent* reads; `MCP_SERVERS` is what the
+The schema module is what the *agent* reads; `mcp.json` is what the
 *bridge* reads. They are deliberately separate: the agent needs the static
 schema, the bridge needs the live transport + secrets. Both are keyed by
 the same server name.
 
-Server declarations live in `src/calfcord/mcp/servers.py` as a single
-dict, and are **bridge-only** — the agent deployment never imports this
-module:
+Server declarations live in `mcp.json` at the repo root (override the path
+with `CALFCORD_MCP_CONFIG`). They are **bridge-only** — the agent deployment
+never reads this file. The bridge loads it via
+`calfcord.mcp.config.load_mcp_servers`, which attaches each entry's committed
+schema from `MCP_CATALOG`. The file uses the de-facto `mcpServers` format
+(Claude Desktop / Cursor / Cline / Gemini CLI):
 
-```python
-# src/calfcord/mcp/servers.py  (bridge-only)
-from calfkit.mcp import McpServer
-
-from calfcord.mcp.catalog import MCP_CATALOG
-
-MCP_SERVERS: dict[str, McpServer] = {
-    # stdio server: the executable and its args are POSITIONAL
-    # (command first, then each arg), `tools=` reuses the committed
-    # catalog, and `name=` MUST equal the server key (see below).
-    "gmail": McpServer.stdio(
-        "npx",
-        "-y",
-        "@some-org/gmail-mcp-server",
-        tools=MCP_CATALOG["gmail"],
-        name="gmail",
-        env={"GMAIL_OAUTH_TOKEN": "$GMAIL_OAUTH_TOKEN"},
-    ),
-    # Streamable HTTP server: `McpServer.http(url, ...)`; `token=` is
-    # sugar for an `Authorization: Bearer` header.
-    "drive": McpServer.http(
-        "https://mcp.example.com/drive",
-        tools=MCP_CATALOG["drive"],
-        name="drive",
-        token="$DRIVE_MCP_TOKEN",
-    ),
+```json
+{
+  "mcpServers": {
+    "gmail": {
+      "command": "npx",
+      "args": ["-y", "@some-org/gmail-mcp-server"],
+      "env": { "GMAIL_OAUTH_TOKEN": "$GMAIL_OAUTH_TOKEN" }
+    },
+    "drive": {
+      "type": "http",
+      "url": "https://mcp.example.com/drive",
+      "headers": { "Authorization": "Bearer $DRIVE_MCP_TOKEN" }
+    }
+  }
 }
 ```
 
-Two things to note:
+Things to note:
 
-- **`tools=MCP_CATALOG["<server>"]`** ties the live server back to the
-  committed schema module, so the bridge advertises and dispatches against
-  the exact tool set the agents were built to see.
-- **`name=` must equal the server key** (and the schema module name).
-  calfkit derives the wire topics `mcp.<name>.<tool>.*` from it. Omit it and
-  calfkit infers a name from the transport (e.g. the npm package), the
-  topics no longer match the agent's schema-only nodes, and calls silently
-  go unanswered.
+- **The server key ties back to the committed schema.** `load_mcp_servers`
+  attaches `MCP_CATALOG["<server>"]` to each entry, so the bridge advertises
+  and dispatches against the exact tool set the agents were built to see. A
+  key with no committed schema module fails the load (codegen it first, §4).
+- **The key *is* the server name.** calfkit derives the wire topics
+  `mcp.<name>.<tool>.*` from it (the loader sets `name=<key>`), so the key
+  must equal the schema module name and the `<server>` segment agents type in
+  their selectors. There is no separate `name=` to keep in sync.
 - **Secrets are `$VAR` references, not literals.** calfkit expands `$VAR`
-  (and `${VAR}`) against the bridge's environment at `McpServer`
-  **construction** time — i.e. when `servers.py` is imported at bridge
-  startup, not later when a connection is opened — so the declaration stays
-  committable (no token ever lands in the repo) but an unset variable fails
-  the import immediately (§6). Set the real values in the bridge's
+  (and `${VAR}`) against the bridge's environment when it *parses* `mcp.json`
+  at load time — so the file stays committable (no token ever lands in the
+  repo) but an unset variable fails the load immediately (§6). HTTP bearer
+  auth goes in a `headers` entry (`"Authorization": "Bearer $TOKEN"`); there
+  is no separate `token` field. Set the real values in the bridge's
   environment.
 
 ## 6. Required environment (bridge only)
@@ -318,12 +309,12 @@ secret. Everything below is the **bridge's** (`calfkit-mcp`) requirement:
   the server fails to start. (Servers launched with a non-Node command
   obviously need whatever *that* command needs instead.)
 - **Each server's declared `$VAR` secrets.** Whatever variables the
-  `env=` / `token=` fields in `servers.py` reference must be present in the
+  `env` / `headers` fields in `mcp.json` reference must be present in the
   bridge's environment (its `.env`, the compose service's `environment:`
   block, or the container's runtime env). A missing variable makes
-  `servers.py` fail to import and **crashes the bridge at boot** with
+  `mcp.json` fail to parse and **crashes the bridge at boot** with
   `McpConfigError: environment variable 'X' is unset` (calfkit expands
-  `$VAR` at `McpServer` construction, §5) — it does **not** wait for a
+  `$VAR` while parsing `mcp.json`, §5) — it does **not** wait for a
   connection attempt.
 
 Keep these on the bridge host and nowhere else — that placement *is* the
@@ -333,9 +324,9 @@ isolation guarantee from §3.
 
 1. **Codegen the schema module** into `src/calfcord/mcp/schemas/<server>.py`
    (§4), and commit it.
-2. **Declare the server** in `MCP_SERVERS` in
-   `src/calfcord/mcp/servers.py`, referencing `MCP_CATALOG["<server>"]` and
-   wiring its command/url plus `$VAR` secrets (§5).
+2. **Declare the server** in `mcp.json` — add an entry under `mcpServers`
+   with its command/url plus `$VAR` secret references (§5). The bridge
+   attaches `MCP_CATALOG["<server>"]` automatically.
 3. **Reference it from an agent** by adding `mcp/<server>` or
    `mcp/<server>/<tool>` to that agent's `tools:` list (§2). Restart
    `calfkit-bridge` and `calfkit-agent` so the agent registry re-reads the
@@ -385,14 +376,14 @@ Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.
   `$PATH`. Fix: install the runtime on the bridge host. The agent host
   never needs it.
 - **Bridge crashes at boot: `McpConfigError: environment variable 'X' is
-  unset`.** A `$VAR` secret referenced in `servers.py` is **unset** in the
-  bridge's environment. calfkit expands `$VAR` at `McpServer` construction
-  (§5), so an unset variable fails the `servers.py` import before any
-  connection is attempted — the bridge never starts. Fix: set the variable
-  on the bridge (only) and restart.
+  unset`.** A `$VAR` secret referenced in `mcp.json` is **unset** in the
+  bridge's environment. calfkit expands `$VAR` while parsing `mcp.json`
+  (§5), so an unset variable fails the load before any connection is
+  attempted — the bridge never starts. Fix: set the variable on the bridge
+  (only) and restart.
 - **Bridge connects but the server rejects auth.** A `$VAR` secret
-  referenced in `servers.py` is **set but wrong** in the bridge's
-  environment. The value expanded fine at construction, so the bridge boots
+  referenced in `mcp.json` is **set but wrong** in the bridge's
+  environment. The value expanded fine at load, so the bridge boots
   and connects, but the server rejects the (bad) credential at connect time.
   Fix: set the correct value on the bridge (only) and reconnect. In both
   cases the agent deployment is uninvolved — it holds no MCP credentials by
@@ -401,3 +392,9 @@ Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.
   matches the live server (a tool was added, removed, or its schema
   changed). Fix: regenerate locally (§4), review the diff, and commit the
   refreshed module.
+- **Boot WARNING: `schemas supplied for servers not in mcp.json`.** Benign.
+  The bridge attaches the whole committed catalog, so any server with a
+  committed schema that *this* `mcp.json` doesn't host is named once at boot.
+  Expected when a host deliberately serves a subset of the catalog (another
+  bridge serves the rest) — it is **not** an error, and the bridge still hosts
+  everything declared in `mcp.json`.
