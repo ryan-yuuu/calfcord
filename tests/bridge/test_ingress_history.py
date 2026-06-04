@@ -151,7 +151,6 @@ def _fresh_handle() -> Any:
 def client() -> MagicMock:
     c = MagicMock()
     c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c._invoke = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
     c.reply_topic = "discord.outbox"
     return c
 
@@ -412,7 +411,7 @@ class TestAmbientHistory:
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Raw, unprojected records ride on MetadataEnvelope.history."""
+        """Raw, unprojected records ride on ``deps["history"]``."""
         registry = _registry_with_router()
         ingress = BridgeIngress(client, registry, pending_wires)
         records = [
@@ -424,12 +423,10 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        # ``invoke_node_with_metadata`` calls ``client._invoke`` under the hood.
-        kw = client._invoke.call_args.kwargs
-        state = kw["state"]
-        envelope_data = state.metadata
-        assert "history" in envelope_data
-        history = envelope_data["history"]
+        kw = client.invoke_node.call_args.kwargs
+        deps = kw["deps"]
+        assert "history" in deps
+        history = deps["history"]
         assert len(history) == 2
         assert history[0]["content"] == "hi"
         assert history[1]["content"] == "hey"
@@ -455,10 +452,9 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client._invoke.call_args.kwargs
-        state = kw["state"]
-        # message_history was set on the State before publish.
-        for m in state.message_history:
+        kw = client.invoke_node.call_args.kwargs
+        # message_history is passed straight through to invoke_node.
+        for m in kw["message_history"]:
             assert isinstance(m, ModelRequest)
 
     async def test_ambient_fetches_at_max_history_turns(
@@ -534,9 +530,8 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client._invoke.call_args.kwargs
-        envelope_data = kw["state"].metadata
-        assert envelope_data["history"] == []
+        kw = client.invoke_node.call_args.kwargs
+        assert kw["deps"]["history"] == []
 
     async def test_ambient_router_history_trim_keeps_newest(
         self,
@@ -560,8 +555,8 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client._invoke.call_args.kwargs
-        router_msgs = kw["state"].message_history
+        kw = client.invoke_node.call_args.kwargs
+        router_msgs = kw["message_history"]
         assert len(router_msgs) == 10
         # Newest 10 are msg-20 .. msg-29; oldest in the kept slice is msg-20,
         # newest is msg-29. The full envelope still ships all 30 raw records.

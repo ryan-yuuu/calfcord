@@ -27,7 +27,6 @@ import discord
 import pytest
 from calfkit.client import Client
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 
 from calfcord.agents.phonebook import PhonebookEntry, phonebook_to_deps
 from calfcord.bridge.egress import A2AChannelResolver
@@ -134,14 +133,12 @@ def _ctx(
     if phonebook is None:
         phonebook = _DEFAULT_PHONEBOOK
     return ToolContext(
-        deps=Deps(
-            correlation_id="corr-1",
-            provided_deps={
-                "discord": wire.model_dump(mode="json"),
-                "phonebook": phonebook_to_deps(phonebook),
-                **(extra_deps or {}),
-            },
-        ),
+        deps={
+            "discord": wire.model_dump(mode="json"),
+            "phonebook": phonebook_to_deps(phonebook),
+            **(extra_deps or {}),
+        },
+        run_id="corr-1",
         agent_name=caller,
     )
 
@@ -935,7 +932,8 @@ class TestInfraErrors:
 
     async def test_missing_phonebook_dep_raises(self, deps: dict[str, Any]) -> None:
         ctx = ToolContext(
-            deps=Deps(correlation_id="c", provided_deps={}),
+            deps={},
+            run_id="c",
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="deps\\['phonebook'\\]"):
@@ -943,10 +941,8 @@ class TestInfraErrors:
 
     async def test_missing_discord_dep_raises(self, deps: dict[str, Any]) -> None:
         ctx = ToolContext(
-            deps=Deps(
-                correlation_id="c",
-                provided_deps={"phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK)},
-            ),
+            deps={"phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK)},
+            run_id="c",
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="deps\\['discord'\\]"):
@@ -963,13 +959,11 @@ class TestInfraErrors:
         self, deps: dict[str, Any]
     ) -> None:
         ctx = ToolContext(
-            deps=Deps(
-                correlation_id="c",
-                provided_deps={
-                    "discord": _wire().model_dump(mode="json"),
-                    "phonebook": [{"agent_id": "alice"}],
-                },
-            ),
+            deps={
+                "discord": _wire().model_dump(mode="json"),
+                "phonebook": [{"agent_id": "alice"}],
+            },
+            run_id="c",
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
@@ -979,13 +973,11 @@ class TestInfraErrors:
         self, deps: dict[str, Any]
     ) -> None:
         ctx = ToolContext(
-            deps=Deps(
-                correlation_id="c",
-                provided_deps={
-                    "discord": _wire().model_dump(mode="json"),
-                    "phonebook": "not a list",
-                },
-            ),
+            deps={
+                "discord": _wire().model_dump(mode="json"),
+                "phonebook": "not a list",
+            },
+            run_id="c",
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
@@ -995,13 +987,11 @@ class TestInfraErrors:
         self, deps: dict[str, Any]
     ) -> None:
         ctx = ToolContext(
-            deps=Deps(
-                correlation_id="c",
-                provided_deps={
-                    "discord": {"only": "garbage"},
-                    "phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK),
-                },
-            ),
+            deps={
+                "discord": {"only": "garbage"},
+                "phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK),
+            },
+            run_id="c",
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['discord'\\]"):

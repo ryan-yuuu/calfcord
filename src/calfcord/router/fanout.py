@@ -5,15 +5,17 @@ Subscribed to ``routing.decisions`` (the router agent's
 output, this consumer:
 
 1. Reads the :class:`RoutingDecision` from ``result.output``.
-2. Recovers the original :class:`WireMessage` from ``result.state.metadata``
-   (the bridge ingress put it there via :func:`invoke_node_with_metadata`).
+2. Recovers the original :class:`WireMessage`, the publisher's phonebook
+   snapshot, and the channel history from ``result.deps`` — the same
+   ``deps`` dict the bridge ingress passed to ``invoke_node``, carried
+   forward through the router run to the consumer (calfkit ≥ 0.4.0
+   exposes inbound producer deps on ``NodeResult.deps``).
 3. For the chosen ``agent_id`` (after defensive self-filter and
    phonebook validation), synthesizes a fresh wire with ``kind="slash"``
    and ``slash_target=<agent_id>`` plus a fresh ``event_id``, and
-   publishes it to ``bridge.synthesized.in`` via
-   :func:`invoke_node_with_metadata` (so the wire rides on
-   ``state.metadata`` for the bridge's synthesized-in consumer to pick
-   up).
+   publishes it to ``bridge.synthesized.in`` with the synthesized wire
+   (and the forwarded history) on ``deps`` for the bridge's
+   synthesized-in consumer to read back from ``result.deps``.
 
 The single-id model is enforced at the :class:`RoutingDecision` schema
 level: ``agent_id`` is a single ``str | None``, so the consumer cannot
@@ -44,13 +46,12 @@ from calfkit import ConsumerNodeDef, NodeResult
 from calfkit.client import Client
 from calfkit.models import SessionRunContext
 from calfkit.nodes.consumer import consumer
+from pydantic import ValidationError
 
-from calfcord._compat.invoke import (
-    MetadataEnvelope,
-    invoke_node_with_metadata,
-    raise_envelope_error,
-)
+from calfcord.agents.phonebook import phonebook_from_deps
 from calfcord.agents.routing import RoutingDecision
+from calfcord.ambient_routing import raise_routing_contract_error
+from calfcord.bridge.wire import WireMessage
 from calfcord.topics import SYNTHESIZED_INGRESS_TOPIC
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ def build_fanout_consumer(
     Args:
         client: Connected calfkit :class:`Client`. The closure uses it
             to publish the synthesized wire via
-            :func:`invoke_node_with_metadata`.
+            :meth:`Client.invoke_node`.
         router_agent_id: The router's own ``agent_id`` (typically
             :data:`ROUTER_AGENT_ID`). The consumer defensively filters
             this id out — the LLM should never pick the router itself,
@@ -115,31 +116,30 @@ def build_fanout_consumer(
             # deserializer dropped the value (upstream validation
             # failure / framework bug). Infrastructure contract
             # violation — raise so operators see it at ERROR.
-            raise_envelope_error(
+            raise_routing_contract_error(
                 correlation_id=result.correlation_id,
                 site="fanout",
                 reason="received envelope with no parsed RoutingDecision",
             )
 
+        deps = result.deps
         try:
-            envelope = MetadataEnvelope.extract(result.state.metadata)
-        except ValueError as exc:
-            # The bridge ingress is contractually required to pack a
-            # well-formed envelope (see ``_publish_ambient``). A
-            # missing/malformed envelope — including a wire that
-            # fails :class:`WireMessage` validation, since the
-            # envelope's ``wire`` field is now typed — is an infra bug.
-            raise_envelope_error(
+            wire = WireMessage.model_validate(deps.get("discord"))
+        except ValidationError as exc:
+            # The bridge ingress is contractually required to pack the
+            # original wire under ``deps["discord"]`` (see
+            # ``_publish_ambient``). A missing or malformed value here —
+            # ``model_validate`` raises on both — is an infra bug, not an
+            # LLM-recoverable input problem.
+            raise_routing_contract_error(
                 correlation_id=result.correlation_id,
                 site="fanout",
                 reason=(
-                    f"failed to extract MetadataEnvelope from "
-                    f"state.metadata (agent_id={decision.agent_id}): {exc}"
+                    f"invalid/missing deps['discord'] "
+                    f"(agent_id={decision.agent_id}): {exc}"
                 ),
                 cause=exc,
             )
-
-        wire = envelope.wire
 
         logger.info(
             "fan-out received decision correlation_id=%s channel=%s agent_id=%s reasoning=%s",
@@ -171,30 +171,43 @@ def build_fanout_consumer(
             return
 
         # Fail-closed on missing phonebook. Production producers
-        # ALWAYS pack the phonebook on the ambient publish so the
-        # fan-out can validate the chosen ``agent_id`` against the
-        # publisher's registry snapshot. ``None`` here means an infra
-        # bug — not a backward-compat case — and silently skipping
-        # validation would let LLM hallucinations through. Raising
-        # surfaces the misconfiguration; the Kafka envelope is
-        # already ACKed (``AckPolicy.ACK_FIRST``) so this produces an
-        # ERROR log, not a redelivery loop.
-        if envelope.phonebook is None:
-            raise_envelope_error(
+        # ALWAYS pack the phonebook under ``deps["phonebook"]`` on the
+        # ambient publish so the fan-out can validate the chosen
+        # ``agent_id`` against the publisher's registry snapshot. A
+        # missing key here means an infra bug — not a backward-compat
+        # case — and silently skipping validation would let LLM
+        # hallucinations through. Raising surfaces the misconfiguration;
+        # the Kafka envelope is already ACKed (``AckPolicy.ACK_FIRST``)
+        # so this produces an ERROR log, not a redelivery loop.
+        phonebook_raw = deps.get("phonebook")
+        if phonebook_raw is None:
+            raise_routing_contract_error(
                 correlation_id=result.correlation_id,
                 site="fanout",
                 reason=(
-                    f"missing phonebook on ambient envelope "
+                    f"missing deps['phonebook'] on ambient envelope "
                     f"(agent_id={decision.agent_id})"
                 ),
+            )
+        try:
+            phonebook = phonebook_from_deps(phonebook_raw)
+        except (ValueError, ValidationError) as exc:
+            raise_routing_contract_error(
+                correlation_id=result.correlation_id,
+                site="fanout",
+                reason=(
+                    f"malformed deps['phonebook'] "
+                    f"(agent_id={decision.agent_id}): {exc}"
+                ),
+                cause=exc,
             )
 
         # Build the known-agent set from the publisher's phonebook
         # snapshot. The fan-out lives in a separate process from the
         # bridge and has no registry access of its own; the bridge
-        # ships its typed :class:`PhonebookEntry` projection on every
-        # ambient publish via ``envelope.phonebook``.
-        known_agent_ids: set[str] = {e.agent_id for e in envelope.phonebook}
+        # ships its :class:`PhonebookEntry` projection on every ambient
+        # publish via ``deps["phonebook"]``.
+        known_agent_ids: set[str] = {e.agent_id for e in phonebook}
 
         if decision.agent_id == router_agent_id:
             # Defensive self-filter: the LLM should never pick the
@@ -250,25 +263,25 @@ def build_fanout_consumer(
                 "slash_target": decision.agent_id,
             }
         )
-        # Synthesized envelope deliberately omits ``phonebook``:
-        # the bridge's slash branch rebuilds deps from its
-        # registry on each re-entry, so shipping the projection
-        # through this hop would be redundant. Passing the typed
-        # ``WireMessage`` directly — pydantic dumps it as part of
-        # ``envelope.model_dump(mode="json")`` at the call site.
+        # The synthesized publish deliberately omits ``phonebook``: the
+        # bridge's slash branch rebuilds deps from its registry on each
+        # re-entry, so shipping the projection through this hop would be
+        # redundant.
         #
-        # The history records ARE forwarded: the bridge's ambient
-        # publish path fetches channel history once at publish
-        # time (see ``BridgeIngress._fetch_ambient_history``) and
-        # packs it into the parent envelope. Without forwarding
-        # here, the synthesized-in consumer would receive an
-        # empty ``MetadataEnvelope.history`` (the default), pass
-        # ``prefetched_history=()`` to ``BridgeIngress.handle``,
-        # and the assistant would run with no history.
-        synth_envelope = MetadataEnvelope(
-            wire=synthesized,
-            history=envelope.history,
-        )
+        # The history records ARE forwarded: the bridge's ambient publish
+        # path fetches channel history once at publish time (see
+        # ``BridgeIngress._fetch_ambient_history``) and packs it into
+        # ``deps["history"]``. We forward that same opaque JSON list
+        # unchanged (no re-validation — the synthesized-in consumer
+        # validates on read), so an N-way fan-out still costs a single
+        # Discord fetch. Without forwarding, the synthesized-in consumer
+        # would receive no history, pass ``prefetched_history=()`` to
+        # ``BridgeIngress.handle``, and the assistant would run with no
+        # history.
+        synth_deps = {
+            "discord": synthesized.model_dump(mode="json"),
+            "history": deps.get("history", []),
+        }
 
         # ``handle`` lives outside the try so the finally clause
         # below can cancel its future even if a later step (e.g.
@@ -279,11 +292,10 @@ def build_fanout_consumer(
         # Same idiom as :meth:`BridgeIngress.handle`.
         handle = None
         try:
-            handle = await invoke_node_with_metadata(
-                client,
+            handle = await client.invoke_node(
                 user_prompt="",
                 topic=SYNTHESIZED_INGRESS_TOPIC,
-                metadata=synth_envelope.model_dump(mode="json"),
+                deps=synth_deps,
                 correlation_id=synthesized.event_id,
             )
             logger.info(

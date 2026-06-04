@@ -52,13 +52,13 @@ Four independent processes, communicating exclusively through Kafka:
 │     - if wire.kind == "slash":  publish to        │
 │       discord.channel.{cid}.in                    │
 │     - if wire.kind == "message" (ambient):        │
-│       publish to discord.ambient.in (via the      │
-│       state.metadata helper, see "Implementation  │
-│       notes")                                     │
+│       publish to discord.ambient.in, packing      │
+│       wire+phonebook+history on `deps` (see       │
+│       "Implementation notes")                     │
 │                                                   │
 │ Synthesized-in @consumer (NEW)                    │
 │   - subscribes: bridge.synthesized.in             │
-│   - reads wire from result.state.metadata         │
+│   - reads wire from result.deps                   │
 │   - calls ingress.handle(wire)  ← reuses ingress  │
 │     to publish to channel topic and populate      │
 │     PendingWires                                  │
@@ -101,7 +101,7 @@ Four independent processes, communicating exclusively through Kafka:
                           │   - subscribes:                  │
                           │     routing.decisions            │
                           │   - reads wire from              │
-                          │     result.state.metadata        │
+                          │     result.deps                  │
                           │   - synthesizes one kind=slash   │
                           │     wire for the chosen agent    │
                           │   - publishes to                 │
@@ -120,8 +120,10 @@ to publish directly from `BridgeIngress.handle` to
 1. A human posts an ambient message (no `/slash`, no `@-mention`).
 2. Bridge normalizes to `kind="message"` and publishes to
    `discord.ambient.in` with `reply_topic=_calf.ambient.callback-discard`.
-   The original wire and the phonebook are packed into `state.metadata`
-   (see "Implementation notes" for why).
+   The original wire, the phonebook, and the channel-history slice are
+   packed onto a single `deps` dict (`deps={"discord": ..., "phonebook":
+   ..., "history": ...}`) via the stock `client.invoke_node(...)` (see
+   "Implementation notes" for why).
 3. Router agent consumes the envelope, runs its LLM with the phonebook
    roster injected as `temp_instructions`. The LLM emits one
    `dispatch(agent_id="scribe", reasoning="...")` tool call. Pydantic-ai's
@@ -134,9 +136,10 @@ to publish directly from `BridgeIngress.handle` to
      retention and eventually discarded.
    - `routing.decisions` (the router's `publish_topic`) — picked up
      by the fan-out consumer.
-5. Fan-out consumer recovers the original wire from
-   `result.state.metadata["wire"]` and processes the single
-   `decision.agent_id`:
+5. Fan-out consumer recovers the original wire, phonebook, and history
+   from `result.deps` (`WireMessage.model_validate(result.deps["discord"])`,
+   `phonebook_from_deps(result.deps["phonebook"])`, `result.deps.get("history", [])`)
+   and processes the single `decision.agent_id`:
    - Skips the no-op cases: `agent_id=None` (defense-in-depth for a
      misbehaving LLM), `agent_id == router_agent_id` (defensive
      self-filter), `agent_id` not in the publisher's phonebook
@@ -144,15 +147,16 @@ to publish directly from `BridgeIngress.handle` to
    - Otherwise, synthesizes a wire copy with a fresh `event_id`,
      `kind="slash"`, `slash_target=<agent_id>`. Channel, message id,
      and author are preserved from the original ambient.
-   - Publishes to `bridge.synthesized.in` via `invoke_node_with_metadata`,
-     packing the synthesized wire into `state.metadata`. Fire-and-forget
-     (the handle's future is cancelled — same pattern as
-     `BridgeIngress.handle`).
+   - Publishes to `bridge.synthesized.in` via the stock
+     `client.invoke_node(deps={"discord": <synth wire dict>, "history":
+     <forwarded history list>})`. Fire-and-forget (the handle's future is
+     cancelled — same pattern as `BridgeIngress.handle`).
 6. Bridge synthesized-in consumer receives the envelope, recovers the
-   synthesized wire from `state.metadata`, and calls
-   `BridgeIngress.handle(wire)`. The slash branch fires: publish to
-   `discord.channel.{cid}.in`, populate `PendingWires` keyed on the
-   synthesized event id.
+   synthesized wire from `result.deps["discord"]` and the forwarded
+   history from `result.deps.get("history", [])`, validates both, and
+   calls `BridgeIngress.handle(wire, prefetched_history=...)`. The slash
+   branch fires: publish to `discord.channel.{cid}.in`, populate
+   `PendingWires` keyed on the synthesized event id.
 7. The targeted assistant's `addressed_to_me_gate` accepts (kind=slash
    matched to its own id), the LLM runs, `ReturnCall` publishes to
    `discord.outbox`.
@@ -295,7 +299,7 @@ The router does not touch Discord. It needs:
 | `agents/*.md` (local files)   |    —   |
 
 The phonebook (which the router uses to build its roster prompt)
-arrives via `state.metadata` from the bridge — no local file access
+arrives via `deps` from the bridge — no local file access
 required.
 
 ## Operating
@@ -321,10 +325,11 @@ operator responsibilities the bridge cannot verify on its own.
 
 1. **Kafka topic retention on the discard topic** (privacy /
    compliance). `_calf.ambient.callback-discard` receives a copy of
-   every ambient envelope, including the original Discord wire
-   (author + plaintext content) and the phonebook. Cluster default
-   retention (typically 7 days) would persist that on a topic
-   nobody reads. Run BEFORE the first ambient publish:
+   every ambient envelope, including the ambient `deps` — the original
+   Discord wire (author + plaintext content), the phonebook, and the
+   channel-history slice. Cluster default retention (typically 7 days)
+   would persist that on a topic nobody reads. Run BEFORE the first
+   ambient publish:
 
    ```bash
    kafka-configs.sh --alter --entity-type topics \
@@ -358,13 +363,12 @@ operator responsibilities the bridge cannot verify on its own.
    the router deployment's secret store, NOT just the bridge's — the
    router runs as an independent process with no shared filesystem.
 
-5. **calfkit version pin.** `pyproject.toml` pins
-   `calfkit~=0.3.1`. `src/calfcord/_compat/invoke.py`
-   depends on calfkit private APIs (documented in the module's
-   FIXME); a minor calfkit bump (`0.4.0`) could rename them and
-   break the bridge at import time. Do NOT relax this constraint
-   without verifying the upstream cleanup at calfkit-sdk#144 has
-   landed.
+5. **calfkit version pin.** `pyproject.toml` pins `calfkit~=0.4.0`.
+   The ambient-routing pipeline depends on `NodeResult.deps` exposing
+   the inbound producer deps to `@consumer` functions — the public API
+   that landed in calfkit 0.4.0 (calfkit-sdk#144). Do NOT drop below
+   `0.4.0`: on `0.3.x` the consumers cannot read the wire/phonebook/
+   history back off `deps` and the fan-out chain breaks.
 
 6. **Discord "Read Message History" permission.** The bridge fetches
    recent channel history on every agent invocation and projects it
@@ -630,8 +634,8 @@ specific class of degradation.
 Existing flow is unchanged. Drop a new `agents/<name>.md`, restart
 the bridge (so the registry sees it), restart the affected agent
 processes. The router automatically sees the new agent on its next
-ambient invocation because the bridge stamps the phonebook into
-`state.metadata` on every publish.
+ambient invocation because the bridge stamps the phonebook onto
+`deps` on every publish.
 
 ## Topology reference
 
@@ -652,11 +656,12 @@ no-op so the second publish lands somewhere harmless. The router's
 useful output goes via `publish_topic` to `routing.decisions`.
 
 **Operator action required — retention.** The discard topic receives
-a copy of every router envelope, which includes `state.metadata` with
-the original Discord wire (author, content) and phonebook. The same
-envelope also goes to `routing.decisions` for the fan-out consumer,
-so we cannot strip the metadata from the discard side without losing
-it from the consumed side. Configure short retention on the discard
+a copy of every router envelope, which carries the ambient `deps` (the
+original Discord wire — author, content — plus the phonebook and the
+channel-history slice). The same envelope also goes to
+`routing.decisions` for the fan-out consumer, so we cannot strip the
+deps from the discard side without losing them from the consumed side.
+Configure short retention on the discard
 topic explicitly (the cluster default is typically 7 days, which
 would persist plaintext message history on a topic nobody reads):
 
@@ -700,57 +705,65 @@ auto-appends the built-in router definition.
 
 ## Implementation notes
 
-### `state.metadata` and the `_compat/invoke.py` helper
+### The `deps` channel
 
 The fan-out @consumer needs to recover the original Discord wire (so
 it can synthesize the wire with the right channel id, message id,
-author, etc.). The natural place for that data would be
-`ctx.deps.provided_deps["discord"]` — and the bridge ingress does put
-it there. But calfkit's `@consumer` decorator only exposes
-`NodeResult` to the consume function; the consume function never sees
-`ctx.deps`.
+author, etc.), the publisher's phonebook (to validate the chosen
+`agent_id`), and the channel-history slice (to forward to the chosen
+agent). All three ride on the invocation's `deps` dict — the same
+bare `dict[str, Any]` a tool reads as `ctx.deps["discord"]`. The
+bridge ingress packs them in one stock `client.invoke_node(deps=...)`
+call:
 
-Calfkit's `State` model has a `metadata: Any` field explicitly
-documented for application data. `State` propagates through every
-`_publish_action` branch in `calfkit/nodes/base.py` (parallel-fanout,
-Call, ReturnCall, TailCall) — each constructs the publish envelope
-with `state=output.state` or `state=call.state`. The calfkit
-`Agent.run` mutates only `message_history` and `final_output_parts`
-on our State instance; `state.metadata` rides through unchanged.
-(Pydantic-ai's internal `GraphAgentState` is a separate object with
-the same field name — its metadata is touched by pydantic-ai's run
-loop, but it isn't the calfkit `State` we set.)
+```python
+deps={"discord": <wire dict>, "phonebook": <phonebook list>, "history": <history list>}
+```
 
-The catch: `Client.invoke_node()` does not expose a `metadata`
-parameter. It constructs `State` internally with `metadata=None`. To
-set it without subclassing, we use a small helper at
-`src/calfcord/_compat/invoke.py` that calls
-`Client._invoke` (single-underscore, convention-private) directly with
-a pre-populated State.
+and each consumer reads them back off `result.deps`, validating each
+against its domain model inline — the same `WireMessage.model_validate`
+idiom `private_chat` already uses (the gates read the same
+`deps["discord"]` key with lighter `isinstance` checks). Each read
+fail-closes on a missing/malformed key via `raise_routing_contract_error`;
+the bracket form below is shorthand for that guarded read:
 
-This is a **temporary workaround**. The helper carries a FIXME pointing
-at the upstream cleanup that obviates it (tracked at
-[calf-ai/calfkit-sdk#144](https://github.com/calf-ai/calfkit-sdk/issues/144)):
+```python
+wire = WireMessage.model_validate(result.deps.get("discord"))   # raises on missing/bad
+phonebook = phonebook_from_deps(result.deps.get("phonebook"))   # raises on missing/bad
+history = history_from_deps(result.deps.get("history", []))     # [] = "no history"
+```
 
-1. **Preferred**: expose `deps` on `NodeResult`. Consumers then read
-   the original wire from `result.deps.provided_deps["discord"]` and
-   the metadata channel becomes unnecessary. ~15-line SDK change.
-2. **Half-step**: add `metadata=` parameter to `Client.invoke_node`.
-   Removes the need to dip into `_invoke` directly but keeps the
-   metadata channel.
+This works because calfkit propagates the inbound producer's `deps`
+forward through the run and exposes them on `NodeResult.deps` for the
+consume function (calfkit ≥ 0.4.0 — landed in
+[calf-ai/calfkit-sdk#144](https://github.com/calf-ai/calfkit-sdk/issues/144)).
+Concretely, `deps` rides through every `_publish_action` branch in
+`calfkit/nodes/base.py` (parallel-fanout, Call, ReturnCall, TailCall),
+so the wire the bridge stamps on the ambient publish survives the
+router's LLM run and reaches the fan-out consumer untouched — calfkit's
+`Agent.run` mutates only `message_history` and `final_output_parts`,
+never the deps dict. The `@consumer` decorator no longer needs `ctx`
+access: `NodeResult` carries everything the consumer reads.
 
-Two callers in this project use the helper:
+Two callers in this project pack `deps`:
 
-- `bridge/ingress.py:_publish_ambient` — packs the original wire +
-  phonebook into `state.metadata` so the router → fan-out chain can
-  recover them.
-- `router/fanout.py` — packs the synthesized wire into
-  `state.metadata` so the bridge synthesized-in consumer can recover
-  it.
+- `bridge/ingress.py:_publish_ambient` — packs the original wire,
+  phonebook, and channel-history slice onto `deps` so the router →
+  fan-out chain can recover them.
+- `router/fanout.py` — packs the synthesized wire (and forwards the
+  history list unchanged) onto `deps` so the bridge synthesized-in
+  consumer can recover them.
 
-When the upstream cleanup lands, both callers swap to the public API
-and the helper goes away. The `_compat/` package exists specifically
-to make this migration easy to find.
+A missing or malformed key on either hop is an **infrastructure
+contract violation**, not an LLM-recoverable input problem: the
+upstream producer is contractually required to pack a well-formed
+payload. Per the project's error-handling convention both consumers
+fail closed — they call `raise_routing_contract_error(...)` from the
+dependency-free `calfcord.ambient_routing` module, which logs at ERROR
+and raises `RoutingContractError` (a `RuntimeError` subclass carrying
+`correlation_id` / `site` / `reason`). Kafka's `AckPolicy.ACK_FIRST`
+means the re-raise produces no redelivery — the envelope is already
+ACKed, so the operator ERROR log is the only signal.
 
 ### Why a synthesized-in consumer (instead of fan-out publishing direct)
 
@@ -772,11 +785,12 @@ truth for wire publication + `PendingWires` population. The
 synthesized-in consumer is a 3-line consume function — deserialize,
 delegate, log — colocated with `BridgeIngress` for in-process access.
 
-A future SDK cleanup (exposing `deps` on `NodeResult`, as above) would
-also allow the outbox consumer to read the wire from the reply
-envelope's deps instead of from `PendingWires`. At that point the
-synthesized-in consumer could be folded into the router process (or
-deleted, with the fan-out publishing directly). For now: colocation.
+Now that `NodeResult.deps` is available (calfkit ≥ 0.4.0, as above), the
+outbox consumer *could* read the wire from the reply envelope's deps
+instead of from `PendingWires`, which would let the synthesized-in
+consumer be folded into the router process (or deleted, with the fan-out
+publishing directly). That migration is not done — the outbox still
+recovers wire context from `PendingWires`, so for now: colocation.
 
 ### Router final-output type
 
@@ -798,10 +812,12 @@ the tool call, one to produce a final output after the tool result).
 
 ### Small follow-ups
 
-- **SDK PR — expose `deps` on `NodeResult`** (preferred) or add
-  `metadata=` to `Client.invoke_node`. Obviates the `_compat/invoke.py`
-  helper. ~15-line upstream change. Tracked at
-  [calf-ai/calfkit-sdk#144](https://github.com/calf-ai/calfkit-sdk/issues/144).
+- **Outbox reads wire from `NodeResult.deps`.** Now that calfkit exposes
+  inbound producer deps on `NodeResult` (calfkit-sdk#144, landed), the
+  outbox consumer could recover wire context from the reply envelope's
+  deps instead of the process-local `PendingWires` map — which would
+  let the synthesized-in consumer be folded into the router process or
+  deleted (see "Why a synthesized-in consumer"). Not yet done.
 - **Per-reply ambient WARN tracking.** v1 only INFO-logs at publish
   and synthesized-arrival; operators correlate by grep. A small
   in-memory expectations map could turn that into a real WARN signal.
@@ -856,8 +872,7 @@ src/calfcord/
 │   ├── roster.py              (build_router_temp_instructions)
 │   ├── router.md              (bundled config front matter + prompt body)
 │   └── runner.py              (calfkit-router CLI entry)
-└── _compat/                   (new package — temporary SDK workarounds)
-    └── invoke.py              (invoke_node_with_metadata helper)
+└── ambient_routing.py         (new — RoutingContractError + raise_routing_contract_error)
 ```
 
 Calfkit SDK: zero changes.

@@ -1,17 +1,17 @@
 """Unit tests for :meth:`BridgeIngress.handle`'s kind-branch (Phase 4).
 
-The bridge now branches on ``wire.kind``:
+The bridge branches on ``wire.kind``:
 
-* ``kind="slash"`` continues to publish to ``discord.channel.{cid}.in``
-  via ``client.invoke_node`` (existing behavior — covered by
+* ``kind="slash"`` publishes to ``discord.channel.{cid}.in`` via
+  ``client.invoke_node`` (existing behavior — covered by
   ``test_ingress.py``).
 * ``kind="message"`` (ambient) publishes to ``discord.ambient.in`` via
-  :func:`invoke_node_with_metadata` with the original wire packed into
-  ``state.metadata`` and the discard reply_topic.
+  ``client.invoke_node`` with the original wire, phonebook, and channel
+  history on ``deps`` and the discard reply_topic.
 
-These tests pin the new ambient publish shape: topic, reply_topic,
-metadata contents, deps contents, and per-call temp_instructions
-(router roster).
+These tests pin the ambient publish shape: topic, reply_topic, deps
+contents (wire / phonebook / history), user_prompt, and per-call
+temp_instructions (router roster).
 """
 
 from __future__ import annotations
@@ -103,7 +103,6 @@ def _fresh_handle() -> MagicMock:
 def client() -> MagicMock:
     c = MagicMock()
     c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c._invoke = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
     c.reply_topic = "discord.outbox"
     return c
 
@@ -121,9 +120,7 @@ class TestSlashUnchanged:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(kind="slash", slash_target="scribe"))
-        # Slash uses invoke_node; ambient helper not called.
         client.invoke_node.assert_awaited_once()
-        client._invoke.assert_not_called()
         assert (
             client.invoke_node.await_args.kwargs["topic"] == "discord.channel.6789.in"
         )
@@ -139,21 +136,26 @@ class TestSlashUnchanged:
 
 
 class TestAmbientPublish:
-    """Ambient wires go through the router via ``invoke_node_with_metadata``."""
+    """Ambient wires go through the router via ``client.invoke_node``."""
 
-    async def test_ambient_skips_slash_invoke_node(
+    async def test_ambient_does_not_use_channel_topic(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
+        """Ambient and slash both publish via ``invoke_node`` now, so
+        the distinguishing property is the topic: an ambient wire must
+        NOT land on a per-channel ``discord.channel.{cid}.in`` topic
+        (which would skip the router and broadcast to every assistant)."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        client.invoke_node.assert_not_called()
+        topic = client.invoke_node.await_args.kwargs["topic"]
+        assert not topic.startswith("discord.channel.")
 
     async def test_ambient_publishes_to_ambient_ingress_topic(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        kwargs = client._invoke.await_args.kwargs
+        kwargs = client.invoke_node.await_args.kwargs
         assert kwargs["topic"] == _AMBIENT_INGRESS_TOPIC == "discord.ambient.in"
 
     async def test_ambient_uses_discard_reply_topic(
@@ -164,7 +166,7 @@ class TestAmbientPublish:
         bridge's outbox consumer or anywhere visible."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        kwargs = client._invoke.await_args.kwargs
+        kwargs = client.invoke_node.await_args.kwargs
         assert (
             kwargs["reply_topic"]
             == _AMBIENT_REPLY_DISCARD_TOPIC
@@ -189,7 +191,7 @@ class TestAmbientPublish:
         generator should not require updating this test."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(event_id="evt-abc"))
-        cid = client._invoke.await_args.kwargs["correlation_id"]
+        cid = client.invoke_node.await_args.kwargs["correlation_id"]
         # Must be a non-empty string and must NOT equal the wire's
         # event_id (which is what the old behavior would have set).
         assert isinstance(cid, str)
@@ -200,69 +202,27 @@ class TestAmbientPublish:
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
         """The router's LLM sees the user's message text on
-        invocation — the same way an assistant agent sees a slash
-        invocation's content. The wire field, not the metadata, is
-        what calfkit feeds into the model loop."""
+        invocation — calfkit stages ``user_prompt`` as the initial
+        ``ModelRequest``. The wire content is what feeds the model
+        loop, not the deps."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(content="who's free at 3pm?"))
-        # The helper stages the user_prompt as a ModelRequest on
-        # state.message_history; the staged message should carry the
-        # wire's content verbatim. Without this assertion, a
-        # regression that stages an empty string (or the wrong field)
-        # would pass the "something staged" check above.
-        state = client._invoke.await_args.kwargs["state"]
-        assert state.uncommitted_message is not None
-        # ModelRequest text content extraction: parts is a list of
-        # UserPromptPart / SystemPromptPart; the first part should be
-        # the user prompt with our text.
-        request = state.uncommitted_message
-        text_blobs = [
-            getattr(p, "content", "")
-            for p in getattr(request, "parts", [])
-        ]
-        assert any("who's free at 3pm?" in str(t) for t in text_blobs), (
-            f"staged ModelRequest does not contain wire content; "
-            f"parts={text_blobs!r}"
+        assert (
+            client.invoke_node.await_args.kwargs["user_prompt"]
+            == "who's free at 3pm?"
         )
-
-    async def test_ambient_metadata_carries_wire(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
-        """The original wire is packed into ``state.metadata["wire"]``
-        so the router's fan-out consumer can recover it (consumers
-        don't see deps, only state.metadata)."""
-        ingress = BridgeIngress(client, _registry(), pending_wires)
-        wire = _wire(event_id="evt-meta-1")
-        await ingress.handle(wire)
-        state = client._invoke.await_args.kwargs["state"]
-        assert state.metadata["wire"]["event_id"] == "evt-meta-1"
-        assert state.metadata["wire"]["channel_id"] == 6789
-
-    async def test_ambient_metadata_carries_phonebook(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
-        ingress = BridgeIngress(client, _registry(), pending_wires)
-        await ingress.handle(_wire())
-        state = client._invoke.await_args.kwargs["state"]
-        phonebook = state.metadata["phonebook"]
-        ids = sorted(e["agent_id"] for e in phonebook)
-        # Both assistants are in the phonebook; the router is
-        # filtered out by ``phonebook_from_registry`` (Issue 3).
-        assert "scribe" in ids
-        assert "scheduler" in ids
-        assert "_router" not in ids
 
     async def test_ambient_deps_carries_wire(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
-        """The wire ALSO rides in deps for the synthesized-assistant
-        chain that follows. ingress.handle is reused for each
-        synthesized wire, and the slash branch reads from deps to
-        produce the assistant's invocation deps."""
+        """The original wire rides under ``deps["discord"]`` — the
+        router run carries it forward so the fan-out consumer reads it
+        from ``result.deps``, and the synthesized-assistant chain that
+        follows reads the wire from deps in the usual place."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-deps-1")
         await ingress.handle(wire)
-        deps = client._invoke.await_args.kwargs["deps"]
+        deps = client.invoke_node.await_args.kwargs["deps"]
         assert deps["discord"]["event_id"] == "evt-deps-1"
         assert deps["discord"]["channel_id"] == 6789
 
@@ -271,11 +231,37 @@ class TestAmbientPublish:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        deps = client._invoke.await_args.kwargs["deps"]
+        deps = client.invoke_node.await_args.kwargs["deps"]
         ids = sorted(e["agent_id"] for e in deps["phonebook"])
-        # Router is filtered out by phonebook_from_registry (Issue 3).
+        # Both assistants are in the phonebook; the router is filtered
+        # out by ``phonebook_from_registry`` (Issue 3).
         assert "scribe" in ids
+        assert "scheduler" in ids
         assert "_router" not in ids
+
+    async def test_ambient_deps_carries_history(
+        self, client: MagicMock, pending_wires: PendingWires
+    ) -> None:
+        """The channel history rides under ``deps["history"]`` so the
+        fan-out can forward it to each synthesized target without a
+        per-target refetch. With no history fetcher injected (the test
+        fixture), ``_fetch_ambient_history`` returns ``[]`` — the key is
+        still present and JSON-list-shaped."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire())
+        deps = client.invoke_node.await_args.kwargs["deps"]
+        assert deps["history"] == []
+
+    async def test_ambient_deps_has_all_three_keys(
+        self, client: MagicMock, pending_wires: PendingWires
+    ) -> None:
+        """Pin the ambient deps contract: exactly the three keys the
+        fan-out reads back from ``result.deps`` — drift here (a renamed
+        or dropped key) would silently break the router pipeline."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire())
+        deps = client.invoke_node.await_args.kwargs["deps"]
+        assert set(deps) == {"discord", "phonebook", "history"}
 
     async def test_ambient_injects_router_temp_instructions(
         self, client: MagicMock, pending_wires: PendingWires
@@ -286,8 +272,7 @@ class TestAmbientPublish:
         of tool presence."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        state = client._invoke.await_args.kwargs["state"]
-        instructions = state.temp_instructions
+        instructions = client.invoke_node.await_args.kwargs["temp_instructions"]
         assert instructions is not None
         # Roster includes both assistants but NOT the router itself.
         assert "scheduler" in instructions
@@ -321,7 +306,7 @@ class TestAmbientPublish:
             captured["handle"] = handle
             return handle
 
-        client._invoke.side_effect = _invoke
+        client.invoke_node.side_effect = _invoke
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
         assert captured["handle"]._future.cancelled()
@@ -393,7 +378,6 @@ class TestAmbientNonHumanFilter:
             author_display_name="Scribe",
         )
         await ingress.handle(wire)
-        client._invoke.assert_not_called()
         client.invoke_node.assert_not_called()
         assert pending_wires.get(wire.event_id) is None
 
@@ -407,7 +391,6 @@ class TestAmbientNonHumanFilter:
             author_display_name="some-bot",
         )
         await ingress.handle(wire)
-        client._invoke.assert_not_called()
         client.invoke_node.assert_not_called()
         assert pending_wires.get(wire.event_id) is None
 
@@ -419,7 +402,7 @@ class TestAmbientNonHumanFilter:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-human")
         await ingress.handle(wire)
-        client._invoke.assert_awaited_once()
+        client.invoke_node.assert_awaited_once()
 
 
 class TestAmbientFailureHandling:
@@ -435,7 +418,7 @@ class TestAmbientFailureHandling:
         site. PendingWires is unaffected because the ambient branch
         never inserted (see
         ``test_ambient_does_not_populate_pending_wires``)."""
-        client._invoke.side_effect = RuntimeError("kafka down")
+        client.invoke_node.side_effect = RuntimeError("kafka down")
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-fail-1")
         with (
@@ -503,7 +486,6 @@ class TestAmbientEmptyRosterAbort:
         ingress = BridgeIngress(client, router_only_registry, pending_wires)
         with pytest.raises(AmbientRosterEmptyError):
             await ingress.handle(_wire())
-        client._invoke.assert_not_called()
         client.invoke_node.assert_not_called()
 
     async def test_logs_error_with_event_id_and_channel(

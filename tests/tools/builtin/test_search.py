@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 from openhands.tools.glob.definition import GlobObservation
 from openhands.tools.grep.definition import GrepObservation
 
@@ -18,7 +17,8 @@ from calfcord.tools.builtin import search, workspace
 
 def _ctx() -> ToolContext:
     return ToolContext(
-        deps=Deps(correlation_id="c", provided_deps={}),
+        deps={},
+        run_id="c",
         agent_name="alice",
     )
 

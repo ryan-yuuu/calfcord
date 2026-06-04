@@ -124,7 +124,7 @@ empty or whitespace-only after normalization. Prevents the degenerate
 # Note the absence of any AgentRegistry: the tool's deployment is decoupled
 # from the bridge and cannot read agents/*.md. The bridge passes the
 # canonical roster snapshot in deps["phonebook"] on every invocation;
-# the tool reads it per-call from ctx.deps.provided_deps.
+# the tool reads it per-call from ctx.deps.
 _client: Client | None = None
 _persona_sender: DiscordPersonaSender | None = None
 _resolver: A2AChannelResolver | None = None
@@ -308,7 +308,7 @@ async def private_chat(
           deleted, points at a non-thread channel, or you lack access.
           Drop the id and call again.
     """
-    correlation_id = ctx.deps.correlation_id
+    correlation_id = ctx.correlation_id
     if (
         _client is None
         or _persona_sender is None
@@ -347,7 +347,7 @@ async def private_chat(
     # agents/*.md — this is the only source of identity information we
     # have. A missing OR malformed phonebook is normalized to RuntimeError
     # so all infra-bug signals are one exception type (the contract).
-    phonebook_raw = ctx.deps.provided_deps.get("phonebook")
+    phonebook_raw = ctx.deps.get("phonebook")
     if phonebook_raw is None:
         _raise_infra(
             "invoked without deps['phonebook']; the bridge ingress is expected to populate this key on every publish",
@@ -390,7 +390,7 @@ async def private_chat(
             target=target_agent_id,
         )
 
-    incoming_wire_dict = ctx.deps.provided_deps.get("discord")
+    incoming_wire_dict = ctx.deps.get("discord")
     if not isinstance(incoming_wire_dict, dict):
         _raise_infra(
             "invoked without deps['discord']; the bridge ingress is expected to "
@@ -492,9 +492,9 @@ async def private_chat(
                 # survives the A2A hop. The explicit keys below override the
                 # forwarded values — the target must see the A2A-forwarded
                 # wire and this hop's caller_agent_id, not the caller's.
-                # ``provided_deps`` is always a dict (calfkit constructs it as
+                # ``ctx.deps`` is always a dict (calfkit constructs it as
                 # ``deps or {}``), matching the unguarded ``.get`` reads above.
-                **ctx.deps.provided_deps,
+                **ctx.deps,
                 "discord": forwarded_wire.model_dump(mode="json"),
                 "caller_agent_id": caller_agent_id,
                 # Propagate the phonebook so the target (if it chains into
@@ -549,7 +549,7 @@ async def private_chat(
         conversation_thread_id=conversation_thread_id,
         initial_response_text=response_text,
         caller_agent_id=caller_agent_id,
-        caller_deps=ctx.deps.provided_deps,
+        caller_deps=ctx.deps,
         correlation_id=result.correlation_id,
     )
 

@@ -559,7 +559,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.3.6" },
+    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.4.0" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
     { name = "openhands-tools", specifier = ">=1.23.1" },
@@ -578,7 +578,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.3.6"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -597,9 +597,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ef/60/0bfe6ad55b67e453281c4869693b02557b914b7eea8aa664af51934326db/calfkit-0.3.6.tar.gz", hash = "sha256:da164046e8087721badfcc9565e2964489b11f3c728621742a9f2a9ed0962b17", size = 700731, upload-time = "2026-06-02T22:03:58.898Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/ed/e9c61e57b07f1062d75f67a286db39d1933e0ef1b121e3306edc01d7d7cb/calfkit-0.4.0.tar.gz", hash = "sha256:33f2feae39df7527dc17698ebadc6030bf51e68ae4fa0ff26c7161b6e3f5d7ed", size = 705734, upload-time = "2026-06-04T07:08:31.735Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/a5/2acc246e1de59da5f4348b3f9b4145dce3665b8fbb61b6325c84d7014cb0/calfkit-0.3.6-py3-none-any.whl", hash = "sha256:f8b08e8bc2f1d5d1138d2e9f052f03c757c6267b06357a86df85771e53a8f7f7", size = 629603, upload-time = "2026-06-02T22:03:56.979Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/fe/23ee8252b21b2e539ba6fe683633a7f3755f1869126bd09cbcff5876eee8/calfkit-0.4.0-py3-none-any.whl", hash = "sha256:30cffc883abaff08d3a63ac44cd66788a8d5c7c75e2794bcc6195d6c75ae5f0f", size = 631277, upload-time = "2026-06-04T07:08:29.914Z" },
 ]
 
 [package.optional-dependencies]

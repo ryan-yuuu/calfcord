@@ -2,7 +2,7 @@
 
 These pydantic models are the contract between the bridge (producer) and any
 calfkit agent (consumer). The bridge serializes a :class:`WireMessage` to JSON
-and tucks it into ``envelope.context.deps.provided_deps["discord"]`` on each
+and tucks it into ``envelope.context.deps["discord"]`` on each
 publish. Agents read it back via the same path inside their gates and ``run()``.
 
 Both models are frozen — once normalized, a wire message is immutable.

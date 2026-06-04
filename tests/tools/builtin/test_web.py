@@ -8,14 +8,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 
 from calfcord.tools.builtin import web
 
 
 def _ctx() -> ToolContext:
     return ToolContext(
-        deps=Deps(correlation_id="c", provided_deps={}),
+        deps={},
+        run_id="c",
         agent_name="alice",
     )
 

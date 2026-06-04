@@ -6,14 +6,15 @@ synthesized wire (from the router's fan-out) through
 ``test_outbox.py``: drive ``ConsumerNodeDef.handler`` directly with a
 synthetic ``Envelope``.
 
-The synthesized wire rides on ``state.metadata["wire"]`` (the
-:func:`invoke_node_with_metadata` channel) — consumers don't see
-``deps``.
+The synthesized wire and forwarded history ride on the envelope's
+``context.deps`` and reach the consumer via ``result.deps`` (calfkit
+≥ 0.4.0 exposes inbound producer deps on ``NodeResult.deps``).
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -24,12 +25,10 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
-    Deps,
     SessionRunContext,
     WorkflowState,
 )
 
-from calfcord._compat.invoke import MetadataEnvelope
 from calfcord.bridge.history import HistoryRecord
 from calfcord.bridge.synthesized import (
     SYNTHESIZED_INGRESS_TOPIC,
@@ -66,23 +65,26 @@ def _wire(
 
 def _envelope(
     *,
-    correlation_id: str = _CORRELATION_ID,
-    metadata: Any = "<use-wire>",
+    deps: Any = "<use-wire>",
+    history: Sequence[HistoryRecord] | None = None,
 ) -> Envelope:
     """Build a synthetic envelope mimicking a fan-out publish.
 
-    ``metadata="<use-wire>"`` populates the wire from :func:`_wire`.
-    Pass ``None`` or any other value to exercise error paths.
+    ``deps="<use-wire>"`` populates ``deps["discord"]`` from
+    :func:`_wire` (the shape the fan-out publishes) and, when
+    ``history`` is supplied, packs it as a JSON list under
+    ``deps["history"]`` (the same opaque list the fan-out forwards).
+    Pass ``None`` or any other value to ``deps`` to exercise error paths.
     """
     state = State()
-    if metadata == "<use-wire>":
-        # Route through MetadataEnvelope.model_dump to pin the
-        # producer/consumer seam: if MetadataEnvelope ever gets a
-        # custom serializer (alias, computed field, key transform),
-        # hand-rolled dicts here would mask a real consumer-side
-        # extraction bug.
-        metadata = MetadataEnvelope(wire=_wire()).model_dump(mode="json")
-    state.metadata = metadata
+    if deps == "<use-wire>":
+        deps = {"discord": _wire().model_dump(mode="json")}
+        if history is not None:
+            deps["history"] = [r.model_dump(mode="json") for r in history]
+    # Error-path callers pass deps=None / a non-dict; the envelope's
+    # context.deps must be a dict, so normalize to {} (the consumer then
+    # reads a missing "discord" key and fails closed).
+    context_deps = deps if isinstance(deps, dict) else {}
 
     call_stack = CallFrameStack()
     call_stack.push(
@@ -93,10 +95,7 @@ def _envelope(
     )
     return Envelope(
         internal_workflow_state=WorkflowState(call_stack=call_stack),
-        context=SessionRunContext(
-            state=state,
-            deps=Deps(correlation_id=correlation_id, provided_deps={}),
-        ),
+        context=SessionRunContext(state=state, deps=context_deps),
     )
 
 
@@ -138,7 +137,7 @@ class TestHappyPath:
     async def test_wire_is_deserialized_via_pydantic(
         self, ingress: MagicMock, broker: MagicMock
     ) -> None:
-        """The dict in state.metadata is validated through
+        """The dict in deps["discord"] is validated through
         ``WireMessage.model_validate`` so a real WireMessage instance
         (frozen, with all the model invariants) lands at the ingress.
         Without this round-trip, ingress.handle would receive a raw
@@ -172,21 +171,21 @@ class TestHappyPath:
 
 
 class TestErrorPaths:
-    async def test_no_metadata_logs_infra_error(
+    async def test_no_discord_dep_logs_infra_error(
         self, ingress: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A missing ``state.metadata`` is an infrastructure contract
-        violation (the fan-out always packs a
-        :class:`MetadataEnvelope`). ``_raise_infra`` logs at ERROR
-        and raises; the calfkit Worker uses ``AckPolicy.ACK_FIRST``
-        so the envelope is already ACKed regardless, but the
-        operator-visible ERROR log surfaces the violation."""
+        """A missing ``deps["discord"]`` is an infrastructure contract
+        violation (the fan-out always packs the wire on deps).
+        ``raise_routing_contract_error`` logs at ERROR and raises; the
+        calfkit Worker uses ``AckPolicy.ACK_FIRST`` so the envelope is
+        already ACKed regardless, but the operator-visible ERROR log
+        surfaces the violation."""
         consumer = build_synthesized_consumer(ingress)
         with caplog.at_level(
             logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
-                envelope=_envelope(metadata=None),
+                envelope=_envelope(deps={}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
@@ -194,11 +193,11 @@ class TestErrorPaths:
         ingress.handle.assert_not_called()
         assert any(
             "infra error" in r.message
-            and "MetadataEnvelope" in r.message
+            and "deps['discord']" in r.message
             for r in caplog.records
         )
 
-    async def test_metadata_without_wire_key_logs_infra_error(
+    async def test_deps_without_discord_key_logs_infra_error(
         self, ingress: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
         consumer = build_synthesized_consumer(ingress)
@@ -206,7 +205,7 @@ class TestErrorPaths:
             logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
-                envelope=_envelope(metadata={"unrelated": "stuff"}),
+                envelope=_envelope(deps={"unrelated": "stuff"}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
@@ -214,15 +213,16 @@ class TestErrorPaths:
         ingress.handle.assert_not_called()
         assert any(
             "infra error" in r.message
-            and "MetadataEnvelope" in r.message
+            and "deps['discord']" in r.message
             for r in caplog.records
         )
 
 
 class TestHistoryForwarding:
-    """The synthesized-in consumer hands the envelope's history records
-    straight through to ``ingress.handle(prefetched_history=...)`` so
-    the slash branch doesn't re-fetch per fan-out target.
+    """The synthesized-in consumer validates the envelope's forwarded
+    history records and hands them straight to
+    ``ingress.handle(prefetched_history=...)`` so the slash branch
+    doesn't re-fetch per fan-out target.
     """
 
     async def test_forwards_history_records_to_ingress(
@@ -244,13 +244,10 @@ class TestHistoryForwarding:
                 author_agent_id="scribe",
             ),
         )
-        envelope = MetadataEnvelope(wire=_wire(), history=records).model_dump(
-            mode="json"
-        )
 
         consumer = build_synthesized_consumer(ingress)
         await consumer.handler(
-            envelope=_envelope(metadata=envelope),
+            envelope=_envelope(history=records),
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
             broker=broker,
@@ -267,15 +264,13 @@ class TestHistoryForwarding:
     async def test_empty_history_tuple_forwarded_as_empty(
         self, ingress: MagicMock, broker: MagicMock
     ) -> None:
-        """A rolling-deploy producer that doesn't pack history defaults
-        to an empty tuple. The consumer must forward that empty tuple
-        verbatim (NOT translate to None — None would make handle fall
-        back to a fresh fetch, defeating the single-fetch invariant)."""
-        envelope = MetadataEnvelope(wire=_wire()).model_dump(mode="json")
-
+        """A rolling-deploy producer that doesn't pack history leaves
+        ``deps["history"]`` absent. The consumer must forward an empty
+        tuple (NOT None — None would make handle fall back to a fresh
+        fetch, defeating the single-fetch invariant)."""
         consumer = build_synthesized_consumer(ingress)
         await consumer.handler(
-            envelope=_envelope(metadata=envelope),
+            envelope=_envelope(),  # no history key in deps
             correlation_id=_CORRELATION_ID,
             headers=_headers(),
             broker=broker,
@@ -290,50 +285,71 @@ class TestHistoryForwarding:
     ) -> None:
         """A malformed wire dict (the fan-out serializing the wrong
         thing) is an infra contract violation — ERROR log + raise
-        (framework swallows the raise).
-
-        The envelope's ``wire`` field is now typed against
-        :class:`WireMessage`, so validation happens at envelope
-        extract rather than at a separate ``WireMessage.model_validate``
-        call. The infra error message therefore contains
-        ``MetadataEnvelope`` (the extract failure) rather than the
-        older inner ``deserialize`` phrasing."""
+        (framework swallows the raise). ``WireMessage.model_validate``
+        raises on the bad dict, so the infra error message identifies
+        the failing ``deps["discord"]`` key."""
         consumer = build_synthesized_consumer(ingress)
         with caplog.at_level(
             logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
-                envelope=_envelope(metadata={"wire": {"missing_required_fields": True}}),
+                envelope=_envelope(deps={"discord": {"missing_required_fields": True}}),
                 correlation_id=_CORRELATION_ID,
                 headers=_headers(),
                 broker=broker,
             )
         ingress.handle.assert_not_called()
         assert any(
-            "infra error" in r.message and "MetadataEnvelope" in r.message
+            "infra error" in r.message and "deps['discord']" in r.message
             for r in caplog.records
         )
 
-    async def test_envelope_error_carries_typed_attributes(self) -> None:
-        """The typed :class:`MetadataEnvelopeError` exposes structured
+    async def test_malformed_history_logs_infra_error(
+        self, ingress: MagicMock, broker: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A malformed ``deps["history"]`` entry (the fan-out forwarding
+        the wrong shape) fails ``HistoryRecord.model_validate`` and
+        surfaces as an infra error before ``ingress.handle`` runs."""
+        consumer = build_synthesized_consumer(ingress)
+        deps = {
+            "discord": _wire().model_dump(mode="json"),
+            "history": [{"not_a_record": True}],
+        }
+        with caplog.at_level(
+            logging.ERROR, logger="calfcord.bridge.synthesized"
+        ):
+            await consumer.handler(
+                envelope=_envelope(deps=deps),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
+        ingress.handle.assert_not_called()
+        assert any(
+            "infra error" in r.message and "deps['history']" in r.message
+            for r in caplog.records
+        )
+
+    async def test_contract_error_carries_typed_attributes(self) -> None:
+        """The typed :class:`RoutingContractError` exposes structured
         context (``correlation_id``, ``site``, ``reason``) so callers
         can assert on attributes rather than substring-matching log
         messages. Pins the contract that the synthesized-in site emits
-        ``site="synthesized-in"`` on every envelope-extract failure."""
-        from calfcord._compat.invoke import (
-            MetadataEnvelopeError,
-            raise_envelope_error,
+        ``site="synthesized-in"`` on every deps-read failure."""
+        from calfcord.ambient_routing import (
+            RoutingContractError,
+            raise_routing_contract_error,
         )
 
-        with pytest.raises(MetadataEnvelopeError) as exc_info:
-            raise_envelope_error(
+        with pytest.raises(RoutingContractError) as exc_info:
+            raise_routing_contract_error(
                 correlation_id="evt-test",
                 site="synthesized-in",
-                reason="bogus envelope shape",
+                reason="bogus deps shape",
             )
         assert exc_info.value.site == "synthesized-in"
         assert exc_info.value.correlation_id == "evt-test"
-        assert exc_info.value.reason == "bogus envelope shape"
+        assert exc_info.value.reason == "bogus deps shape"
         # Class hierarchy: must inherit from RuntimeError (not
         # ValueError) so the consumer framework treats it as an
         # infrastructure contract violation.

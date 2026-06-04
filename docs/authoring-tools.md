@@ -239,15 +239,16 @@ Two fields matter to tool authors:
   by calfkit from the inbound `x-calf-emitter` Kafka header. `None`
   means dispatch was bypassed; that's an infra bug (see below).
   `private_chat` uses this to look up the caller in the phonebook.
-- **`ctx.deps.provided_deps: dict[str, Any]`** — the per-call deps the
-  bridge populates on every publish. The two it always sets are
-  `"discord"` (the originating `WireMessage` dict) and `"phonebook"`
-  (the canonical roster of registered agents); memory-enabled
-  deployments also get `"memory_prompt"`, and `private_chat` forwards
-  `"caller_agent_id"` on A2A hops. Most tools don't need any of these;
-  `private_chat` is the only builtin that does.
+- **`ctx.deps: dict[str, Any]`** — the per-call deps the bridge
+  populates on every publish (a bare dict; read keys as
+  `ctx.deps["discord"]`). The two it always sets are `"discord"` (the
+  originating `WireMessage` dict) and `"phonebook"` (the canonical
+  roster of registered agents); memory-enabled deployments also get
+  `"memory_prompt"`, and `private_chat` forwards `"caller_agent_id"` on
+  A2A hops. Most tools don't need any of these; `private_chat` is the
+  only builtin that does.
 
-`ctx.deps.correlation_id: str` is also available — useful in error
+`ctx.correlation_id: str` is also available — useful in error
 log lines so operators can grep across the Kafka audit trail.
 
 ## 4. Error handling convention
@@ -419,12 +420,12 @@ self-contained):
 ```python
 # tests/tools/builtin/test_pypi.py
 from calfkit.models import ToolContext
-from calfkit.models.session_context import Deps
 
 
 def _ctx(agent: str = "alice") -> ToolContext:
     return ToolContext(
-        deps=Deps(correlation_id="c", provided_deps={}),
+        deps={},
+        run_id="c",  # exposed to the tool as ctx.correlation_id
         agent_name=agent,
     )
 ```
