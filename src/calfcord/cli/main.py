@@ -5,7 +5,7 @@ The native ``calfcord`` shim translates user-facing management subcommands
 and execs them through the same locked venv as the runners. ``prog="calfcord"``
 so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
-(``init`` / ``agent``) to dispatch them here.
+(``init`` / ``agent`` / ``router``) to dispatch them here.
 """
 
 from __future__ import annotations
@@ -181,10 +181,8 @@ def _run_agent(args: argparse.Namespace) -> int:
     return agent_tools.run(make_prompter(), agents_dir=agents_dir, name=args.name)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command == "init":
         env_path, agents_dir = init.resolve_paths(_resolve_home())
         return init.run(make_prompter(), env_path=env_path, agents_dir=agents_dir)
@@ -200,6 +198,33 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    # The dispatch drives interactive prompts; trap the two ways an operator/host
+    # ends one abruptly so the management CLI exits cleanly instead of dumping a
+    # traceback (matching every other calfcord entry point). The run_* handlers
+    # already map their own filesystem errors to exit codes, so an interrupt or a
+    # raw-mode failure is all that should escape to here.
+    try:
+        return _dispatch(parser, args)
+    except KeyboardInterrupt:
+        print("\naborted.")
+        return 130
+    except EOFError:
+        print("error: this command needs an interactive terminal (stdin reached EOF).")
+        return 1
+    except OSError:
+        # InquirerPy/prompt_toolkit raises OSError (EINVAL) when it can't put a
+        # non-TTY stdin (piped / CI) into raw mode. Surface that cleanly, but only
+        # when stdin genuinely isn't a TTY — re-raise anything else rather than
+        # masking a real bug behind a friendly message.
+        if not sys.stdin.isatty():
+            print("error: this command needs an interactive terminal (stdin is not a TTY).")
+            return 1
+        raise
 
 
 if __name__ == "__main__":

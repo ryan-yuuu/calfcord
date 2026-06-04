@@ -18,10 +18,12 @@ The skip rules in :func:`detect_agents` mirror the loader's
 ``*.template.md`` reference templates are not live agents, so the names returned
 here match exactly what ``calfkit-agent`` would run.
 
-Decoupling invariant: this module is imported by the lightweight CLI entry
-point, so it must NOT pull a provider SDK or ``calfcord.mcp.servers`` at import
-time. :func:`pick_tools` defers its ``TOOL_REGISTRY`` / ``discover_mcp_catalog``
-imports into the function body for exactly that reason — enumeration goes
+Decoupling invariant: this module must NOT pull ``calfcord.mcp.servers`` (MCP
+transport + secrets) at import time — that wiring is bridge-only. (It does
+transitively import a provider SDK via ``calfcord.agents``'s package init, so
+the import graph is not provider-free; the invariant that holds and matters is
+the ``mcp.servers`` one.) :func:`pick_tools` still defers its ``TOOL_REGISTRY``
+/ ``discover_mcp_catalog`` imports into the function body so enumeration goes
 through schema-only seams that never touch MCP transport or secrets.
 """
 

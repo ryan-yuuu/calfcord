@@ -11,6 +11,14 @@ Writes are atomic (temp file + :func:`os.replace`) and ``chmod 0600`` because
 the file holds API keys and the Discord bot token — a partial write or a
 world-readable secrets file is a real hazard, so both are handled here in the
 one place that touches the file.
+
+Scope: values are single-line ``KEY=VALUE`` pairs (tokens, keys, ids, urls). A
+value containing a newline is rejected (it would split into a second, malformed
+line and silently corrupt the file), and :func:`read_env` matches the runtime
+dotenv loaders (python-dotenv / ``uv run --env-file``) on the parsing details
+that matter — surrounding whitespace, an ``export`` prefix, quotes, and inline
+comments — so the wizard's "current value" never disagrees with what the
+processes actually load.
 """
 
 from __future__ import annotations
@@ -24,15 +32,21 @@ from pathlib import Path
 _SECRET_FILE_MODE = 0o600
 
 
-def _strip_quotes(value: str) -> str:
-    """Drop one layer of matching surrounding quotes from a dotenv value.
+def _parse_value(value: str) -> str:
+    """Decode one already-whitespace-stripped dotenv value the way the loaders do.
 
-    Operators (and some tooling) wrap values in quotes; the runtime loader
-    strips them, so the reader must too or a re-run would show ``"abc"`` as
-    the "current" value and never recognise it as already-set.
+    Mirrors python-dotenv / ``uv run --env-file`` so ``init``'s "current value"
+    display agrees with what the processes load: a value wrapped in one matching
+    pair of quotes is taken verbatim (a ``#`` inside quotes is literal); an
+    unquoted value ends at the first `` #`` (whitespace + hash), which begins an
+    inline comment. Operators (and tooling) quote values and append comments, so
+    the reader must honour both or a re-run would mis-read an already-set key.
     """
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]
+    comment = value.find(" #")
+    if comment != -1:
+        value = value[:comment].rstrip()
     return value
 
 
@@ -40,11 +54,11 @@ def read_env(path: Path) -> dict[str, str]:
     """Parse ``path`` into a ``{KEY: VALUE}`` dict; missing file yields ``{}``.
 
     Blank lines and comment lines (first non-space char ``#``) are ignored, as
-    are lines without ``=``. Keys and values are stripped of surrounding
-    whitespace and the value of one layer of matching quotes. A later
-    assignment of the same key wins (mirrors dotenv last-wins semantics), which
-    keeps re-runs of ``init`` consistent with what the process would actually
-    load.
+    are lines without ``=``. A leading ``export `` is part of the dotenv/shell
+    syntax (the key is what follows it), values are stripped of surrounding
+    whitespace and decoded by :func:`_parse_value` (quotes / inline comments), and
+    a later assignment of the same key wins (dotenv last-wins) — all so a re-run of
+    ``init`` reads a key exactly as the process would.
     """
     if not path.exists():
         return {}
@@ -53,11 +67,13 @@ def read_env(path: Path) -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
         key, _, value = line.partition("=")
         key = key.strip()
         if not key:
             continue
-        result[key] = _strip_quotes(value.strip())
+        result[key] = _parse_value(value.strip())
     return result
 
 
@@ -72,12 +88,25 @@ def upsert(path: Path, updates: Mapping[str, str]) -> None:
     the result is ``chmod 0600`` because it holds secrets. An empty ``updates``
     is a no-op, so callers can upsert unconditionally without a guard.
 
-    Running this twice with the same ``updates`` produces byte-identical
-    output: the first run sets the keys, the second finds them already on their
-    lines and rewrites the same bytes.
+    Values must be single-line: a value containing a newline raises
+    :class:`ValueError` rather than splitting into a second, malformed line that
+    would silently corrupt the file (and, on a re-run, append it again). For
+    single-line values, running this twice with the same ``updates`` produces
+    byte-identical output: the first run sets the keys, the second finds them
+    already on their lines and rewrites the same bytes.
+
+    Raises:
+        ValueError: a value contains a newline (``\\n`` / ``\\r``).
     """
     if not updates:
         return
+
+    for key, value in updates.items():
+        if "\n" in value or "\r" in value:
+            raise ValueError(
+                f"value for {key!r} contains a newline; .env values must be single-line "
+                "(check for a stray newline in a pasted secret)"
+            )
 
     path.parent.mkdir(parents=True, exist_ok=True)
 

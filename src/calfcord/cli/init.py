@@ -96,16 +96,18 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     """
     current = _envfile.read_env(env_path)
 
-    def upsert_text(var: str, message: str) -> None:
+    def upsert_text(var: str, message: str) -> str:
         """Prompt for an optional text field, defaulting to the current value.
 
         Writes only when the operator typed something, so an empty answer keeps
         whatever was already on disk — the keep-existing-on-empty contract that
-        makes re-runs safe.
+        makes re-runs safe. Returns what was entered so a caller can layer a
+        post-hoc check (e.g. a non-numeric warning) without re-prompting.
         """
         value = prompter.text(message, default=current.get(var, ""))
         if value:
             _envfile.upsert(env_path, {var: value})
+        return value
 
     def upsert_secret(var: str, message: str) -> None:
         """Prompt for an optional secret, writing only when a value was entered.
@@ -131,13 +133,14 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     # banner rather than send the operator off to boot against an agent that
     # won't load.
     try:
-        name, provider = create_agent(
+        created = create_agent(
             prompter, agents_dir=agents_dir, env_path=env_path, prune_seed=True, offer_prompt=False
         )
     except (ValueError, OSError) as e:
         print(f"error: could not create agent: {e}")
         return 1
-    _envfile.upsert(env_path, {_DEFAULT_PROVIDER_VAR: provider})
+    name = created.name
+    _envfile.upsert(env_path, {_DEFAULT_PROVIDER_VAR: created.provider})
 
     print()
 
@@ -147,7 +150,12 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
         "DISCORD_BOT_TOKEN",
         f"DISCORD_BOT_TOKEN {_set_label(current.get('DISCORD_BOT_TOKEN', ''))} — paste to set, enter to keep:",
     )
-    upsert_text("DISCORD_APPLICATION_ID", "DISCORD_APPLICATION_ID (numeric):")
+    app_id = upsert_text("DISCORD_APPLICATION_ID", "DISCORD_APPLICATION_ID (numeric):")
+    if app_id and not app_id.isdigit():
+        # The field is labelled numeric but the prompt accepts anything; flag a
+        # likely typo without blocking, so a fat-fingered value isn't discovered
+        # only when the bridge later fails to start.
+        print(f"  warning: DISCORD_APPLICATION_ID should be numeric, got {app_id!r}")
     upsert_text(
         "DISCORD_GUILD_ID",
         "DISCORD_GUILD_ID (optional — guild-scoped slash sync; enter to skip):",
@@ -180,6 +188,16 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
         )
         if url:
             _envfile.upsert(env_path, {_BROKER_VAR: url})
+        elif not current.get(_BROKER_VAR):
+            # Empty answer with nothing already on disk: a fresh install ends with
+            # no broker, so the processes won't start. Warn now rather than let it
+            # surface as a connection failure at first boot. (On a re-run the
+            # keep-existing-on-empty contract above means there's a value to keep,
+            # so this only fires when there is genuinely nothing set.)
+            print(
+                f"  warning: no {_BROKER_VAR} is set — the processes won't start until one "
+                f"is (re-run 'calfcord init' or run 'calfcord self set-broker <url>')."
+            )
 
     print()
 

@@ -1,6 +1,6 @@
 """``calfcord agent set`` / ``rename`` / ``delete`` — non-interactive agent mutation.
 
-Round 2's write-side commands. ``set`` applies one or more ``--field value``
+The write-side commands. ``set`` applies one or more ``--field value``
 edits to an agent's ``.md`` through the *validated* write paths the rest of the
 system already owns; ``rename`` and ``delete`` are file/state operations on the
 agent's two on-disk artifacts — its ``agents/<name>.md`` and its per-agent
@@ -74,11 +74,12 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
     the prompt as the Markdown body.
 
     The agent must exist (else an ``error:`` line + return 1) and at least one
-    update is required. Any ``ValueError``/``OSError`` from the validated writes
-    (a bad choice, an out-of-range int, an unknown tool, an unwritable file)
-    prints ``error: <field>: <e>`` and returns 1 — and because every write
-    validates in memory first, the on-disk file is left untouched. On success it
-    names the fields it wrote and tells the operator to restart. Returns 0.
+    update is required. Each field is its own validated-atomic write, so a later
+    field's failure can't corrupt an earlier success: any ``ValueError``/``OSError``
+    (a bad choice, an out-of-range int, an unknown tool, an unwritable file) prints
+    ``error: <field>: <e>``, names any fields already applied this call (they stay
+    written), and returns 1. On full success it names the fields it wrote and tells
+    the operator to restart. Returns 0.
     """
     md_path = agents_dir / f"{name}.md"
     if not md_path.is_file():
@@ -88,14 +89,29 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
         print("error: no updates given; pass at least one --field value")
         return 1
 
+    # A provider switch carries its model on every interactive surface (the wizard
+    # and the edit menu both write the pair together). The standalone ``--provider``
+    # flag can't, so flag the case where the existing model may not be valid for
+    # the new provider — the mismatch would otherwise only surface at the first
+    # model call.
+    if "provider" in updates and "model" not in updates:
+        print(
+            "warning: --provider was set without --model; the agent keeps its "
+            "current model, which may not be valid for the new provider — pass "
+            "--model too if it isn't."
+        )
+
     written: list[str] = []
     for key, raw in updates.items():
         try:
             _apply_one(md_path, key, raw)
         except (ValueError, OSError) as e:
             # Validated writes fail in memory before touching disk, so any field
-            # already written this call stays written and the failing field's
-            # file is unchanged. Report the offending field and stop.
+            # already written this call stays written and the failing field's file
+            # is unchanged. Name what landed (so a partial apply isn't a surprise),
+            # then report the offending field and stop.
+            if written:
+                print(f"note: already applied {', '.join(written)} before this error.")
             print(f"error: {key}: {e}")
             return 1
         written.append(key)
@@ -161,8 +177,10 @@ def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
 
     Raises:
         ValueError: ``new`` is not a legal agent stem, equals ``old``, the source
-            ``.md`` is missing/unparseable, or ``agents_dir/<new>.md`` already
-            exists (renaming onto a live agent would silently clobber it).
+            ``.md`` is missing/unparseable, or the target ``agents_dir/<new>.md``
+            (or an orphaned ``state_dir/<new>.json``) already exists — renaming
+            onto either would clobber a live agent or another agent's saved
+            subscriptions.
         OSError: a filesystem error writing the new ``.md``, deleting the old, or
             moving the state file.
     """
@@ -176,13 +194,30 @@ def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
         raise ValueError(f"no agent {old!r} in {agents_dir} (expected {old_md})")
     if new_md.exists():
         raise ValueError(f"target agent {new_stem!r} already exists ({new_md}); pick a different name")
+    # Guard the target state file too, symmetrically with the ``.md`` guard: an
+    # orphaned ``<new>.json`` (e.g. left by an earlier ``delete --keep-state``)
+    # would be silently overwritten by the ``os.replace`` below, destroying its
+    # saved subscriptions. Refuse rather than clobber.
+    new_state = state_dir / f"{new_stem}.json"
+    if new_state.exists():
+        raise ValueError(
+            f"a saved state file for {new_stem!r} already exists ({new_state}); "
+            f"renaming would overwrite it — remove it or pick a different name"
+        )
 
     payload = _rewritten_md(old_md, new_stem, new_md)
 
     # Write the new file FIRST so the old one is only removed once the rename
     # target is durably on disk — a failure here leaves the original intact.
     atomic_write(new_md, payload)
-    old_md.unlink()
+    try:
+        old_md.unlink()
+    except OSError:
+        # The new ``.md`` is already written; if we can't remove the old one we
+        # would leave TWO live agents on disk (old + new). Roll the new file back
+        # so the rename fails cleanly to the original single-agent state.
+        new_md.unlink(missing_ok=True)
+        raise
 
     # Move per-agent state LAST: the agent is already renamed at this point, so a
     # failure here costs only the channel subscriptions (recoverable), never the
@@ -190,7 +225,7 @@ def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
     # for an agent that simply never persisted state.
     old_state = state_dir / f"{old}.json"
     if old_state.exists():
-        old_state.replace(state_dir / f"{new_stem}.json")
+        old_state.replace(new_state)
 
 
 def _rewritten_md(old_md: Path, new_stem: str, new_md: Path) -> str:

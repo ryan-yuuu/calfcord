@@ -1,6 +1,6 @@
 """The editable-field registry: one source of truth for ``calfcord agent`` edits.
 
-Round 2's three surfaces onto an agent's ``.md`` — the interactive ``edit``
+Three surfaces onto an agent's ``.md`` — the interactive ``edit``
 menu (which rows exist, in what order, showing each field's current value), the
 non-interactive ``set`` command (which ``--flag`` writes which field), and
 ``show`` (how each field renders) — must agree on the *same* set of editable
@@ -19,7 +19,7 @@ Two kinds of field live here:
   so this module never re-encodes a constraint pydantic already owns — keeping
   the two from drifting.
 * **Compound** (``provider_model`` / ``tools`` / ``prompt``) — fields with
-  dedicated Round 2 editors (the provider+model pair shares the validated
+  dedicated editors (the provider+model pair shares the validated
   provider flow; ``tools`` reuses the checkbox editor; ``prompt`` rewrites the
   body via :func:`calfcord.agents.md_writer.update_system_prompt`). These are
   *not* written through :func:`write_simple_field`; they appear in :data:`FIELDS`
@@ -33,20 +33,33 @@ point.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 
 from calfcord.agents import md_writer
+from calfcord.agents.definition import ThinkingEffort
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from calfcord.agents.definition import AgentDefinition
 
+# The closed set of field kinds. A ``Literal`` (not a bare ``str``) so a typo in a
+# ``Field(...)`` literal — e.g. ``"boool"`` — is a type error a checker can flag,
+# rather than a field with no matching dispatch branch that fails only when an
+# operator happens to select it.
+FieldKind = Literal["text", "select", "int", "bool", "provider_model", "tools", "prompt"]
+
 THINKING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 """The :data:`~calfcord.agents.definition.ThinkingEffort` tiers, as a tuple for
 the ``thinking_effort`` field's ``choices``. Mirrors the ``Literal`` in
 :mod:`calfcord.agents.definition`; kept here as the menu/flag choice list so a
 ``select`` row and the pydantic ``Literal`` enumerate the same values."""
+
+# This tuple is hand-authored but must enumerate exactly the ``ThinkingEffort``
+# Literal it mirrors; assert it at import so a drift (a tier added to one and not
+# the other) becomes a hard failure the test suite catches, not a silently wrong
+# menu/validator.
+assert get_args(ThinkingEffort) == THINKING_EFFORTS, "THINKING_EFFORTS drifted from ThinkingEffort"
 
 # The longest single-line preview shown for the system-prompt body in the edit
 # menu / ``show``. Long enough to be recognizable, short enough not to wrap a
@@ -76,14 +89,35 @@ class Field:
 
     key: str
     label: str
-    kind: str
+    kind: FieldKind
     flag: str
     choices: tuple[str, ...] | None = None
     int_min: int | None = None
     int_max: int | None = None
 
+    def __post_init__(self) -> None:
+        """Assert the per-kind shape so a malformed registry fails loudly at import.
 
-# Menu order. ``provider_model`` is ONE row spanning provider+model (Round 2's
+        ``FIELDS`` is hand-authored; a ``select`` row with no ``choices`` would
+        otherwise degrade to a silently empty menu (``field.choices or ()`` in the
+        editor), and stray ``int_min``/``int_max`` on a non-``int`` field would be
+        dead state. Catch both here — at module import — rather than at edit time.
+        """
+        if self.kind == "select":
+            assert self.choices, f"{self.key!r}: a select field needs choices"
+        else:
+            assert self.choices is None, f"{self.key!r}: only a select field takes choices"
+        if self.kind == "int":
+            assert self.int_min is not None and self.int_max is not None, (
+                f"{self.key!r}: an int field needs int_min and int_max"
+            )
+        else:
+            assert self.int_min is None and self.int_max is None, (
+                f"{self.key!r}: only an int field takes int_min/int_max"
+            )
+
+
+# Menu order. ``provider_model`` is ONE row spanning provider+model (the
 # provider editor writes both together through the validated provider flow);
 # ``tools`` and ``system_prompt`` have dedicated editors. The ordering puts the
 # fields an operator most often tweaks (identity, then provider, then tools and
@@ -165,15 +199,23 @@ def _render_tools(tools: tuple[str, ...] | None) -> str:
 
 
 def _render_prompt(system_prompt: str) -> str:
-    """Render the body as a single-line preview, truncated with an ellipsis.
+    """Render the body as a single-line preview, truncated with an ellipsis."""
+    return truncate(system_prompt, _PROMPT_PREVIEW_LEN)
 
-    Collapses internal whitespace/newlines to single spaces so a multi-line body
-    fits one menu row, then truncates to :data:`_PROMPT_PREVIEW_LEN` characters.
+
+def truncate(text: str, limit: int) -> str:
+    """Flatten internal whitespace and clip ``text`` to ``limit`` chars with an ellipsis.
+
+    Collapsing newlines/runs of whitespace to single spaces keeps a multi-line
+    value on one row (a menu line, or a ``list`` table cell); the trailing ``…``
+    signals the value was clipped so the reader knows to use ``show`` for the rest.
+    Shared by the edit-menu/``show`` prompt preview here and the ``list`` table in
+    :mod:`calfcord.cli.agent_inspect` so the two can't clip differently.
     """
-    flat = " ".join(system_prompt.split())
-    if len(flat) <= _PROMPT_PREVIEW_LEN:
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
         return flat
-    return flat[: _PROMPT_PREVIEW_LEN - 1].rstrip() + "…"
+    return flat[: limit - 1].rstrip() + "…"
 
 
 def write_simple_field(md_path: Path, field: Field, raw: str) -> AgentDefinition:
@@ -192,7 +234,7 @@ def write_simple_field(md_path: Path, field: Field, raw: str) -> AgentDefinition
     :class:`AgentDefinition` so this helper can't drift from it.
 
     Compound fields (``provider_model`` / ``tools`` / ``prompt``) have dedicated
-    Round 2 editors and must NOT be routed here.
+    editors and must NOT be routed here.
 
     Raises:
         ValueError: ``field`` is not a simple field, an ``int`` value isn't

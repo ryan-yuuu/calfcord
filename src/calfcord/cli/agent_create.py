@@ -2,7 +2,7 @@
 
 This is the one place the "name → describe → provider/model → tools → write"
 sequence lives, so the two surfaces that need it — the standalone ``agent
-create`` command *and* (later) ``init``'s first-run setup — can never drift on
+create`` command *and* ``init``'s first-run setup — can never drift on
 *how* an agent is brought into being. :func:`create_agent` is the extracted
 flow; :func:`run` is the thin ``agent create`` wrapper around it (no seed prune,
 offers the optional ``$EDITOR`` prompt step, prints the restart guidance).
@@ -32,7 +32,7 @@ same pattern the ``init`` tests use.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from calfcord.cli._agents import (
     DEFAULT_DESCRIPTION,
@@ -57,6 +57,19 @@ if TYPE_CHECKING:
 _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 
 
+class CreatedAgent(NamedTuple):
+    """What :func:`create_agent` produced: the agent's resolved ``name`` and ``provider``.
+
+    A named pair (not a bare ``tuple[str, str]``) so the two same-typed strings
+    can't be unpacked in the wrong order — callers read ``.name`` / ``.provider``.
+    ``init`` uses ``.provider`` to persist the install default; ``agent create``
+    uses ``.name`` for its restart hint.
+    """
+
+    name: str
+    provider: str
+
+
 def create_agent(
     prompter: Prompter,
     *,
@@ -65,8 +78,8 @@ def create_agent(
     name_default: str | None = None,
     prune_seed: bool = False,
     offer_prompt: bool = True,
-) -> tuple[str, str]:
-    """Run the shared create flow and return ``(name, provider)``.
+) -> CreatedAgent:
+    """Run the shared create flow and return the created agent's ``name`` + ``provider``.
 
     The single create sequence both ``agent create`` (``prune_seed=False``,
     ``offer_prompt=True``) and ``init``'s first-run setup (``prune_seed=True``,
@@ -96,12 +109,13 @@ def create_agent(
        :func:`calfcord.cli.agent_edit.edit_system_prompt` (imported lazily to
        keep this module free of the subprocess/editor concern unless used).
 
-    Returns ``(name, provider)`` so the caller can word its own
-    success/next-steps guidance (``init`` persists the provider as the install
-    default; ``agent create`` just names the agent in its restart hint). Lets
-    :class:`ValueError` / :class:`OSError` from
-    :func:`~calfcord.cli._agents.write_agent` propagate — the caller decides how
-    to report a write failure (and must not print a success banner on one).
+    Returns the created agent's ``name`` and ``provider`` (as a
+    :class:`CreatedAgent`) so the caller can word its own success/next-steps
+    guidance (``init`` persists the provider as the install default; ``agent
+    create`` just names the agent in its restart hint). Lets :class:`ValueError` /
+    :class:`OSError` from :func:`~calfcord.cli._agents.write_agent` propagate — the
+    caller decides how to report a write failure (and must not print a success
+    banner on one).
     """
     current = read_env(env_path)
 
@@ -156,7 +170,7 @@ def create_agent(
 
         edit_system_prompt(md_path)
 
-    return name, provider
+    return CreatedAgent(name=name, provider=provider)
 
 
 def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | None = None) -> int:
@@ -177,7 +191,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     isn't there.
     """
     try:
-        created_name, _provider = create_agent(
+        created = create_agent(
             prompter,
             agents_dir=agents_dir,
             env_path=env_path,
@@ -194,7 +208,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
         return 1
 
     print(
-        f"Created agent {created_name!r}. Restart `calfcord calfkit-agent` "
-        f"(and `calfcord calfkit-bridge` to register /{created_name}) to load it."
+        f"Created agent {created.name!r}. Restart `calfcord calfkit-agent` "
+        f"(and `calfcord calfkit-bridge` to register /{created.name}) to load it."
     )
     return 0

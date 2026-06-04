@@ -45,6 +45,7 @@ DL_BASE="https://github.com/$REPO"
 UV=""            # resolved by ensure_uv
 INSTALLED_DEST=""   # set by install_version
 PREVIOUS_SHA=""     # set by activate_version (for GC)
+SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -186,17 +187,41 @@ seed_agents() {
   fi
   if [ -f "$dest/agents/assistant.md" ]; then
     cp "$dest/agents/assistant.md" "$AGENTS_DIR/assistant.md"
+    SEEDED_STARTER=1
     log "seeded starter agent at $AGENTS_DIR/assistant.md"
+  else
+    warn "no starter agent in source; create one with: calfcord init"
   fi
+}
+
+# Read one field from the existing version marker by PARSING, never sourcing
+# (a repo/ref value could contain shell metacharacters) — mirrors the shim's meta().
+_version_field() {
+  local key="$1" line
+  [ -f "$VERSION_FILE" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in "$key="*) printf '%s' "${line#*=}"; return 0 ;; esac
+  done < "$VERSION_FILE"
+  return 0
 }
 
 # Flip the current symlink atomically and record the version marker.
 activate_version() {
-  local dest="$1" sha now
+  local dest="$1" sha now old_sha
   sha="$(basename "$dest")"
-  PREVIOUS_SHA=""
+  old_sha=""
   if [ -L "$CURRENT_LINK" ]; then
-    PREVIOUS_SHA="$(basename "$(readlink "$CURRENT_LINK")")"
+    old_sha="$(basename "$(readlink "$CURRENT_LINK")")"
+  fi
+  # Re-activating the SAME sha — a no-op re-install, or `self update` when already
+  # current (it has no up-to-date short-circuit) — must NOT make the version its
+  # own predecessor: that records prev == current and then `gc_versions` deletes
+  # the genuine rollback target. Keep the existing previous in that case; otherwise
+  # the outgoing sha becomes the new previous.
+  if [ "$old_sha" = "$sha" ]; then
+    PREVIOUS_SHA="$(_version_field CALFCORD_PREVIOUS_COMMIT)"
+  else
+    PREVIOUS_SHA="$old_sha"
   fi
   ln -sfn "$dest" "$CURRENT_LINK"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -253,7 +278,8 @@ usage:
                                    calfcord calfkit-tools
   calfcord init                  guided first-run config (provider, Discord, broker)
   calfcord router setup          optional: configure the ambient-message router
-  calfcord agent tools [<name>]  interactively edit an agent's tool list
+  calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
+                                 manage agents (create/inspect/edit/rename/delete)
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
   exit 2
@@ -423,7 +449,7 @@ EOF
     if [ "$rc" -gt 1 ]; then
       echo "calfcord self: failed to read $CONFIG_ENV (grep exit $rc)" >&2; rm -f "$tmp"; exit 1
     fi
-    echo "CALF_HOST_URL=$val" >> "$tmp"
+    echo "CALF_HOST_URL=$val" >> "$tmp" || { echo "calfcord self: failed to write $CONFIG_ENV" >&2; rm -f "$tmp"; exit 1; }
     mv "$tmp" "$CONFIG_ENV"
     chmod 600 "$CONFIG_ENV"
     echo "set CALF_HOST_URL=$val in $CONFIG_ENV"
@@ -461,7 +487,7 @@ ensure_path() {
   local line='export PATH="'"$SHIM_DIR"':$PATH"'
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     [ -e "$rc" ] || continue
-    if ! grep -qs "$SHIM_DIR" "$rc"; then
+    if ! grep -qsF "$SHIM_DIR" "$rc"; then
       printf '\n# calfcord\n%s\n' "$line" >> "$rc"
       log "added $SHIM_DIR to PATH in $rc"
       added=1
@@ -494,7 +520,11 @@ main() {
   log "done."
   log "  version:  calfcord self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: calfcord self set-broker <url>)"
-  log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
+  if [ "$SEEDED_STARTER" -eq 1 ]; then
+    log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
+  else
+    log "  agents:   $AGENTS_DIR"
+  fi
   log "  deploy:   calfcord calfkit-bridge | calfkit-agent | calfkit-router | calfkit-tools"
 }
 

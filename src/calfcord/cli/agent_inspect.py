@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli._agents import detect_agents
-from calfcord.cli._fields import FIELDS, render_value
+from calfcord.cli._fields import FIELDS, render_value, truncate
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,19 +77,6 @@ def _provider_model(defn: AgentDefinition) -> str:
     provider = defn.provider or "(default)"
     model = defn.model or "(default)"
     return f"{provider}·{model}"
-
-
-def _truncate(text: str, limit: int) -> str:
-    """Collapse whitespace and truncate ``text`` to ``limit`` chars with an ellipsis.
-
-    Newlines in a description (rare, but valid YAML) would break table
-    alignment, so internal whitespace is flattened first; the ellipsis signals
-    the value was clipped so an operator knows to use ``show`` for the rest.
-    """
-    flat = " ".join(text.split())
-    if len(flat) <= limit:
-        return flat
-    return flat[: limit - 1].rstrip() + "…"
 
 
 def _list_row(defn: AgentDefinition) -> dict[str, Any]:
@@ -172,7 +159,7 @@ def _print_table(agents: list[AgentDefinition]) -> None:
             d.agent_id,
             _provider_model(d),
             _tools_summary(d.tools),
-            _truncate(d.description, _DESCRIPTION_TRUNCATE),
+            truncate(d.description, _DESCRIPTION_TRUNCATE),
         )
         for d in agents
     ]
@@ -217,7 +204,7 @@ def run_show(agents_dir: Path, name: str, *, as_json: bool = False) -> int:
         print(f"  {field.label:<{label_width}}  {render_value(defn, field)}")
     print()
     print("System prompt:")
-    print(f"  {_truncate(defn.system_prompt, _PROMPT_PREVIEW_LEN)}")
+    print(f"  {truncate(defn.system_prompt, _PROMPT_PREVIEW_LEN)}")
     return 0
 
 

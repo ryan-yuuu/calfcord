@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -59,6 +60,39 @@ if TYPE_CHECKING:
     from calfcord.agents.definition import ThinkingEffort
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_and_write(md_path: Path, post: frontmatter.Post) -> AgentDefinition:
+    """Validate ``post``'s mutated state in memory, then atomically rewrite ``md_path``.
+
+    The shared tail every mutator converges on once it has produced the final
+    :class:`frontmatter.Post` (metadata overlaid, or body replaced): build a
+    synthetic :class:`AgentDefinition` from the post's metadata + stripped body
+    **before** any disk write so a bad value raises with the file untouched, dump
+    the post, normalize the trailing newline, and atomically replace. Factored out
+    so :func:`_update_fields` and :func:`update_system_prompt` can't drift on the
+    validate-before-write invariant — their only difference is how they mutate the
+    post (metadata overlay vs. body replacement) before handing it here.
+
+    Returns the validated in-memory definition rather than re-parsing from disk:
+    the bytes just written are what produced it, and a re-parse exception here
+    would leave a caller's registry copy stale relative to disk — the very desync
+    the validate-before-write design prevents.
+    """
+    candidate_metadata = dict(post.metadata)
+    candidate_metadata["system_prompt"] = post.content.strip()
+    candidate_metadata["source_path"] = md_path
+    validated = AgentDefinition(**candidate_metadata)
+
+    payload = frontmatter.dumps(post)
+    # Ensure a trailing newline — frontmatter.dumps may omit it depending
+    # on the body's own trailing whitespace, and POSIX text files
+    # conventionally end with one.
+    if not payload.endswith("\n"):
+        payload += "\n"
+
+    _atomic_write_text(md_path, payload)
+    return validated
 
 
 def _update_fields(md_path: Path, updates: dict[str, object]) -> AgentDefinition:
@@ -94,29 +128,8 @@ def _update_fields(md_path: Path, updates: dict[str, object]) -> AgentDefinition
 
     post.metadata.update(updates)
 
-    # Validate the mutated state in memory FIRST. parse_agent_md does an
-    # equivalent construction; mirror it here so the disk write is gated
-    # on a successful AgentDefinition build.
-    candidate_metadata = dict(post.metadata)
-    candidate_metadata["system_prompt"] = post.content.strip()
-    candidate_metadata["source_path"] = md_path
-    validated = AgentDefinition(**candidate_metadata)
-
-    payload = frontmatter.dumps(post)
-    # Ensure a trailing newline — frontmatter.dumps may omit it depending
-    # on the body's own trailing whitespace, and POSIX text files
-    # conventionally end with one.
-    if not payload.endswith("\n"):
-        payload += "\n"
-
-    _atomic_write_text(md_path, payload)
+    validated = _validate_and_write(md_path, post)
     logger.info("rewrote %s fields=%s in %s", "/".join(updates), list(updates), md_path)
-
-    # Return the validated in-memory definition rather than re-parsing
-    # from disk: the disk content is byte-for-byte what produced
-    # ``validated`` above, and a re-parse exception here would leave the
-    # caller's registry copy stale relative to disk — the very desync
-    # the validate-before-write design is meant to prevent.
     return validated
 
 
@@ -150,21 +163,8 @@ def update_system_prompt(md_path: Path, body: str) -> AgentDefinition:
 
     post.content = body
 
-    # Validate the mutated state in memory FIRST, mirroring _update_fields: the
-    # body becomes ``system_prompt`` (stripped, as parse_agent_md does), so an
-    # empty/whitespace-only body fails here — before any bytes touch disk.
-    candidate_metadata = dict(post.metadata)
-    candidate_metadata["system_prompt"] = post.content.strip()
-    candidate_metadata["source_path"] = md_path
-    validated = AgentDefinition(**candidate_metadata)
-
-    payload = frontmatter.dumps(post)
-    if not payload.endswith("\n"):
-        payload += "\n"
-
-    _atomic_write_text(md_path, payload)
+    validated = _validate_and_write(md_path, post)
     logger.info("rewrote system_prompt in %s", md_path)
-
     return validated
 
 
@@ -232,6 +232,11 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
     from calfcord.tools import TOOL_REGISTRY
 
     for token in tools:
+        # ``is_mcp_selector`` reaches for ``token.startswith`` — a non-str token
+        # would surface as an ``AttributeError`` instead of the ``ValueError`` this
+        # seam documents, so reject it up front with the contract-honoring error.
+        if not isinstance(token, str):
+            raise ValueError(f"invalid tool {token!r}: expected a string")
         if is_mcp_selector(token):
             # Syntactic check only — catalog existence is a deployment
             # concern, deferred exactly as the frontmatter validator does.
@@ -253,6 +258,11 @@ def _atomic_write_text(path: Path, payload: str) -> None:
     Caller is expected to have verified ``path`` exists (and therefore
     its parent does) — no defensive ``mkdir`` here.
     """
+    # mkstemp creates the tmp file 0o600, and os.replace adopts the tmp file's
+    # mode — so without this an existing 0o644 agent .md would silently become
+    # 0o600 on every rewrite. Capture the target's mode now to restore it after.
+    original_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.name}.",
@@ -265,6 +275,8 @@ def _atomic_write_text(path: Path, payload: str) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_path, path)
+        if original_mode is not None:
+            os.chmod(path, original_mode)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise

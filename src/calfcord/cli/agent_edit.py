@@ -1,6 +1,6 @@
 """``calfcord agent edit [<name>]`` — the interactive field-menu editor.
 
-The workhorse of the Round 2 editing surface: resolve an agent, then loop a menu
+The workhorse of the editing surface: resolve an agent, then loop a menu
 of its editable fields (sourced from :data:`calfcord.cli._fields.FIELDS`, the one
 registry every edit/set/show surface shares) where each row shows the field's
 current value and selecting it edits exactly that field. This module also owns
@@ -119,7 +119,16 @@ def edit_system_prompt(md_path: Path) -> None:
             print(f"error: editor exited without saving ({e}); prompt unchanged.")
             return
 
-        new_body = tmp_path.read_text(encoding="utf-8")
+        try:
+            new_body = tmp_path.read_text(encoding="utf-8")
+        except (ValueError, OSError) as e:
+            # Reading the edited temp file back can fail — e.g. the operator saved
+            # a non-UTF-8 body (``UnicodeDecodeError``, a ``ValueError``). Catch it
+            # here so this function honours its "never raises out" contract even
+            # when called from ``agent create``'s prompt step, which has no menu
+            # loop to absorb a stray exception.
+            print(f"error: could not read the edited prompt ({e}); prompt unchanged.")
+            return
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -191,11 +200,15 @@ def _edit_field(
     * ``tools`` delegates to the existing checkbox editor;
     * ``prompt`` delegates to :func:`edit_system_prompt`.
 
-    Returns ``True`` when a write was issued (the menu uses this only to decide
-    whether to print the restart hint at the end). Raises :class:`ValueError` /
-    :class:`OSError` on a bad value or a filesystem failure — :func:`run` catches
-    it, prints one ``error:`` line, and continues the loop (the validated-write
-    seams leave the file untouched on failure).
+    Returns ``True`` when an edit was attempted (the menu uses this only to decide
+    whether to print the restart hint at the end). The simple-scalar branches
+    return ``False`` on a no-op (the value equalled the current one); the compound
+    branches (``provider_model`` / ``tools`` / ``prompt``) delegate to sub-editors
+    that report their own outcome, so they conservatively return ``True`` even
+    when nothing changed — the cost is at most a redundant restart hint. Raises
+    :class:`ValueError` / :class:`OSError` on a bad value or a filesystem failure —
+    :func:`run` catches it, prints one ``error:`` line, and continues the loop (the
+    validated-write seams leave the file untouched on failure).
     """
     defn = parse_agent_md(md_path)
     field = FIELDS_BY_KEY[field_key]
@@ -314,9 +327,12 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
             ):
                 changed = True
         except (ValueError, OSError) as e:
-            # A rejected value (out-of-range int, bad choice, memory-on without
-            # the required fs tools) or a filesystem error — the validated-write
-            # path left the file untouched, so just report and keep looping.
+            # A rejected value (an out-of-range history_turns, a bad
+            # thinking_effort choice, an unknown tool) or a filesystem error — the
+            # validated-write path left the file untouched, so just report and keep
+            # looping. (The memory→fs-tools requirement is NOT enforced here; it is
+            # a build-time check in AgentFactory, so enabling memory writes fine and
+            # surfaces at the next calfkit-agent boot.)
             print(f"error: {e}")
 
     if changed:

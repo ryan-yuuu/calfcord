@@ -29,9 +29,23 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import NamedTuple
 
 from calfcord.cli._envfile import upsert
 from calfcord.cli._prompts import Choice, Prompter
+
+
+class ProviderModel(NamedTuple):
+    """A resolved ``(provider, model)`` pair returned by :func:`configure_provider`.
+
+    A named pair, not a bare ``tuple[str, str]``: both elements are strings, so a
+    positional swap (``model, provider = ...``) would be silent — callers read
+    ``.provider`` / ``.model``. Mirrors the :class:`~calfcord.cli.agent_create.CreatedAgent`
+    precedent. Unpacking (``provider, model = configure_provider(...)``) still works.
+    """
+
+    provider: str
+    model: str
 
 # Substrings that mark a model as the cheap/fast tier of its family. Used to
 # pick a sensible default when a wizard step is flagged ``cheap=True`` (e.g. a
@@ -321,14 +335,33 @@ def pick_model(
             f"warning: the API key for {provider} was REJECTED — the agent won't work "
             f"until you fix it; re-run 'calfcord init' to re-enter it."
         )
-        choices = [Choice(model_id, model_id) for model_id in fallback_models().get(provider, [])]
+        choices = _fallback_choices(provider)
     except ModelListError as exc:
         print(f"warning: couldn't fetch live models for {provider} ({exc}); choose from known models")
-        choices = [Choice(model_id, model_id) for model_id in fallback_models().get(provider, [])]
+        choices = _fallback_choices(provider)
+
+    if not choices:
+        # A fetch that SUCCEEDS but returns nothing (a Codex catalog with only
+        # hidden models, an account that lists zero) would otherwise hand the
+        # prompter an empty choice list and crash it ("choices cannot be empty"),
+        # aborting the wizard — the one thing this module promises never to do.
+        # Treat empty-on-success like a failed fetch and offer the curated list.
+        print(f"warning: no models returned for {provider}; choose from known models")
+        choices = _fallback_choices(provider)
 
     ids = [c.value for c in choices]
-    default = _recommended_default(provider, ids, cheap=cheap, current=current) if ids else None
+    if not ids:
+        # Curated fallback is empty too — only reachable for an unknown provider
+        # (the wizard never produces one). Fail with a clear message rather than
+        # crash the prompter on an empty list.
+        raise ModelListError(f"no models available for {provider!r} and no curated fallback")
+    default = _recommended_default(provider, ids, cheap=cheap, current=current)
     return prompter.select(f"Model for {provider}?", choices, default=default)
+
+
+def _fallback_choices(provider: str) -> list[Choice]:
+    """The curated fallback model list for ``provider`` as :class:`Choice` rows."""
+    return [Choice(model_id, model_id) for model_id in fallback_models().get(provider, [])]
 
 
 def ensure_credentials(
@@ -370,7 +403,7 @@ def configure_provider(
     default_provider: str | None = None,
     cheap: bool = False,
     current_model: str | None = None,
-) -> tuple[str, str]:
+) -> ProviderModel:
     """Run the provider sub-flow shared by every wizard and return ``(provider, model)``.
 
     Selects a provider (``default_provider`` pre-selects the menu — e.g. the
@@ -393,7 +426,7 @@ def configure_provider(
             f"until you add one (re-run 'calfcord init')."
         )
     model = pick_model(prompter, provider, api_key=api_key, cheap=cheap, current=current_model)
-    return provider, model
+    return ProviderModel(provider, model)
 
 
 def _codex_login() -> None:
@@ -411,7 +444,7 @@ def _codex_login() -> None:
        localhost callback the operator's machine can't reach over SSH).
 
     Any failure (network, OAuth error) is *caught*, surfaced as a warning with a
-    resume hint (``calfcord calfkit-auth login``), and swallowed — the wizard
+    resume hint (``calfcord calfkit-auth codex login``), and swallowed — the wizard
     must still proceed to write the rest of the config. Auth is never the thing
     that aborts setup. The OAuth machinery is imported lazily so this module
     stays SDK-free at import time.
@@ -441,7 +474,7 @@ def _codex_login() -> None:
         # tear down the wizard — warn with a resume hint and let setup finish.
         print(
             f"warning: Codex login did not complete ({exc}). "
-            "You can finish it later with: calfcord calfkit-auth login"
+            "You can finish it later with: calfcord calfkit-auth codex login"
         )
         return
     print("Logged in to ChatGPT.")

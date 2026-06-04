@@ -116,10 +116,11 @@ def _build_choices(current: set[str]) -> tuple[list[Choice], bool]:
       appended as a **pre-checked** "kept" row (a trailing group) so confirming
       preserves it and the operator can still uncheck to remove it.
     * **Broken generated schema.** If ``discover_mcp_catalog`` itself raises
-      (an ``ImportError``/``ValueError`` from a malformed generated module), we
-      print a loud ``warning:`` and fall back to builtins-only instead of
-      letting one bad schema brick the whole editor — the kept-token group then
-      preserves any MCP selectors as above.
+      (any error from a malformed generated module — ``SyntaxError`` /
+      ``AttributeError`` as well as ``ImportError`` / ``ValueError``), we print a
+      loud ``warning:`` and fall back to builtins-only instead of letting one bad
+      schema brick the whole editor — the kept-token group then preserves any MCP
+      selectors as above.
 
     Returns the rows plus a flag for whether the MCP catalog was empty (or
     failed to load), so :func:`run` can print the codegen hint without
@@ -138,10 +139,12 @@ def _build_choices(current: set[str]) -> tuple[list[Choice], bool]:
 
     try:
         catalog = discover_mcp_catalog(schemas_pkg)
-    except (ImportError, ValueError) as e:
+    except Exception as e:
         # A broken generated schema module must not brick the editor: degrade to
-        # builtins-only, loudly, so the operator sees the cause. Kept-token rows
-        # below still preserve any configured MCP selectors.
+        # builtins-only, loudly, so the operator sees the cause. Broad on purpose,
+        # at parity with ``_agents.pick_tools`` — a corrupt generated module can
+        # raise SyntaxError / AttributeError too, not just ImportError / ValueError.
+        # Kept-token rows below still preserve any configured MCP selectors.
         print(f"warning: MCP catalog failed to load, showing builtins only: {e}")
         catalog = {}
 
