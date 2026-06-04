@@ -50,9 +50,9 @@ _PROVIDER_KEY_VAR: dict[str, str] = {
 # (`calfcord init`, `calfcord router setup`). Values are the ``provider:`` /
 # ``CALFKIT_AGENT_DEFAULT_PROVIDER`` literals; the order is the menu order.
 PROVIDERS: list[Choice] = [
-    Choice("anthropic", "Anthropic (Claude)"),
-    Choice("openai", "OpenAI (GPT)"),
-    Choice("openai-codex", "ChatGPT subscription (Codex)"),
+    Choice("anthropic", "Anthropic"),
+    Choice("openai", "OpenAI"),
+    Choice("openai-codex", "Codex subscription"),
 ]
 
 # OpenAI's ``models.list()`` returns the *entire* account catalog — embeddings,
@@ -358,7 +358,7 @@ def ensure_credentials(
         return current.get(key_var)
 
     if provider == "openai-codex":
-        _codex_login(prompter)
+        _codex_login()
     return None
 
 
@@ -396,19 +396,21 @@ def configure_provider(
     return provider, model
 
 
-def _codex_login(prompter: Prompter) -> None:
+def _codex_login() -> None:
     """Run the inline ChatGPT-subscription (Codex) OAuth flow.
 
     Steps:
 
     1. If cached credentials are still valid (or can be silently refreshed),
        report that and stop — re-running the wizard must not force a re-login.
-    2. Otherwise ask whether to open a browser now (the happy path) or fall back
-       to a headless device-code login that prints a URL + code.
-    3. Run the chosen login.
+    2. Otherwise open a browser straight into the login — picking Codex is itself
+       the consent, so there is no extra yes/no prompt. If no browser can open
+       (a headless box), the OAuth helper prints the URL to visit, and a failure
+       still degrades gracefully below.
 
-    Any failure (declined, network, OAuth error) is *caught*, surfaced as a
-    warning with a resume hint, and swallowed — the wizard must still proceed to
+    Any failure (no browser, network, OAuth error) is *caught*, surfaced as a
+    warning with a resume hint (``calfcord calfkit-auth login``, which also
+    offers a device-code flow), and swallowed — the wizard must still proceed to
     write the rest of the config. Auth is never the thing that aborts setup.
     The OAuth machinery is imported lazily so this module stays SDK-free at
     import time.
@@ -430,19 +432,9 @@ def _codex_login(prompter: Prompter) -> None:
         print("Already authenticated with ChatGPT.")
         return
 
-    # ``confirm`` True = open a browser (the common case); declining routes to
-    # the headless device-code flow, which prints a URL + code to complete the
-    # login on another device.
-    use_browser = prompter.confirm(
-        "Log in to ChatGPT now? (opens a browser — choose No for a headless device-code login)",
-        default=True,
-    )
-    device = not use_browser
-    auth_method = "device_code" if device else "browser"
-    open_browser = not device
-
+    print("Logging in to ChatGPT (opening a browser)…")
     try:
-        asyncio.run(auth.login(auth_method=auth_method, open_browser=open_browser))
+        asyncio.run(auth.login(auth_method="browser", open_browser=True))
     except Exception as exc:
         # Broad on purpose: a declined/failed/aborted OAuth login must never
         # tear down the wizard — warn with a resume hint and let setup finish.

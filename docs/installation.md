@@ -27,10 +27,10 @@ calfcord init
 
 It asks for:
 
-- A **model provider** (Anthropic / OpenAI / ChatGPT-Codex) and its API key. If
-  you pick **ChatGPT-Codex**, it runs the ChatGPT login inline — a browser flow,
-  or a headless device-code option — instead of pointing you at a separate
-  command.
+- A **model provider** (Anthropic / OpenAI / Codex subscription) and its API
+  key. If you pick **Codex**, it opens the ChatGPT login in a browser inline
+  (on a headless box the login URL is printed) instead of pointing you at a
+  separate command.
 - Your **first agent**: a name (default `assistant`), a description, a **model
   picked from a live list fetched from the provider** (you select one, so you
   can't enter a slug the provider would reject), and its **tools** — a checkbox
