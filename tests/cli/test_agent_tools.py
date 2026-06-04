@@ -16,7 +16,7 @@ import frontmatter
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import agent_tools
-from calfcord.cli._prompts import Prompter
+from calfcord.cli._prompts import Choice, Prompter
 from calfcord.tools import TOOL_REGISTRY
 
 BUILTIN_NAMES = set(TOOL_REGISTRY)
@@ -40,10 +40,10 @@ class FakePrompter:
     ) -> None:
         self._select_result = select_result
         self._checkbox_result = checkbox_result if checkbox_result is not None else []
-        self.last_checkbox_choices: list[tuple[str, str, bool]] | None = None
-        self.last_select_choices: list[tuple[str, str]] | None = None
+        self.last_checkbox_choices: list[Choice] | None = None
+        self.last_select_choices: list[Choice] | None = None
 
-    def select(self, message: str, choices: list[tuple[str, str]], *, default: str | None = None) -> str:
+    def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
         if self._select_result is None:
             raise AssertionError(f"unexpected select(): {message!r}")
         self.last_select_choices = choices
@@ -58,9 +58,7 @@ class FakePrompter:
     def confirm(self, message: str, *, default: bool = False) -> bool:
         raise AssertionError(f"unexpected confirm(): {message!r}")
 
-    def checkbox(
-        self, message: str, choices: list[tuple[str, str, bool]], *, instruction: str = ""
-    ) -> list[str]:
+    def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         self.last_checkbox_choices = choices
         return list(self._checkbox_result)
 
@@ -92,9 +90,14 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None) -> Path:
     return md_path
 
 
-def _checked(choices: list[tuple[str, str, bool]]) -> set[str]:
+def _checked(choices: list[Choice]) -> set[str]:
     """Return the set of pre-checked choice VALUES from a captured choices list."""
-    return {value for value, _label, checked in choices if checked}
+    return {c.value for c in choices if c.checked}
+
+
+def _values(choices: list[Choice]) -> set[str]:
+    """Return every choice VALUE from a captured choices list (checked or not)."""
+    return {c.value for c in choices}
 
 
 # ---------------------------------------------------------------- pre-selection ---
@@ -161,7 +164,7 @@ def test_name_omitted_picks_via_select(tmp_path: Path) -> None:
     rc = agent_tools.run(fake, agents_dir=tmp_path, name=None)
     assert rc == 0
     # The picker offered both detected agents, sorted...
-    assert fake.last_select_choices == [("alpha", "alpha"), ("beta", "beta")]
+    assert fake.last_select_choices == [Choice("alpha", "alpha"), Choice("beta", "beta")]
     # ...and the chosen agent's file got the write.
     assert frontmatter.load(md_beta).metadata["tools"] == ["shell"]
 
@@ -179,3 +182,78 @@ def test_unknown_named_agent_returns_1(tmp_path: Path, capsys) -> None:
     fake = FakePrompter()
     assert agent_tools.run(fake, agents_dir=tmp_path, name="ghost") == 1
     assert "ghost" in capsys.readouterr().out
+
+
+# --------------------------------------------------- preserving unknown tokens ---
+
+
+def test_configured_mcp_selectors_kept_when_catalog_empty(tmp_path: Path) -> None:
+    """An agent's existing ``mcp/...`` selectors must survive an empty catalog.
+
+    This repo ships no MCP schemas, so ``discover_mcp_catalog`` returns ``{}``
+    and the selectors aren't enumerable. They must still appear as PRE-CHECKED
+    "kept" rows so confirming the checkbox never silently drops them.
+    """
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
+    fake = FakePrompter(checkbox_result=[])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    assert fake.last_checkbox_choices is not None
+    values = _values(fake.last_checkbox_choices)
+    checked = _checked(fake.last_checkbox_choices)
+    # The unenumerable MCP selectors are present AND pre-checked.
+    assert {"mcp/gmail", "mcp/gmail/search"} <= values
+    assert {"mcp/gmail", "mcp/gmail/search"} <= checked
+    # The builtin is enumerated and pre-checked too.
+    assert "read_file" in checked
+
+
+def test_keeping_prechecked_kept_tokens_writes_all_tokens(tmp_path: Path) -> None:
+    """Confirming with the kept MCP tokens still checked preserves every token."""
+    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
+    # The operator confirms without unchecking anything: returns the full set.
+    fake = FakePrompter(checkbox_result=["read_file", "mcp/gmail", "mcp/gmail/search"])
+    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
+
+    # Nothing dropped: all three tokens still on disk after the round-trip.
+    assert parse_agent_md(md_path).tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
+
+
+def test_unchecking_kept_mcp_token_removes_it(tmp_path: Path) -> None:
+    """Unchecking a kept MCP token drops exactly that token and keeps the rest."""
+    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
+    # Operator unticks ``mcp/gmail`` only.
+    fake = FakePrompter(checkbox_result=["read_file", "mcp/gmail/search"])
+    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
+
+    assert parse_agent_md(md_path).tools == ("read_file", "mcp/gmail/search")
+
+
+# ------------------------------------------------------------- error handling ---
+
+
+def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> None:
+    """A malformed ``.md`` (invalid YAML frontmatter) reports an error, not a crash."""
+    agents_dir = tmp_path
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    # Unbalanced bracket in the YAML value makes parse_agent_md raise ValueError.
+    (agents_dir / "broken.md").write_text(
+        "---\nname: broken\ntools: [unclosed\n---\nbody\n", encoding="utf-8"
+    )
+    fake = FakePrompter()
+    assert agent_tools.run(fake, agents_dir=agents_dir, name="broken") == 1
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "broken" in out
+
+
+# -------------------------------------------------------------- first_line ---
+
+
+def test_first_line_strips_summary_and_backticks() -> None:
+    assert agent_tools.first_line("<summary>foo</summary>") == "foo"
+    assert agent_tools.first_line("``x``") == "x"
+    assert agent_tools.first_line("") == ""
+    assert agent_tools.first_line(None) == ""
+    # The first NON-EMPTY line wins, with leading blank lines skipped.
+    assert agent_tools.first_line("\n\n  <summary>second</summary>\nthird") == "second"

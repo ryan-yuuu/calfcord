@@ -103,7 +103,9 @@ def test_seed_agents_seeds_starter_and_state_dir(tmp_path: Path) -> None:
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents" / "assistant.md").read_text().startswith("---")
-    assert (home / "state").is_dir()
+    # seed_agents pre-creates exactly the dir the runtime's CALFKIT_STATE_DIR
+    # points at (.../state/agents), not just the parent .../state.
+    assert (home / "state" / "agents").is_dir()
 
 
 def test_seed_agents_does_not_clobber_existing_agents(tmp_path: Path) -> None:
@@ -125,7 +127,7 @@ def test_seed_agents_is_noop_when_source_lacks_starter(tmp_path: Path) -> None:
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents").is_dir()
-    assert (home / "state").is_dir()
+    assert (home / "state" / "agents").is_dir()
     assert list((home / "agents").iterdir()) == []
 
 
@@ -155,6 +157,41 @@ def test_shim_defers_to_env_file_override(tmp_path: Path) -> None:
     # does not read --env-file, therefore sees it unset.
     seen = _run_shim(home, cwd=launch, env_file="CALFCORD_WORKSPACE_DIR=/pinned/ws\n")
     assert seen["CALFCORD_WORKSPACE_DIR"] == _UNSET
+
+
+def test_shim_empty_env_value_does_not_defeat_default(tmp_path: Path) -> None:
+    """A bare ``KEY=`` in config/.env counts as UNSET, so the default still applies.
+
+    ``.env.example`` ships ``CALFCORD_WORKSPACE_DIR=`` (empty); the shim must
+    treat that as "not set" and still export the launch dir, otherwise
+    ``uv run --env-file`` would inject an empty value and the documented
+    "workspace = launch dir" default would never happen on a default install.
+    """
+    home = tmp_path / "home"
+    _install_shims(home)
+    launch = tmp_path / "workdir"
+    launch.mkdir()
+
+    seen = _run_shim(home, cwd=launch, env_file="CALFCORD_WORKSPACE_DIR=\n")
+    assert seen["CALFCORD_WORKSPACE_DIR"] != _UNSET
+    assert os.path.realpath(seen["CALFCORD_WORKSPACE_DIR"]) == os.path.realpath(str(launch))
+
+
+def test_shim_defers_to_nonempty_dotenv_agents_dir(tmp_path: Path) -> None:
+    """A NON-empty ``CALFKIT_AGENTS_DIR=`` in config/.env still defers to --env-file.
+
+    The shim must not export its own default over a real pinned value (it leaves
+    it for ``uv run --env-file``), so the fake uv — which ignores --env-file —
+    sees it unset. The unrelated CALFKIT_STATE_DIR still gets the home default.
+    """
+    home = tmp_path / "home"
+    _install_shims(home)
+    launch = tmp_path / "workdir"
+    launch.mkdir()
+
+    seen = _run_shim(home, cwd=launch, env_file="CALFKIT_AGENTS_DIR=/from/dotenv\n")
+    assert seen["CALFKIT_AGENTS_DIR"] == _UNSET
+    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
 def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:

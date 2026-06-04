@@ -17,7 +17,7 @@ import pytest
 
 from calfcord.cli import init
 from calfcord.cli._envfile import read_env, upsert
-from calfcord.cli._prompts import Prompter
+from calfcord.cli._prompts import Choice, Prompter
 
 
 class FakePrompter:
@@ -41,7 +41,7 @@ class FakePrompter:
         self._secrets = deque(secrets or [])
         self._confirms = deque(confirms or [])
 
-    def select(self, message: str, choices: list[tuple[str, str]], *, default: str | None = None) -> str:
+    def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
         if not self._selects:
             raise AssertionError(f"unexpected select(): {message!r}")
         return self._selects.popleft()
@@ -61,9 +61,7 @@ class FakePrompter:
             raise AssertionError(f"unexpected confirm(): {message!r}")
         return self._confirms.popleft()
 
-    def checkbox(
-        self, message: str, choices: list[tuple[str, str, bool]], *, instruction: str = ""
-    ) -> list[str]:
+    def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         # The init flow never multi-selects; this exists only so the fake stays
         # structurally compatible with the (now checkbox-bearing) Prompter
         # Protocol — see the agent-tools tests for the driven version.
@@ -234,3 +232,20 @@ def test_no_agents_explains_starter(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert init.run(prompter, env_path=tmp_path / ".env", agents_dir=empty_agents) == 0
     out = capsys.readouterr().out
     assert "assistant" in out  # the starter is named and explained
+
+
+def test_providers_match_provider_literal() -> None:
+    """``init.PROVIDERS`` must stay in lockstep with the authoritative Literal.
+
+    ``Provider`` (a ``Literal``) is the single source of truth for supported
+    providers; ``PROVIDERS`` re-lists those values for the picker. A test (not a
+    production assert) catches the two drifting apart — e.g. a new provider added
+    to the Literal but not offered in ``init`` — without coupling at import time.
+    """
+    from typing import get_args
+
+    from calfcord.agents.definition import Provider
+
+    assert {c.value for c in init.PROVIDERS} == set(get_args(Provider))
+    # Every key-based provider must be a provider we actually offer.
+    assert set(init.PROVIDER_KEY_VAR) <= {c.value for c in init.PROVIDERS}

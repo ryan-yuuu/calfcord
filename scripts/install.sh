@@ -34,8 +34,8 @@ SHIM_DIR="$CALFCORD_HOME/shims"       # calfcord + calfcord-self (placed on PATH
 VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
-AGENTS_DIR="$CALFCORD_HOME/agents"    # operator's agent .md files (stable across updates)
-STATE_DIR="$CALFCORD_HOME/state"      # per-agent runtime state (channel subscriptions)
+AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
+STATE_DIR="$CALFCORD_HOME/state/agents"       # per-agent runtime state; matches the shim's CALFKIT_STATE_DIR
 CURRENT_LINK="$CALFCORD_HOME/current"
 VERSION_FILE="$CALFCORD_HOME/version"
 
@@ -171,11 +171,12 @@ seed_config() {
 
 # Give the native install a stable home for agent definitions and per-agent
 # state, and drop in the bundled starter agent on first install. ``calfkit-agent``
-# resolves these dirs from CALFKIT_AGENTS_DIR / CALFKIT_STATE_DIR (the shim points
-# both under $CALFCORD_HOME), so they must live outside the GC'd ``versions/<sha>``
-# tree to survive ``calfcord self update``. Seeding only happens when the agents
-# dir is empty, so an operator who removed the starter (or added their own
-# agents) is never clobbered on re-install.
+# resolves these dirs from CALFKIT_AGENTS_DIR / CALFKIT_STATE_DIR — the shim points
+# them at $AGENTS_DIR ($CALFCORD_HOME/agents) and $STATE_DIR ($CALFCORD_HOME/state/agents)
+# respectively, so this pre-creates exactly the two dirs the runtime uses. They
+# live outside the GC'd ``versions/<sha>`` tree to survive ``calfcord self update``.
+# Seeding only happens when the agents dir is empty, so an operator who removed
+# the starter (or added their own agents) is never clobbered on re-install.
 seed_agents() {
   local dest="$1"
   mkdir -p "$AGENTS_DIR" "$STATE_DIR"
@@ -273,9 +274,14 @@ ENVF="$H/config/.env"
 # directory; the tools workspace defaults to the *launch* directory so agents
 # act where you ran the command (like Claude Code). Override any of these in
 # config/.env.
+#
+# The `^$1=.` grep requires at least one char after the `=`: a bare `KEY=`
+# (which `.env.example` ships for CALFCORD_WORKSPACE_DIR) counts as UNSET, so
+# the workspace still defaults to $PWD. An operator must give a real value to
+# override the default.
 _default_env() {  # name default
   [ -n "${!1:-}" ] && return 0
-  [ -f "$ENVF" ] && grep -q "^$1=" "$ENVF" && return 0
+  [ -f "$ENVF" ] && grep -q "^$1=." "$ENVF" && return 0
   export "$1=$2"
 }
 _default_env CALFKIT_AGENTS_DIR     "$H/agents"

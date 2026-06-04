@@ -25,14 +25,16 @@ from pathlib import Path
 
 from calfcord.cli import _envfile
 from calfcord.cli._agents import detect_agents
-from calfcord.cli._prompts import Prompter
+from calfcord.cli._prompts import Choice, Prompter
 
-# (value, label) pairs; values match the ``provider:`` frontmatter Literal and
-# the ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env var that drives the default.
-PROVIDERS: list[tuple[str, str]] = [
-    ("anthropic", "Anthropic (Claude)"),
-    ("openai", "OpenAI (GPT)"),
-    ("openai-codex", "ChatGPT subscription (Codex)"),
+# Selectable providers; values match the ``provider:`` frontmatter Literal
+# (:data:`calfcord.agents.definition.Provider`) and the
+# ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env var that drives the default. A drift
+# guard test keeps this list in sync with the Literal.
+PROVIDERS: list[Choice] = [
+    Choice("anthropic", "Anthropic (Claude)"),
+    Choice("openai", "OpenAI (GPT)"),
+    Choice("openai-codex", "ChatGPT subscription (Codex)"),
 ]
 
 # Providers that authenticate via a plain API-key env var. ``openai-codex`` is
@@ -96,6 +98,28 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     """
     current = _envfile.read_env(env_path)
 
+    def upsert_text(var: str, message: str) -> None:
+        """Prompt for an optional text field, defaulting to the current value.
+
+        Writes only when the operator typed something, so an empty answer keeps
+        whatever was already on disk — the keep-existing-on-empty contract that
+        makes re-runs safe.
+        """
+        value = prompter.text(message, default=current.get(var, ""))
+        if value:
+            _envfile.upsert(env_path, {var: value})
+
+    def upsert_secret(var: str, message: str) -> None:
+        """Prompt for an optional secret, writing only when a value was entered.
+
+        ``secret`` has no ``default=`` in the Protocol (a masked field can't
+        usefully echo the prior value), so an empty answer keeps the existing
+        one without ever displaying it.
+        """
+        value = prompter.secret(message)
+        if value:
+            _envfile.upsert(env_path, {var: value})
+
     print("calfcord init — configuring", env_path)
     print()
 
@@ -109,9 +133,7 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
 
     if provider in PROVIDER_KEY_VAR:
         key_var = PROVIDER_KEY_VAR[provider]
-        key = prompter.secret(f"{key_var} {_set_label(current.get(key_var, ''))} — paste to set, enter to keep:")
-        if key:
-            _envfile.upsert(env_path, {key_var: key})
+        upsert_secret(key_var, f"{key_var} {_set_label(current.get(key_var, ''))} — paste to set, enter to keep:")
     elif provider == "openai-codex":
         print("  ChatGPT subscription needs no key here. Authenticate once with:")
         print("    calfcord calfkit-auth login")
@@ -120,29 +142,19 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
 
     # 2. Discord credentials ------------------------------------------------
     print("Discord bot credentials (see docs/discord-setup.md to create the app + token).")
-    token = prompter.secret(
-        f"DISCORD_BOT_TOKEN {_set_label(current.get('DISCORD_BOT_TOKEN', ''))} — paste to set, enter to keep:"
+    upsert_secret(
+        "DISCORD_BOT_TOKEN",
+        f"DISCORD_BOT_TOKEN {_set_label(current.get('DISCORD_BOT_TOKEN', ''))} — paste to set, enter to keep:",
     )
-    if token:
-        _envfile.upsert(env_path, {"DISCORD_BOT_TOKEN": token})
-
-    app_id = prompter.text("DISCORD_APPLICATION_ID (numeric):", default=current.get("DISCORD_APPLICATION_ID", ""))
-    if app_id:
-        _envfile.upsert(env_path, {"DISCORD_APPLICATION_ID": app_id})
-
-    guild_id = prompter.text(
+    upsert_text("DISCORD_APPLICATION_ID", "DISCORD_APPLICATION_ID (numeric):")
+    upsert_text(
+        "DISCORD_GUILD_ID",
         "DISCORD_GUILD_ID (optional — guild-scoped slash sync; enter to skip):",
-        default=current.get("DISCORD_GUILD_ID", ""),
     )
-    if guild_id:
-        _envfile.upsert(env_path, {"DISCORD_GUILD_ID": guild_id})
-
-    channel_id = prompter.text(
+    upsert_text(
+        "DISCORD_DEFAULT_CHANNEL_ID",
         "DISCORD_DEFAULT_CHANNEL_ID (optional — seeds the first agent's channel; enter to skip):",
-        default=current.get("DISCORD_DEFAULT_CHANNEL_ID", ""),
     )
-    if channel_id:
-        _envfile.upsert(env_path, {"DISCORD_DEFAULT_CHANNEL_ID": channel_id})
 
     print()
 
@@ -150,8 +162,8 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     broker_choice = prompter.select(
         "Kafka broker?",
         [
-            ("docker", "Start a local Redpanda in Docker (recommended)"),
-            ("url", "I have a broker URL"),
+            Choice("docker", "Start a local Redpanda in Docker (recommended)"),
+            Choice("url", "I have a broker URL"),
         ],
         default="docker",
     )

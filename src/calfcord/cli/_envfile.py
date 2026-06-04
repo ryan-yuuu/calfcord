@@ -82,10 +82,6 @@ def upsert(path: Path, updates: Mapping[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     original = path.read_text(encoding="utf-8") if path.exists() else ""
-    # Splitlines() drops the trailing newline; remember whether one existed so a
-    # file that ended with "\n" keeps ending that way (and a non-terminated last
-    # line stays non-terminated until we append after it).
-    had_trailing_newline = original.endswith("\n")
     lines = original.splitlines()
 
     remaining = dict(updates)
@@ -107,12 +103,13 @@ def upsert(path: Path, updates: Mapping[str, str]) -> None:
 
     # Re-join. Always terminate with a newline: secrets files are line-oriented
     # and a missing final newline trips naive `grep '^KEY='` style readers (the
-    # shim's set-broker uses exactly that).
-    body = "\n".join(new_lines)
-    if new_lines:
-        body += "\n"
-    elif had_trailing_newline:
-        body = "\n"
+    # shim's set-broker uses exactly that). With no content lines, preserve the
+    # original's blank/empty shape rather than inventing one. (Kept as an
+    # if/else rather than a nested ternary for readability — see SIM108.)
+    if new_lines:  # noqa: SIM108
+        body = "\n".join(new_lines) + "\n"
+    else:
+        body = "\n" if original.endswith("\n") else ""
 
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
     try:
