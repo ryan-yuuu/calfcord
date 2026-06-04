@@ -132,33 +132,19 @@ def test_reference_with_trailing_brace_is_accepted() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_invalid_server_name_exits() -> None:
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["Gmail", "--command", "x"], id="uppercase-server-name"),
+        pytest.param(["gmail"], id="missing-transport"),
+        pytest.param(["gmail", "--command", "x", "--url", "https://x"], id="both-transports"),
+        pytest.param(["drive", "--url", "https://x", "--env", "T"], id="env-with-url"),
+        pytest.param(["gmail", "--command", "x", "--header", "A=$B"], id="header-with-command"),
+    ],
+)
+def test_parse_args_rejects_with_exit_2(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as ei:
-        config_cli._parse_args(["Gmail", "--command", "x"])  # uppercase: invalid grammar
-    assert ei.value.code == 2
-
-
-def test_missing_transport_exits() -> None:
-    with pytest.raises(SystemExit) as ei:
-        config_cli._parse_args(["gmail"])
-    assert ei.value.code == 2
-
-
-def test_both_transports_exit() -> None:
-    with pytest.raises(SystemExit) as ei:
-        config_cli._parse_args(["gmail", "--command", "x", "--url", "https://x"])
-    assert ei.value.code == 2
-
-
-def test_env_with_url_exits() -> None:
-    with pytest.raises(SystemExit) as ei:
-        config_cli._parse_args(["drive", "--url", "https://x", "--env", "T"])
-    assert ei.value.code == 2
-
-
-def test_header_with_command_exits() -> None:
-    with pytest.raises(SystemExit) as ei:
-        config_cli._parse_args(["gmail", "--command", "x", "--header", "A=$B"])
+        config_cli._parse_args(argv)
     assert ei.value.code == 2
 
 
