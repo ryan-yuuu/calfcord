@@ -69,14 +69,17 @@ docker run -d --name calfcord-redpanda -p 19092:19092 \
 Already have a broker? Pick "I have a broker URL" in `calfcord init`, or run
 `calfcord self set-broker <host:port>`.
 
-**5. Run the four processes** (each in its own terminal, or under a supervisor):
+**5. Check your setup, then run the four processes** (each in its own terminal, or under a supervisor):
 
 ```bash
-calfcord calfkit-bridge     # the Discord gateway
-calfcord calfkit-agent      # runs your agents
-calfcord calfkit-router     # routes un-mentioned messages
-calfcord calfkit-tools      # tools + the agent-to-agent channel
+calfcord doctor             # verify config, broker, Discord token + app id, and agents
+calfcord run bridge         # the Discord gateway
+calfcord run agent          # runs your agents
+calfcord run router         # routes un-mentioned messages
+calfcord run tools          # tools + the agent-to-agent channel
 ```
+
+(`calfcord run <svc>` is the friendly form; the underlying `calfcord calfkit-<svc>` names still work.)
 
 **6. Say hello.** In any channel the bot can see:
 
@@ -87,12 +90,14 @@ calfcord calfkit-tools      # tools + the agent-to-agent channel
 A reply appears from your starter agent. You're live. 🎉
 
 > **Next steps**
+> - **Explore everything calfcord can do** → a task-by-task guide:
+>   [`docs/using-calfcord.md`](./docs/using-calfcord.md).
 > - **Customize your agent / add tools** → `calfcord agent tools`, then restart
->   `calfcord calfkit-agent`. Field reference:
+>   `calfcord run agent`. Field reference:
 >   [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 > - **Enable ambient routing (optional)** → `@mentions` work without it;
 >   un-mentioned messages just go unanswered. To have an agent answer those too,
->   run `calfcord router setup` and start `calfcord calfkit-router`. Details:
+>   run `calfcord router setup` and start `calfcord run router`. Details:
 >   [`docs/ambient-routing.md`](./docs/ambient-routing.md).
 > - **Run agents across machines** → install calfcord on each host and point
 >   them all at one shared broker URL —
@@ -129,14 +134,14 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sente
 
 The frontmatter declares identity and runtime hints; the body is the system
 prompt. The filename must match `name`, and the slash command is always
-`/<name>`. Drop the file in, restart `calfcord calfkit-bridge` and
-`calfcord calfkit-agent`, and it's live.
+`/<name>`. Drop the file in, restart `calfcord run bridge` and
+`calfcord run agent`, and it's live.
 
 Prefer not to hand-write the file? The full lifecycle is on the CLI:
 `calfcord agent create | list | show | edit | set | rename | delete` (plus
 `calfcord agent tools` for just the tool list). `create` is a guided wizard,
 `edit` an interactive field menu, and `set` its scriptable equivalent; restart
-`calfcord calfkit-agent` after any change to apply it.
+`calfcord run agent` after any change to apply it.
 
 Full field reference (providers, models, tool scoping, thinking effort) and the
 `calfcord agent` CLI →
@@ -163,6 +168,7 @@ environment-variable reference.
 
 ## Documentation
 
+- [`docs/using-calfcord.md`](./docs/using-calfcord.md) — what you can do after the quick start, each task with its command.
 - [`docs/discord-setup.md`](./docs/discord-setup.md) — create the Discord app (~5 min).
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — every agent frontmatter field.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — add a built-in tool.

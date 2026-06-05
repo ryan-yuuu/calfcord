@@ -225,19 +225,7 @@ printf 'ARGV=%s\\n' "${seen[*]}"
 
 def _run_shim_argv(home: Path, argv: list[str]) -> str:
     """Invoke the shim with ``argv`` and return the user-program argv the fake uv saw."""
-    (home / "bin").mkdir(parents=True, exist_ok=True)
-    uv = home / "bin" / "uv"
-    uv.write_text(_FAKE_UV_ECHO_ARGS)
-    uv.chmod(0o755)
-    (home / "current").mkdir(exist_ok=True)
-    (home / "config").mkdir(exist_ok=True)
-    (home / "config" / ".env").write_text("")
-
-    env = {**os.environ, "CALFCORD_HOME": str(home)}
-    result = subprocess.run(
-        [str(home / "shims" / "calfcord"), *argv],
-        env=env, capture_output=True, text=True, check=False,
-    )
+    result = _run_shim_proc(home, argv)
     assert result.returncode == 0, f"shim failed: {result.stderr}"
     for line in result.stdout.splitlines():
         key, _, value = line.partition("=")
@@ -272,6 +260,90 @@ def test_shim_passes_runner_commands_through_unchanged(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_argv(home, ["calfkit-bridge"]) == "calfkit-bridge"
+
+
+def test_shim_run_maps_services_to_runner_scripts(tmp_path: Path) -> None:
+    """``calfcord run <svc>`` is the friendly form of ``calfcord calfkit-<svc>``."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["run", "bridge"]) == "calfkit-bridge"
+    assert _run_shim_argv(home, ["run", "agent", "scribe"]) == "calfkit-agent scribe"
+    assert _run_shim_argv(home, ["run", "router"]) == "calfkit-router"
+    assert _run_shim_argv(home, ["run", "tools"]) == "calfkit-tools"
+    assert _run_shim_argv(home, ["run", "mcp"]) == "calfkit-mcp"
+
+
+def test_shim_mcp_maps_to_authoring_scripts(tmp_path: Path) -> None:
+    """``calfcord mcp <add|codegen>`` surfaces the bridge-side / agent-side MCP authoring tools."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["mcp", "add", "gmail"]) == "calfcord-mcp-add gmail"
+    assert _run_shim_argv(home, ["mcp", "codegen", "gmail"]) == "calfcord-mcp-codegen gmail"
+
+
+def test_shim_auth_maps_to_calfkit_auth(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["auth", "codex", "login"]) == "calfkit-auth codex login"
+
+
+def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["doctor"]) == "calfcord-cli doctor"
+
+
+def _run_shim_proc(home: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Invoke the shim and return the CompletedProcess (for help/error paths that exit before uv)."""
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    uv = home / "bin" / "uv"
+    uv.write_text(_FAKE_UV_ECHO_ARGS)
+    uv.chmod(0o755)
+    (home / "current").mkdir(exist_ok=True)
+    (home / "config").mkdir(exist_ok=True)
+    (home / "config" / ".env").write_text("")
+    env = {**os.environ, "CALFCORD_HOME": str(home)}
+    return subprocess.run(
+        [str(home / "shims" / "calfcord"), *argv],
+        env=env, capture_output=True, text=True, check=False,
+    )
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h", "help"])
+def test_shim_help_prints_usage_to_stdout(tmp_path: Path, flag: str) -> None:
+    """Explicit help goes to stdout, exits 0, and lists the friendly verbs."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    result = _run_shim_proc(home, [flag])
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
+    for verb in ("run", "doctor", "mcp", "auth"):
+        assert verb in result.stdout
+
+
+def test_shim_no_args_prints_usage_to_stderr_exit_2(tmp_path: Path) -> None:
+    """A bare invocation is an error: usage to stderr, exit 2 (unchanged from before)."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    result = _run_shim_proc(home, [])
+    assert result.returncode == 2
+    assert "usage" in result.stderr.lower()
+
+
+@pytest.mark.parametrize("argv", [["run"], ["run", "nope"], ["mcp"], ["mcp", "nope"]])
+def test_shim_unknown_subcommand_exits_2(tmp_path: Path, argv: list[str]) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_proc(home, argv).returncode == 2
+
+
+@pytest.mark.parametrize("argv", [["run", "--help"], ["run", "-h"], ["mcp", "--help"], ["mcp", "-h"]])
+def test_shim_subcommand_help_exits_0(tmp_path: Path, argv: list[str]) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    result = _run_shim_proc(home, argv)
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
 
 
 def test_shim_exports_calfcord_home(tmp_path: Path) -> None:

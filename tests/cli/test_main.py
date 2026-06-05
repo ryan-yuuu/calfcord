@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, init, router_setup
+from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, doctor, init, router_setup
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
 
@@ -264,6 +264,33 @@ def test_main_reraises_oserror_on_a_real_tty(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(OSError):
         main(["init"])
+
+
+# --- doctor: help + dispatch -----------------------------------------------
+
+
+def test_main_doctor_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["doctor", "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_doctor_dispatches_with_resolved_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The shim exports CALFCORD_HOME; doctor must run against the install's config/.env + agents/.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _run(*, env_path: Path, agents_dir: Path, offline: bool = False, client_factory: object = None) -> int:
+        captured.update(env_path=env_path, agents_dir=agents_dir, offline=offline)
+        return 0
+
+    monkeypatch.setattr(doctor, "run", _run)
+    assert main(["doctor", "--offline"]) == 0
+    assert captured["env_path"] == home / "config" / ".env"
+    assert captured["agents_dir"] == home / "agents"
+    assert captured["offline"] is True
 
 
 def test_main_agent_create_and_edit_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

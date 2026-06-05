@@ -268,22 +268,29 @@ if [ "${1:-}" = "self" ]; then
   exec "$H/shims/calfcord-self" "$@"
 fi
 
-if [ "$#" -eq 0 ]; then
-  cat >&2 <<'USAGE'
+usage() {
+  cat <<'USAGE'
 usage:
-  calfcord <command> [args...]   run a calfcord process in the pinned env, e.g.
-                                   calfcord calfkit-bridge
-                                   calfcord calfkit-agent
-                                   calfcord calfkit-router
-                                   calfcord calfkit-tools
   calfcord init                  guided first-run config (provider, Discord, broker)
-  calfcord router setup          optional: configure the ambient-message router
+  calfcord doctor                check config, broker, Discord token/app id, and agents
+  calfcord run <bridge|agent|router|tools|mcp>
+                                 run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
+  calfcord router setup          optional: configure the ambient-message router
+  calfcord mcp <add|codegen> [args]
+                                 add an MCP server / generate its tool schema
+  calfcord auth [args]           Codex (ChatGPT subscription) login
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
-  exit 2
-fi
+}
+
+# Explicit help -> stdout, exit 0; a bare invocation -> usage on stderr, exit 2.
+# (stdout-for-help diverges from calfcord-self, which writes help to stderr; intentional.)
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+esac
 
 UV="$H/bin/uv"
 if [ ! -x "$UV" ]; then
@@ -315,10 +322,27 @@ _default_env CALFKIT_AGENTS_DIR     "$H/agents"
 _default_env CALFKIT_STATE_DIR      "$H/state/agents"
 _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 
-# Management subcommands dispatch to the calfcord-cli argparse entry point,
-# exec'd through the SAME locked-venv `uv run` as the runners below.
+# Translate friendly verbs to the underlying console scripts. Management verbs go to the
+# calfcord-cli argparse entry point; raw `calfcord calfkit-*` runner names aren't matched
+# here and fall through to the `uv run` passthrough below, so they keep working unchanged.
 case "${1:-}" in
-  init|agent|router) set -- calfcord-cli "$@" ;;
+  init|agent|router|doctor) set -- calfcord-cli "$@" ;;
+  run)
+    shift
+    case "${1:-}" in
+      bridge|agent|router|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; exit 2 ;;
+    esac ;;
+  mcp)
+    shift
+    case "${1:-}" in
+      add)     set -- calfcord-mcp-add "${@:2}" ;;
+      codegen) set -- calfcord-mcp-codegen "${@:2}" ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; exit 2 ;;
+    esac ;;
+  auth) shift; set -- calfkit-auth "$@" ;;
 esac
 
 if [ -f "$ENVF" ]; then
@@ -525,7 +549,8 @@ main() {
   else
     log "  agents:   $AGENTS_DIR"
   fi
-  log "  deploy:   calfcord calfkit-bridge | calfkit-agent | calfkit-router | calfkit-tools"
+  log "  check:    calfcord doctor"
+  log "  deploy:   calfcord run bridge | run agent | run router | run tools"
 }
 
 # Run main only when executed (``bash install.sh``) or piped (``curl | bash``),
