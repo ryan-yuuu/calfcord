@@ -181,8 +181,14 @@ ensure_tansu() {
     warn "tansu tarball did not contain bin/tansu (release layout changed?); native broker unavailable"
     return 0
   fi
-  mv "$tmp/bin/tansu" "$BIN_DIR/tansu"
-  chmod +x "$BIN_DIR/tansu"
+  # Guard the placement like every other step in this function: a filesystem
+  # fault moving the OPTIONAL broker binary must not trip the ERR trap and abort
+  # the whole install (calfcord still runs against Docker / a remote broker).
+  if ! { mv "$tmp/bin/tansu" "$BIN_DIR/tansu" && chmod +x "$BIN_DIR/tansu"; }; then
+    rm -rf "$tmp"
+    warn "failed to install tansu into $BIN_DIR (filesystem/permissions?); native broker unavailable (use Docker or a remote broker)"
+    return 0
+  fi
   rm -rf "$tmp"
   # macOS quarantines downloaded binaries; clear it so first launch isn't blocked.
   if [ "$os" = "apple-darwin" ] && have xattr; then

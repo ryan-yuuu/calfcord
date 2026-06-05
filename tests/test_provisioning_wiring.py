@@ -9,6 +9,8 @@ exact extra-topic sets each runner must provision, plus the shared policy.
 
 from __future__ import annotations
 
+import pytest
+
 from calfcord._provisioning import (
     PROVISIONING,
     agent_infra_topics,
@@ -89,3 +91,38 @@ async def test_provision_extra_topics_dedups_and_forwards_to_provisioner(monkeyp
     assert captured["server_urls"] == "h:9092"
     assert captured["config"] is PROVISIONING
     assert captured["topics"] == ["a", "b"]  # de-duplicated, first-seen order
+
+
+def test_runner_reply_topics_are_pairwise_distinct() -> None:
+    """Each runner's reply dispatcher needs its OWN topic provisioned before its
+    broker.start() (router/tools/mcp pass these explicitly; the bridge reuses
+    discord.outbox, its outbox-consumer node topic). A collision would cross-wire
+    reply delivery between processes — pin distinctness so a copy-paste can't.
+    """
+    from calfcord.mcp.runner import _REPLY_TOPIC as MCP
+    from calfcord.router.runner import _REPLY_TOPIC as ROUTER
+    from calfcord.tools.runner import _REPLY_TOPIC as TOOLS
+
+    # bridge's _REPLY_TOPIC is "discord.outbox" (the outbox consumer's inbox).
+    assert len({ROUTER, TOOLS, MCP, "discord.outbox"}) == 4
+
+
+async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch) -> None:
+    """A provisioning failure must abort startup LOUDLY (calfcord's
+    infra-failure-raises rule), never be swallowed — a runner that cannot create
+    its reply/inbox topics must not come up and then silently stall on the wire
+    (the exact failure mode this migration prevents).
+    """
+    import calfcord._provisioning as mod
+
+    class FailingProvisioner:
+        @classmethod
+        def from_connection(cls, *, server_urls, config):
+            return cls()
+
+        async def provision(self, topics, *, framework_topics):
+            raise RuntimeError("broker unreachable")
+
+    monkeypatch.setattr(mod, "TopicProvisioner", FailingProvisioner)
+    with pytest.raises(RuntimeError, match="broker unreachable"):
+        await provision_extra_topics("h:9092", ["some.topic"])

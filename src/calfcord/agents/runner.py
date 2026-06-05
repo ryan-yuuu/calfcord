@@ -573,16 +573,27 @@ async def _amain(args: argparse.Namespace) -> None:
         worker = Worker(calfkit_client, nodes)
         worker.register_handlers()
 
-        # Provision the registered agents' topics (Worker.run()'s _on_startup
-        # hook is bypassed on this hand-rolled path), then the control-plane
-        # topics node-walking can't see: bridge.discovery + each
-        # agent.{id}.control.in (raw control-sink subscribers) and agent.state
-        # (announced at startup before the bridge may be up). All BEFORE
-        # broker.start(). No-op on an auto-creating broker; required on Tansu.
+        # Provision the registered agents' node topics (Worker.run()'s
+        # _on_startup hook is bypassed on this hand-rolled path), then the topics
+        # the broker.start() below subscribes that node-walking can't see — all
+        # BEFORE broker.start(), because a direct broker.start() blocks forever on
+        # a no-auto-create broker (Tansu) until every subscribed topic exists:
+        #   * the client's auto-generated reply topic — calfkit registers a reply
+        #     dispatcher on client.reply_topic at connect even though agents are
+        #     pure targets that never invoke (and so never receive replies); the
+        #     subscriber still activates on start and would otherwise spin on
+        #     "topic not found";
+        #   * bridge.discovery + each agent.{id}.control.in (raw control-sink
+        #     subscribers) and agent.state (announced at startup before the bridge
+        #     may be up).
+        # No-op on an auto-creating broker (Redpanda).
         await worker.provision_topics()
         await provision_extra_topics(
             server_urls,
-            agent_infra_topics(ref.current.agent_id for ref in definition_refs),
+            [
+                calfkit_client.reply_topic,
+                *agent_infra_topics(ref.current.agent_id for ref in definition_refs),
+            ],
         )
 
         # Start the broker BEFORE publishing initial state events.

@@ -45,7 +45,10 @@ from calfcord.cli.agent_create import create_agent
 # box. The native ``calfcord broker`` (a single Rust binary the installer
 # bootstraps — no Docker) is the default; a Docker option is kept for container users.
 TANSU_BROKER_CMD = "calfcord broker"
-TANSU_DOCKER_CMD = "docker compose up -d tansu"
+# TANSU_ADVERTISE=localhost so the Docker broker advertises an address the
+# host-native calfcord processes (CALF_HOST_URL=localhost:9092) can reach — the
+# compose default advertises the in-network name ``tansu``, unreachable from the host.
+TANSU_DOCKER_CMD = "TANSU_ADVERTISE=localhost docker compose up -d tansu"
 
 _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _BROKER_VAR = "CALF_HOST_URL"
