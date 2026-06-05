@@ -162,17 +162,21 @@ async def _amain() -> None:
     await _prewarm_codex_if_needed(definition)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
+        # Provision the topics the eager broker.start() below will touch BEFORE
+        # starting it. The reply dispatcher subscribes to _REPLY_TOPIC on start;
+        # on a no-auto-create broker (Tansu) a missing reply topic makes
+        # broker.start spin forever on "topic not found in cluster metadata".
+        # The ambient discard topic (the router's terminal-callback target) has
+        # no subscriber either, so node-walking can't see it. The worker's own
+        # node topics are still provisioned by Worker.run()'s startup hook below.
+        # All no-ops on an auto-creating broker (Redpanda).
+        await provision_extra_topics(server_urls, [_REPLY_TOPIC, *router_infra_topics()])
+
         # Eagerly start the broker so the reply dispatcher is live
         # before the worker's first inbound envelope. Mirrors the
         # bridge's eager start.
         if not client.broker.running:
             await client.broker.start()
-
-        # Worker.run() (below) provisions the router node's own topics in its
-        # _on_startup hook, but the ambient discard topic has no subscriber, so
-        # node-walking can't see it — create it explicitly. No-op on an
-        # auto-creating broker; required on Tansu.
-        await provision_extra_topics(server_urls, router_infra_topics())
 
         # The factory's persona_sender is unused on the router build
         # path; ``None`` is the explicit "I don't need Discord" call

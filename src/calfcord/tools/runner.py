@@ -39,7 +39,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING
+from calfcord._provisioning import PROVISIONING, provision_extra_topics
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.discord.persona import DiscordPersonaSender
@@ -169,6 +169,13 @@ async def _amain() -> None:
         DiscordPersonaSender(settings) as persona_sender,
         Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
     ):
+        # Provision the client's reply topic BEFORE the eager broker.start()
+        # below: that start subscribes the reply dispatcher to _REPLY_TOPIC,
+        # which on a no-auto-create broker (Tansu) must already exist or the
+        # subscriber spins on "topic not found". The worker's tool-node topics
+        # are still provisioned by Worker.run()'s startup hook. No-op on Redpanda.
+        await provision_extra_topics(server_urls, [_REPLY_TOPIC])
+
         # Eagerly start the broker so the reply dispatcher is live before
         # any tool tries to ``execute_node`` — mirrors the bridge's
         # boot-time eager start. ``broker.running`` is faststream's public
