@@ -44,6 +44,7 @@ import discord
 from calfkit.client import Client
 from calfkit.worker import Worker
 
+from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_extra_topics
 from calfcord.bridge.history import ChannelHistoryFetcher
 from calfcord.bridge.ingress import (
     AmbientRosterEmptyError,
@@ -682,7 +683,9 @@ def main() -> None:
         # rationale comment stays attached to it and the degrade/lifecycle reads
         # top-to-bottom; the noqa silences SIM117's "combine them" hint.
         async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
-            async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as calfkit_client:
+            async with Client.connect(
+                server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
+            ) as calfkit_client:
                 pending_wires = PendingWires()
                 ingress = BridgeIngress(
                     calfkit_client=calfkit_client,
@@ -798,6 +801,18 @@ def main() -> None:
                         on_first_seen=gateway._slash.schedule_resync,
                         on_departed=gateway._slash.schedule_resync,
                     )
+
+                    # Worker.run() would provision the registered nodes' topics in
+                    # its _on_startup hook, but the bridge hand-rolls
+                    # register_handlers + broker.start, so call it explicitly —
+                    # after every subscriber is registered and BEFORE broker.start
+                    # so the topics exist before consumption. Then create the
+                    # control-plane topics that node-walking can't see: agent.state
+                    # (a raw subscriber) and bridge.discovery (the discovery ping is
+                    # published at boot, before any agent may be up). No-ops on an
+                    # auto-creating broker; required on Tansu.
+                    await worker.provision_topics()
+                    await provision_extra_topics(server_urls, bridge_infra_topics())
 
                     # ``broker.running`` is the public-ish state flag faststream
                     # sets True at the end of start() and False in stop(). Guarding

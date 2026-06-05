@@ -70,6 +70,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._provisioning import PROVISIONING, agent_infra_topics, provision_extra_topics
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.loader import load_agent_targets, load_agents_dir
@@ -549,7 +550,10 @@ async def _amain(args: argparse.Namespace) -> None:
     settings = DiscordSettings()  # type: ignore[call-arg]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    async with DiscordPersonaSender(settings) as persona_sender, Client.connect(server_urls) as calfkit_client:
+    async with (
+        DiscordPersonaSender(settings) as persona_sender,
+        Client.connect(server_urls, provisioning=PROVISIONING) as calfkit_client,
+    ):
         factory = AgentFactory(persona_sender, calfkit_client)
         nodes = []
         definition_refs: list[AgentDefinitionRef] = []
@@ -568,6 +572,18 @@ async def _amain(args: argparse.Namespace) -> None:
 
         worker = Worker(calfkit_client, nodes)
         worker.register_handlers()
+
+        # Provision the registered agents' topics (Worker.run()'s _on_startup
+        # hook is bypassed on this hand-rolled path), then the control-plane
+        # topics node-walking can't see: bridge.discovery + each
+        # agent.{id}.control.in (raw control-sink subscribers) and agent.state
+        # (announced at startup before the bridge may be up). All BEFORE
+        # broker.start(). No-op on an auto-creating broker; required on Tansu.
+        await worker.provision_topics()
+        await provision_extra_topics(
+            server_urls,
+            agent_infra_topics(ref.current.agent_id for ref in definition_refs),
+        )
 
         # Start the broker BEFORE publishing initial state events.
         # ``Client.connect`` opens the underlying transport but does NOT

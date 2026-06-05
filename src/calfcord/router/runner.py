@@ -47,6 +47,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._provisioning import PROVISIONING, provision_extra_topics, router_infra_topics
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
@@ -160,12 +161,18 @@ async def _amain() -> None:
     definition = build_router_definition()
     await _prewarm_codex_if_needed(definition)
 
-    async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client:
+    async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
         # Eagerly start the broker so the reply dispatcher is live
         # before the worker's first inbound envelope. Mirrors the
         # bridge's eager start.
         if not client.broker.running:
             await client.broker.start()
+
+        # Worker.run() (below) provisions the router node's own topics in its
+        # _on_startup hook, but the ambient discard topic has no subscriber, so
+        # node-walking can't see it — create it explicitly. No-op on an
+        # auto-creating broker; required on Tansu.
+        await provision_extra_topics(server_urls, router_infra_topics())
 
         # The factory's persona_sender is unused on the router build
         # path; ``None`` is the explicit "I don't need Discord" call

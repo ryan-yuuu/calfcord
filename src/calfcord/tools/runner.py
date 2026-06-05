@@ -39,6 +39,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.discord.persona import DiscordPersonaSender
@@ -166,7 +167,7 @@ async def _amain() -> None:
     async with (
         DiscordSender(settings) as sender,
         DiscordPersonaSender(settings) as persona_sender,
-        Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client,
+        Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
     ):
         # Eagerly start the broker so the reply dispatcher is live before
         # any tool tries to ``execute_node`` — mirrors the bridge's

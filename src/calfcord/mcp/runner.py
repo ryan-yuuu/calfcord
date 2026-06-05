@@ -34,6 +34,7 @@ from calfkit.mcp.exceptions import McpConfigError
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.mcp.config import load_mcp_servers, resolve_config_path
 
@@ -98,7 +99,7 @@ async def _amain() -> None:
         ) from e
     mcp_nodes = _resolve_mcp_nodes(servers, config_path)
 
-    async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC) as client:
+    async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
         # Eagerly start the broker so the reply dispatcher is live before
         # any node tries to await a reply — mirrors the tools runner's and
         # bridge's boot-time eager start. ``broker.running`` is faststream's
