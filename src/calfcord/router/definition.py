@@ -27,6 +27,8 @@ agents and the router co-exist in a single roster.
 
 from __future__ import annotations
 
+import os
+
 from calfcord.agents.definition import AgentDefinition, Provider, ThinkingEffort
 from calfcord.router.prompt import load_router_md
 
@@ -49,6 +51,14 @@ fan-out consumer subscribes here. Hardcoded rather than env-driven
 because the project's topology contract is fixed; an operator changing
 this topic would also need to coordinate the fan-out consumer's
 subscription, which is also constant."""
+
+_PROVIDER_ENV = "CALFKIT_ROUTER_PROVIDER"
+_MODEL_ENV = "CALFKIT_ROUTER_MODEL"
+"""Operator overrides for the router's provider/model, read at definition-build
+time. They take precedence over the bundled ``router.md`` front matter so the
+``calfcord router setup`` wizard can persist a choice to ``.env`` without
+mounting a replacement ``router.md``. An unset/empty value is ignored (the
+``or`` chain falls through to front matter, then the in-code default)."""
 
 _DEFAULT_PROVIDER: Provider = "openai"
 _DEFAULT_MODEL = "gpt-5-nano"
@@ -84,6 +94,17 @@ def build_router_definition() -> AgentDefinition:
     prompt. Operators override the whole file (config + prompt) by pointing
     ``CALFKIT_ROUTER_PROMPT_PATH`` at a mounted file.
 
+    ``provider`` and ``model`` additionally honor two env-var overrides so an
+    operator can retarget the router without replacing ``router.md``:
+
+    * ``CALFKIT_ROUTER_PROVIDER`` overrides ``provider``.
+    * ``CALFKIT_ROUTER_MODEL`` overrides ``model``.
+
+    Their precedence is **env > router.md front matter > in-code default**; an
+    unset or empty env var is ignored. The resolved provider/model still flow
+    through :class:`AgentDefinition`'s validators, so an invalid override (e.g.
+    an unknown provider tag) fails loudly via pydantic rather than silently.
+
     The returned definition satisfies the router invariants enforced by
     :class:`AgentDefinition`'s validators: ``role="router"``, empty
     ``tools``, non-empty ``publish_topic``, and the strict
@@ -98,11 +119,13 @@ def build_router_definition() -> AgentDefinition:
     """
     config, system_prompt = load_router_md()
 
-    # We let pydantic raise on an invalid Provider / ThinkingEffort tag
-    # rather than second-guessing here — same surface area as user-
-    # defined ``.md`` parsing.
-    provider_raw = config.provider or _DEFAULT_PROVIDER
-    model = config.model or _DEFAULT_MODEL
+    # Resolve provider/model with precedence env > router.md front matter >
+    # in-code default. We let pydantic raise on an invalid Provider /
+    # ThinkingEffort tag rather than second-guessing here — same surface area as
+    # user-defined ``.md`` parsing, and the env override is validated the same
+    # way (an unknown ``CALFKIT_ROUTER_PROVIDER`` fails loudly).
+    provider_raw = os.getenv(_PROVIDER_ENV) or config.provider or _DEFAULT_PROVIDER
+    model = os.getenv(_MODEL_ENV) or config.model or _DEFAULT_MODEL
     thinking_effort_raw = config.thinking_effort or _DEFAULT_THINKING_EFFORT
     history_turns = (
         config.history_turns if config.history_turns is not None else _DEFAULT_HISTORY_TURNS

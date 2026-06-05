@@ -23,7 +23,9 @@ BASE="$(mktemp -d)"
 trap 'rm -rf "$BASE"' EXIT
 TD="$BASE/home"; mkdir -p "$TD"
 SB="$BASE/stubbin"; mkdir -p "$SB"
-LIB="$BASE/lib.sh"; sed '$d' "$ROOT/scripts/install.sh" > "$LIB"   # strip `main "$@"`
+# install.sh guards its main() behind a BASH_SOURCE check, so sourcing it just
+# defines the functions (main runs only on direct execution / `curl|bash`).
+LIB="$ROOT/scripts/install.sh"
 
 CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; write_shims" || fail "write_shims"
 C="$TD/shims/calfcord"

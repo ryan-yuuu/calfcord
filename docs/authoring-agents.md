@@ -15,6 +15,13 @@ is the system prompt fed verbatim to the LLM on every run. The format
 parallels Claude Code's `.claude/agents/*.md` convention so the same
 mental model carries over.
 
+Besides hand-writing the file, the `calfcord agent` command group manages an
+agent's whole lifecycle — `create`, `list`, `show`, `edit`, `set`, `rename`,
+`delete` — from the terminal. `calfcord init`'s first-run setup also creates an
+agent (the same guided flow as `calfcord agent create`) while it configures the
+install's `.env`. See §9 for the full CLI; the rest of this section is the
+frontmatter reference the CLI reads and writes.
+
 At boot, the bridge scans `agents/` via
 `calfcord.agents.loader.load_agents_dir` and parses each
 `<name>.md` into an `AgentDefinition` (see
@@ -156,6 +163,16 @@ Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
 entirely is the opposite** — it grants every registered builtin
 (including `shell` / `write_file` / `edit_file`), per the security note
 above.
+
+Besides hand-editing this array, you can edit a deployed agent's tool
+list interactively with `calfcord agent tools [<name>]` (an
+InquirerPy multi-select over the builtin + MCP tool universe; omit
+`<name>` to pick from a list). It writes an explicit `tools:` list back
+to the `.md`. The same checkbox is reachable as the *Tools* row of
+`calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
+sets the list non-interactively — see §9. Because the tool set is baked
+into the calfkit `Agent` at boot, the edit takes effect on the next
+`calfcord calfkit-agent` restart — there is no live reload.
 
 ### 3.4 Behavior (optional)
 
@@ -505,3 +522,64 @@ view is for humans observing the organization, not for state recovery.
 the target sees the prior turns as `message_history`. The id tag is
 internal and the calling agent should not echo it to the user; the
 `private_chat` docstring spells this out.
+
+## 9. Managing agents from the CLI
+
+Every field in §3 can be hand-edited in the `.md`, but the `calfcord
+agent` command group does the same work — create, inspect, edit, and
+remove agents — from the terminal, writing the same `agents/<name>.md`
+files (under `~/.calfcord/agents/` on a native install). Each command
+writes through the same validators the loader uses, so a value the CLI
+accepts is a value the agent will boot with.
+
+| Command | What it does |
+| ------- | ------------ |
+| `calfcord agent create [<name>]` | Guided wizard: name, description, provider + API key, a model **picked from a live list** fetched from the provider, a **tools checkbox** (all builtins pre-selected), and an optional "edit the system prompt now? (opens `$EDITOR`)" step. Writes `~/.calfcord/agents/<name>.md`. |
+| `calfcord agent list [--json]` | Table of every agent (name, provider·model, tool count, description), or a JSON array with `--json`. |
+| `calfcord agent show <name> [--json]` | One agent's full config plus a system-prompt preview; `--json` emits the complete config (full body included). |
+| `calfcord agent edit [<name>]` | Interactive field menu — pick a field, edit it with the right widget; each change is written immediately. Omit `<name>` to pick from a list. |
+| `calfcord agent set <name> --… …` | The non-interactive, scriptable equivalent of `edit` — one or more `--flag value` updates. |
+| `calfcord agent tools [<name>]` | The tool-list checkbox of §3.3 (also reachable as the *Tools* row of `edit`). |
+| `calfcord agent rename <old> <new>` | Renames the `.md`, the `name:`/`/<name>` slash command, **and** moves the agent's channel-subscription state (§5) so it isn't orphaned. |
+| `calfcord agent delete <name> [--yes] [--keep-state]` | Removes the `.md` (and the state file unless `--keep-state`); confirms first, skip with `--yes`. |
+
+`calfcord agent create` does not prune the seeded starter — adding an
+agent never deletes another. (`calfcord init`'s first-run setup runs the
+same create flow and *does* replace a pristine seed; that prune is
+init's alone.)
+
+### 9.1 Interactive `edit` vs. scriptable `set`
+
+`edit` and `set` write the *same* set of editable fields through the
+*same* validators — `edit` prompts for each with the field's natural
+widget, `set` takes them as flags for scripting and CI. The fields:
+
+| Field | `edit` widget | `set` flag |
+| ----- | ------------- | ---------- |
+| Description | text | `--description` |
+| Display name | text | `--display-name` |
+| Provider / model | live provider + model picker | `--provider`, `--model` |
+| Tools | checkbox (§3.3) | `--tools "a,b,c"` |
+| System prompt | opens `$EDITOR` | `--system-prompt "…"` (or `--system-prompt @file` to read a file) |
+| Thinking effort | select (§6) | `--thinking-effort` |
+| History turns | number (0-100) | `--history-turns` |
+| Memory | toggle | `--memory` (`on`/`off`, `true`/`false`, `yes`/`no`) |
+| Avatar URL | text | `--avatar-url` |
+
+`--model` can be set without restating `--provider`. Validation is
+identical on both surfaces: a rejected value (an out-of-range
+`history-turns`, an unknown tool, a `display_name` of `"Clyde"`) leaves
+the file untouched — `set` exits non-zero, `edit` prints one `error:`
+line and keeps the menu open. Renaming and deleting are *not* in the
+`edit` menu — they change the agent's identity or existence, so they are
+their own commands.
+
+### 9.2 Restart to apply
+
+These commands edit the `.md` on disk; the running agent bakes its
+config at boot (the same one-shot constraint behind every "restart
+required" note in §3.3, §5.2, and §6.1). So **restart `calfcord
+calfkit-agent`** after any edit to apply it — and **also `calfcord
+calfkit-bridge`** for a newly created or renamed agent, since the bridge
+owns the `/<name>` slash command. Each command prints the matching
+restart hint on success.

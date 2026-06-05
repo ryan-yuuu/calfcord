@@ -28,19 +28,34 @@ import pytest
 
 from calfcord.agents.definition import AgentDefinition
 from calfcord.router import prompt
-from calfcord.router.definition import ROUTER_AGENT_ID, build_router_definition
+from calfcord.router.definition import (
+    _MODEL_ENV,
+    _PROVIDER_ENV,
+    ROUTER_AGENT_ID,
+    build_router_definition,
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_router_loader(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear the loader cache + override env var around every test.
+    """Clear the loader cache + the router env vars around every test.
 
     :func:`load_router_md` caches the parsed ``(config, prompt)`` on a module
     global and is eagerly populated at import. Resetting before each test makes
     the bundled-file read deterministic; resetting on teardown prevents a test
     that planted an override from leaking its cache into later tests/files.
+
+    The provider/model override env vars are unset too. They are normally absent
+    from the process environment, but an operator's project ``.env`` can carry
+    them, and litellm's import-time ``load_dotenv()`` (pulled in transitively by
+    some integration tests) injects that ``.env`` into ``os.environ`` mid-run.
+    Clearing them here keeps the front-matter/default resolution tests below
+    deterministic regardless of the host ``.env``; the ``TestEnvOverrides`` tests
+    re-set them explicitly via ``monkeypatch.setenv``.
     """
     monkeypatch.delenv(prompt._PROMPT_PATH_ENV, raising=False)
+    monkeypatch.delenv(_PROVIDER_ENV, raising=False)
+    monkeypatch.delenv(_MODEL_ENV, raising=False)
     prompt._reset_cache_for_tests()
     yield
     prompt._reset_cache_for_tests()
@@ -192,3 +207,49 @@ class TestConfigResolution:
         _use_override(monkeypatch, path)
         with pytest.raises(ValueError, match="no YAML front matter"):
             build_router_definition()
+
+
+class TestEnvOverrides:
+    """``CALFKIT_ROUTER_PROVIDER`` / ``CALFKIT_ROUTER_MODEL`` let an operator
+    retarget the router without replacing ``router.md``, with precedence
+    env > front matter > in-code default. ``monkeypatch.setenv`` auto-undoes,
+    so none of these leak across tests."""
+
+    def test_provider_env_overrides_bundled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The env value wins over the bundled ``openai-codex`` front matter."""
+        monkeypatch.setenv(_PROVIDER_ENV, "anthropic")
+        assert build_router_definition().provider == "anthropic"
+
+    def test_model_env_overrides_bundled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_MODEL_ENV, "claude-haiku-4-5")
+        assert build_router_definition().model == "claude-haiku-4-5"
+
+    def test_unset_env_falls_back_to_bundled(self) -> None:
+        """Regression guard: with neither override set, the bundled ``router.md``
+        values apply unchanged — env overrides are purely additive."""
+        d = build_router_definition()
+        assert d.provider == "openai-codex"
+        assert d.model == "gpt-5.4-mini"
+
+    def test_invalid_provider_env_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An invalid override is still validated by pydantic — the env value
+        flows into :class:`AgentDefinition` rather than bypassing validation."""
+        monkeypatch.setenv(_PROVIDER_ENV, "nonsense")
+        with pytest.raises(ValueError):
+            build_router_definition()
+
+    def test_model_env_alone_resolves_independently_of_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ONLY the model env var must not drag the provider with it.
+
+        Provider and model resolve as two independent ``env > front matter >
+        default`` chains, not a coupled pair: with only ``CALFKIT_ROUTER_MODEL``
+        set, the model comes from the env while the provider still comes from the
+        bundled ``router.md`` front matter (``openai-codex``). A coupled-pair bug
+        would either ignore the lone model override or reset the provider.
+        """
+        monkeypatch.setenv(_MODEL_ENV, "claude-haiku-4-5")
+        d = build_router_definition()
+        assert d.model == "claude-haiku-4-5"  # from the env override
+        assert d.provider == "openai-codex"  # untouched: still the bundled front matter

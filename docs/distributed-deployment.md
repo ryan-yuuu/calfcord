@@ -258,10 +258,17 @@ for the canonical setup. Two calfcord-specific notes:
 - **The Kafka client is `aiokafka`** (via calfkit). The standard env
   vars (`KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`,
   `KAFKA_SASL_PASSWORD`, plus TLS cert paths) are the upstream contract.
-  calfcord's `runner.py` currently only forwards `CALF_HOST_URL`; if
-  your deployment needs SASL, the auth env vars need to be plumbed
-  through at the calfkit level. File a calfkit issue describing what
-  you need — this is a follow-up, not a blocker.
+
+  > **Planned enhancement — not yet wired.** Broker authentication
+  > (SASL/SCRAM + TLS) is **not plumbed through calfcord today**.
+  > `Client.connect` already accepts a `security=` kwarg, but the
+  > calfcord runners only forward `CALF_HOST_URL` and never pass
+  > credentials. So at present every cross-host / cross-env split
+  > requires a broker URL reachable **without auth** — keep it on a
+  > private network or VPC (the trusted-overlay path above), never the
+  > raw public internet. Threading SASL/TLS credentials through the
+  > runners is tracked as a fast-follow; file a calfkit issue describing
+  > what you need.
 - **Broker auth IS the perimeter.** Anyone who can publish to
   `tool.<name>.input` can invoke that tool with arbitrary arguments.
   Rotate broker credentials like you rotate the Discord bot token.

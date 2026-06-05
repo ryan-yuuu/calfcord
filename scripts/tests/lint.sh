@@ -10,9 +10,9 @@ B="${BASH:-bash}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-lib="$tmp/lib.sh"
-sed '$d' "$ROOT/scripts/install.sh" > "$lib"   # strip `main "$@"`
-CALFCORD_HOME="$tmp" "$B" -c "source '$lib'; write_shims"
+# install.sh guards main() behind a BASH_SOURCE check, so sourcing it just
+# defines the functions; write_shims then materializes the two shims to lint.
+CALFCORD_HOME="$tmp" "$B" -c "source '$ROOT/scripts/install.sh'; write_shims"
 
 # Gate at warning+ so the result is stable across shellcheck versions: info /
 # style checks differ between releases (and CI's apt build lags the latest).

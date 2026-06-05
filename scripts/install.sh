@@ -34,6 +34,8 @@ SHIM_DIR="$CALFCORD_HOME/shims"       # calfcord + calfcord-self (placed on PATH
 VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
+AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
+STATE_DIR="$CALFCORD_HOME/state/agents"       # per-agent runtime state; matches the shim's CALFKIT_STATE_DIR
 CURRENT_LINK="$CALFCORD_HOME/current"
 VERSION_FILE="$CALFCORD_HOME/version"
 
@@ -43,6 +45,7 @@ DL_BASE="https://github.com/$REPO"
 UV=""            # resolved by ensure_uv
 INSTALLED_DEST=""   # set by install_version
 PREVIOUS_SHA=""     # set by activate_version (for GC)
+SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -167,13 +170,58 @@ seed_config() {
   log "seeded config at $CONFIG_ENV (fill in DISCORD_*, CALF_HOST_URL, API keys)"
 }
 
+# Give the native install a stable home for agent definitions and per-agent
+# state, and drop in the bundled starter agent on first install. ``calfkit-agent``
+# resolves these dirs from CALFKIT_AGENTS_DIR / CALFKIT_STATE_DIR — the shim points
+# them at $AGENTS_DIR ($CALFCORD_HOME/agents) and $STATE_DIR ($CALFCORD_HOME/state/agents)
+# respectively, so this pre-creates exactly the two dirs the runtime uses. They
+# live outside the GC'd ``versions/<sha>`` tree to survive ``calfcord self update``.
+# Seeding only happens when the agents dir is empty, so an operator who removed
+# the starter (or added their own agents) is never clobbered on re-install.
+seed_agents() {
+  local dest="$1"
+  mkdir -p "$AGENTS_DIR" "$STATE_DIR"
+  if [ -n "$(ls -A "$AGENTS_DIR" 2>/dev/null)" ]; then
+    log "keeping existing agents in $AGENTS_DIR"
+    return 0
+  fi
+  if [ -f "$dest/agents/assistant.md" ]; then
+    cp "$dest/agents/assistant.md" "$AGENTS_DIR/assistant.md"
+    SEEDED_STARTER=1
+    log "seeded starter agent at $AGENTS_DIR/assistant.md"
+  else
+    warn "no starter agent in source; create one with: calfcord init"
+  fi
+}
+
+# Read one field from the existing version marker by PARSING, never sourcing
+# (a repo/ref value could contain shell metacharacters) — mirrors the shim's meta().
+_version_field() {
+  local key="$1" line
+  [ -f "$VERSION_FILE" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in "$key="*) printf '%s' "${line#*=}"; return 0 ;; esac
+  done < "$VERSION_FILE"
+  return 0
+}
+
 # Flip the current symlink atomically and record the version marker.
 activate_version() {
-  local dest="$1" sha now
+  local dest="$1" sha now old_sha
   sha="$(basename "$dest")"
-  PREVIOUS_SHA=""
+  old_sha=""
   if [ -L "$CURRENT_LINK" ]; then
-    PREVIOUS_SHA="$(basename "$(readlink "$CURRENT_LINK")")"
+    old_sha="$(basename "$(readlink "$CURRENT_LINK")")"
+  fi
+  # Re-activating the SAME sha — a no-op re-install, or `self update` when already
+  # current (it has no up-to-date short-circuit) — must NOT make the version its
+  # own predecessor: that records prev == current and then `gc_versions` deletes
+  # the genuine rollback target. Keep the existing previous in that case; otherwise
+  # the outgoing sha becomes the new previous.
+  if [ "$old_sha" = "$sha" ]; then
+    PREVIOUS_SHA="$(_version_field CALFCORD_PREVIOUS_COMMIT)"
+  else
+    PREVIOUS_SHA="$old_sha"
   fi
   ln -sfn "$dest" "$CURRENT_LINK"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -213,6 +261,7 @@ set -euo pipefail
 trap 'rc=$?; printf "calfcord: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
+export CALFCORD_HOME="$H"  # so calfcord-cli can locate config/.env and the agents dir
 
 if [ "${1:-}" = "self" ]; then
   shift
@@ -227,6 +276,10 @@ usage:
                                    calfcord calfkit-agent
                                    calfcord calfkit-router
                                    calfcord calfkit-tools
+  calfcord init                  guided first-run config (provider, Discord, broker)
+  calfcord router setup          optional: configure the ambient-message router
+  calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
+                                 manage agents (create/inspect/edit/rename/delete)
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
   exit 2
@@ -240,6 +293,34 @@ fi
 [ -e "$H/current" ] || { echo "calfcord: no active install at $H/current; re-run the installer" >&2; exit 1; }
 
 ENVF="$H/config/.env"
+
+# Default calfcord's runtime dirs into the install layout unless the operator
+# already chose them (shell env OR config .env wins — checked here so we don't
+# depend on `uv run --env-file` precedence). Agents and per-agent state live
+# under the install home so they survive `self update` and are found from any
+# directory; the tools workspace defaults to the *launch* directory so agents
+# act where you ran the command (like Claude Code). Override any of these in
+# config/.env.
+#
+# The `^$1=.` grep requires at least one char after the `=`: a bare `KEY=`
+# (which `.env.example` ships for CALFCORD_WORKSPACE_DIR) counts as UNSET, so
+# the workspace still defaults to $PWD. An operator must give a real value to
+# override the default.
+_default_env() {  # name default
+  [ -n "${!1:-}" ] && return 0
+  [ -f "$ENVF" ] && grep -q "^$1=." "$ENVF" && return 0
+  export "$1=$2"
+}
+_default_env CALFKIT_AGENTS_DIR     "$H/agents"
+_default_env CALFKIT_STATE_DIR      "$H/state/agents"
+_default_env CALFCORD_WORKSPACE_DIR "$PWD"
+
+# Management subcommands dispatch to the calfcord-cli argparse entry point,
+# exec'd through the SAME locked-venv `uv run` as the runners below.
+case "${1:-}" in
+  init|agent|router) set -- calfcord-cli "$@" ;;
+esac
+
 if [ -f "$ENVF" ]; then
   exec "$UV" run --frozen --no-sync --project "$H/current" --env-file "$ENVF" -- "$@"
 else
@@ -368,7 +449,7 @@ EOF
     if [ "$rc" -gt 1 ]; then
       echo "calfcord self: failed to read $CONFIG_ENV (grep exit $rc)" >&2; rm -f "$tmp"; exit 1
     fi
-    echo "CALF_HOST_URL=$val" >> "$tmp"
+    echo "CALF_HOST_URL=$val" >> "$tmp" || { echo "calfcord self: failed to write $CONFIG_ENV" >&2; rm -f "$tmp"; exit 1; }
     mv "$tmp" "$CONFIG_ENV"
     chmod 600 "$CONFIG_ENV"
     echo "set CALF_HOST_URL=$val in $CONFIG_ENV"
@@ -406,7 +487,7 @@ ensure_path() {
   local line='export PATH="'"$SHIM_DIR"':$PATH"'
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     [ -e "$rc" ] || continue
-    if ! grep -qs "$SHIM_DIR" "$rc"; then
+    if ! grep -qsF "$SHIM_DIR" "$rc"; then
       printf '\n# calfcord\n%s\n' "$line" >> "$rc"
       log "added $SHIM_DIR to PATH in $rc"
       added=1
@@ -431,6 +512,7 @@ main() {
   log "resolved $REF -> ${sha:0:12}"
   install_version "$sha"
   seed_config "$INSTALLED_DEST"
+  seed_agents "$INSTALLED_DEST"
   activate_version "$INSTALLED_DEST"
   gc_versions "$sha" "$PREVIOUS_SHA"
   write_shims
@@ -438,7 +520,19 @@ main() {
   log "done."
   log "  version:  calfcord self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: calfcord self set-broker <url>)"
+  if [ "$SEEDED_STARTER" -eq 1 ]; then
+    log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
+  else
+    log "  agents:   $AGENTS_DIR"
+  fi
   log "  deploy:   calfcord calfkit-bridge | calfkit-agent | calfkit-router | calfkit-tools"
 }
 
-main "$@"
+# Run main only when executed (``bash install.sh``) or piped (``curl | bash``),
+# never when sourced — so tests can source this file to exercise individual
+# functions. Piped execution leaves ``BASH_SOURCE[0]`` empty; a file execution
+# makes it equal to ``$0``; sourcing makes it a non-empty path that differs from
+# ``$0``. The ``:-`` guards keep this safe under ``set -u``.
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+  main "$@"
+fi
