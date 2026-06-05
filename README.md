@@ -69,14 +69,17 @@ docker run -d --name calfcord-redpanda -p 19092:19092 \
 Already have a broker? Pick "I have a broker URL" in `calfcord init`, or run
 `calfcord self set-broker <host:port>`.
 
-**5. Run the four processes** (each in its own terminal, or under a supervisor):
+**5. Check your setup, then run the four processes** (each in its own terminal, or under a supervisor):
 
 ```bash
-calfcord calfkit-bridge     # the Discord gateway
-calfcord calfkit-agent      # runs your agents
-calfcord calfkit-router     # routes un-mentioned messages
-calfcord calfkit-tools      # tools + the agent-to-agent channel
+calfcord doctor             # verify config, broker, Discord token, and agents
+calfcord run bridge         # the Discord gateway
+calfcord run agent          # runs your agents
+calfcord run router         # routes un-mentioned messages
+calfcord run tools          # tools + the agent-to-agent channel
 ```
+
+(`calfcord run <svc>` is the friendly form; the underlying `calfcord calfkit-<svc>` names still work.)
 
 **6. Say hello.** In any channel the bot can see:
 
@@ -88,11 +91,11 @@ A reply appears from your starter agent. You're live. 🎉
 
 > **Next steps**
 > - **Customize your agent / add tools** → `calfcord agent tools`, then restart
->   `calfcord calfkit-agent`. Field reference:
+>   `calfcord run agent`. Field reference:
 >   [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 > - **Enable ambient routing (optional)** → `@mentions` work without it;
 >   un-mentioned messages just go unanswered. To have an agent answer those too,
->   run `calfcord router setup` and start `calfcord calfkit-router`. Details:
+>   run `calfcord router setup` and start `calfcord run router`. Details:
 >   [`docs/ambient-routing.md`](./docs/ambient-routing.md).
 > - **Run agents across machines** → install calfcord on each host and point
 >   them all at one shared broker URL —

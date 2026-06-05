@@ -115,14 +115,26 @@ sensitive files: [`security.md`](security.md#33-tools-native-broker--others-in-d
 
 ## 3. Run
 
-Start any calfcord process with `calfcord <name>`:
+First, sanity-check the install — `calfcord doctor` verifies the config file, broker
+reachability, the Discord bot token, and that your agents parse (exit code is non-zero if
+anything's wrong, so it works in scripts too):
 
 ```bash
-calfcord calfkit-bridge     # the Discord gateway
-calfcord calfkit-agent      # runs your agents
-calfcord calfkit-router     # routes un-mentioned messages
-calfcord calfkit-tools      # tools + the agent-to-agent channel
+calfcord doctor             # add --offline to skip the live Discord token check
 ```
+
+Then start each process with `calfcord run <svc>`:
+
+```bash
+calfcord run bridge         # the Discord gateway
+calfcord run agent          # runs your agents
+calfcord run router         # routes un-mentioned messages
+calfcord run tools          # tools + the agent-to-agent channel
+```
+
+(`calfcord run <svc>` is the friendly form; the raw `calfcord calfkit-<svc>` names still work.
+`calfcord mcp <add|codegen>` and `calfcord auth` are likewise available; run `calfcord --help`
+for the full list.)
 
 On one machine you'll usually run all four. To spread them across machines,
 install calfcord on each, point them all at the **same** broker (step 2), and

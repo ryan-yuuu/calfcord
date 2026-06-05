@@ -21,6 +21,7 @@ from calfcord.cli import (
     agent_inspect,
     agent_lifecycle,
     agent_tools,
+    doctor,
     init,
     router_setup,
 )
@@ -35,6 +36,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Guided first-run configuration of the install's .env.")
+
+    doctor_p = sub.add_parser(
+        "doctor",
+        help="Preflight an install: config, broker, Discord token, and agents.",
+    )
+    doctor_p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip the live Discord token check (no network).",
+    )
 
     # ``agent`` is a verb group, not a leaf: ``required=True`` on its
     # sub-parsers makes a bare ``calfcord agent`` print help + exit non-zero
@@ -186,6 +197,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "init":
         env_path, agents_dir = init.resolve_paths(_resolve_home())
         return init.run(make_prompter(), env_path=env_path, agents_dir=agents_dir)
+
+    if args.command == "doctor":
+        # Preflight the same config/.env + agents/ the runners load.
+        env_path, agents_dir = init.resolve_paths(_resolve_home())
+        return doctor.run(env_path=env_path, agents_dir=agents_dir, offline=args.offline)
 
     if args.command == "agent":
         return _run_agent(args)
