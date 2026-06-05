@@ -31,7 +31,7 @@ import pytest
 from calfkit import Client, ProvisioningConfig, Worker
 from calfkit.nodes import consumer
 
-from calfcord._provisioning import provision_extra_topics
+from calfcord._provisioning import provision_and_start_broker
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("CALF_TEST_KAFKA"),
@@ -43,16 +43,10 @@ _START_OK_TIMEOUT = 15.0  # a healthy start returns in well under a second
 _HANG_PROBE_TIMEOUT = 6.0  # long enough to distinguish a hang from a clean start
 
 
-async def _build_hand_rolled(*, provision_reply: bool) -> Any:
-    """Replicate a runner's hand-rolled lifecycle up to (not including) start.
-
-    Connect with an auto-generated reply topic (as the agents runner does),
-    register a node, provision node topics, and — only when ``provision_reply``
-    — provision the client reply topic. Returns the connected client; the caller
-    owns the direct ``broker.start()`` and cleanup.
-    """
+def _build_worker(client: Any) -> Any:
+    """Register a consumer node on ``client`` — a runner's pre-start state (the
+    agents runner connects with an auto-generated reply topic, as here)."""
     inbox = f"itest.in-{uuid.uuid4().hex[:8]}"
-    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
 
     @consumer(subscribe_topics=inbox)
     def sink(_result: Any) -> None:  # NodeResult
@@ -60,30 +54,35 @@ async def _build_hand_rolled(*, provision_reply: bool) -> Any:
 
     worker = Worker(client, [sink])
     worker.register_handlers()
-    await worker.provision_topics()
-    await provision_extra_topics(BOOTSTRAP, [client.reply_topic] if provision_reply else [])
-    return client
+    return worker
 
 
-async def test_hand_rolled_start_succeeds_when_reply_topic_provisioned() -> None:
-    """The fix: with the client reply topic provisioned, a direct broker.start()
-    returns cleanly on a no-auto-create broker."""
-    client = await _build_hand_rolled(provision_reply=True)
+async def test_provision_and_start_broker_starts_cleanly_on_no_autocreate_broker() -> None:
+    """The fix: provision_and_start_broker provisions the client reply topic +
+    the worker's node topics, so a hand-rolled direct broker.start() returns
+    cleanly on a broker that does not auto-create topics."""
+    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
+    worker = _build_worker(client)
     try:
-        await asyncio.wait_for(client.broker.start(), timeout=_START_OK_TIMEOUT)
+        await asyncio.wait_for(
+            provision_and_start_broker(client, worker=worker),
+            timeout=_START_OK_TIMEOUT,
+        )
         assert client.broker.running
     finally:
         with contextlib.suppress(Exception):
             await client.close()
 
 
-async def test_hand_rolled_start_hangs_without_reply_topic_provisioning() -> None:
-    """The bug this fix guards against: without provisioning the reply topic, the
-    direct broker.start() blocks on the missing topic. Asserting the hang both
-    documents the failure mode and acts as a canary — if calfkit ever starts
-    provisioning reply topics eagerly, this stops timing out and the per-runner
-    workaround can be removed."""
-    client = await _build_hand_rolled(provision_reply=False)
+async def test_direct_start_hangs_without_reply_topic_provisioning() -> None:
+    """The bug this fix guards against: provisioning only the node topics (NOT
+    the client reply topic) and then a direct broker.start() blocks on the
+    missing reply topic. Asserting the hang documents the failure mode and acts
+    as a canary — if calfkit ever provisions reply topics eagerly, this stops
+    timing out and provision_and_start_broker's reply-topic step can be dropped."""
+    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
+    worker = _build_worker(client)
+    await worker.provision_topics()  # node topics only — reply topic left missing
     try:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(client.broker.start(), timeout=_HANG_PROBE_TIMEOUT)

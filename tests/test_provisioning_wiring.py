@@ -9,6 +9,8 @@ exact extra-topic sets each runner must provision, plus the shared policy.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from calfcord._provisioning import (
@@ -56,6 +58,14 @@ def test_router_infra_topics_is_the_no_subscriber_discard_topic() -> None:
     assert router_infra_topics() == [AMBIENT_REPLY_DISCARD_TOPIC]
 
 
+def _fake_client(*, server_urls: str = "h:9092", security_kwargs: dict | None = None) -> MagicMock:
+    """A stand-in calfkit Client exposing only what the provisioning helpers read."""
+    client = MagicMock()
+    client.server_urls = server_urls
+    client.security_kwargs = security_kwargs if security_kwargs is not None else {}
+    return client
+
+
 async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypatch) -> None:
     import calfcord._provisioning as mod
 
@@ -63,10 +73,10 @@ async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypa
         raise AssertionError("must not construct a provisioner for an empty topic set")
 
     monkeypatch.setattr(mod.TopicProvisioner, "from_connection", classmethod(lambda cls, **k: boom()))
-    await provision_extra_topics("localhost:9092", [])
+    await provision_extra_topics(_fake_client(), [])
 
 
-async def test_provision_extra_topics_dedups_and_forwards_to_provisioner(monkeypatch) -> None:
+async def test_provision_extra_topics_dedups_and_forwards_client_creds(monkeypatch) -> None:
     from calfkit.provisioning import ProvisionReport
 
     import calfcord._provisioning as mod
@@ -75,9 +85,10 @@ async def test_provision_extra_topics_dedups_and_forwards_to_provisioner(monkeyp
 
     class FakeProvisioner:
         @classmethod
-        def from_connection(cls, *, server_urls, config):
+        def from_connection(cls, *, server_urls, config, security_kwargs):
             captured["server_urls"] = server_urls
             captured["config"] = config
+            captured["security_kwargs"] = security_kwargs
             return cls()
 
         async def provision(self, topics, *, framework_topics):
@@ -86,10 +97,14 @@ async def test_provision_extra_topics_dedups_and_forwards_to_provisioner(monkeyp
             return ProvisionReport()
 
     monkeypatch.setattr(mod, "TopicProvisioner", FakeProvisioner)
-    await provision_extra_topics("h:9092", ["a", "b", "a"])
+    # Bootstrap + security kwargs are sourced from the connected client, so the
+    # extras hit the same broker with the same credentials as the Worker's pass.
+    client = _fake_client(server_urls="h:9092", security_kwargs={"security_protocol": "SASL_SSL"})
+    await provision_extra_topics(client, ["a", "b", "a"])
 
     assert captured["server_urls"] == "h:9092"
     assert captured["config"] is PROVISIONING
+    assert captured["security_kwargs"] == {"security_protocol": "SASL_SSL"}
     assert captured["topics"] == ["a", "b"]  # de-duplicated, first-seen order
 
 
@@ -117,7 +132,7 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
 
     class FailingProvisioner:
         @classmethod
-        def from_connection(cls, *, server_urls, config):
+        def from_connection(cls, *, server_urls, config, security_kwargs):
             return cls()
 
         async def provision(self, topics, *, framework_topics):
@@ -125,4 +140,69 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
 
     monkeypatch.setattr(mod, "TopicProvisioner", FailingProvisioner)
     with pytest.raises(RuntimeError, match="broker unreachable"):
-        await provision_extra_topics("h:9092", ["some.topic"])
+        await provision_extra_topics(_fake_client(), ["some.topic"])
+
+
+# --- provision_and_start_broker: the provision-BEFORE-broker.start() invariant ---
+# This is the regression fence for the bug that hung router/tools/mcp/agents on a
+# no-auto-create broker. Centralizing the contract in one helper makes the
+# ordering unit-testable without a real Kafka broker (the gated integration test
+# in tests/integration/ proves the same end-to-end against live Tansu).
+
+
+def _client_with_recording_broker(order: list[str], *, running: bool = False) -> MagicMock:
+    client = _fake_client()
+    client.reply_topic = "calf.reply"
+    client.broker.running = running
+
+    async def _start() -> None:
+        order.append("start")
+
+    client.broker.start = _start
+    return client
+
+
+async def test_provision_and_start_broker_orders_reply_extras_then_start(monkeypatch) -> None:
+    import calfcord._provisioning as mod
+
+    order: list[str] = []
+
+    async def _record_provision(client, topics) -> None:
+        order.append(f"provision:{list(topics)}")
+
+    monkeypatch.setattr(mod, "provision_extra_topics", _record_provision)
+    client = _client_with_recording_broker(order)
+
+    await mod.provision_and_start_broker(client, extra_topics=["x.topic"])
+
+    # reply topic + extras provisioned first, THEN broker.start().
+    assert order == ["provision:['calf.reply', 'x.topic']", "start"]
+
+
+async def test_provision_and_start_broker_provisions_worker_node_topics_first(monkeypatch) -> None:
+    import calfcord._provisioning as mod
+
+    order: list[str] = []
+    monkeypatch.setattr(mod, "provision_extra_topics", AsyncMock(side_effect=lambda *a, **k: order.append("extras")))
+    worker = MagicMock()
+    worker.provision_topics = AsyncMock(side_effect=lambda: order.append("worker"))
+    client = _client_with_recording_broker(order)
+
+    await mod.provision_and_start_broker(client, worker=worker)
+
+    # hand-rolled path: worker node topics, then extras (reply), then start.
+    assert order == ["worker", "extras", "start"]
+
+
+async def test_provision_and_start_broker_skips_start_when_already_running(monkeypatch) -> None:
+    import calfcord._provisioning as mod
+
+    monkeypatch.setattr(mod, "provision_extra_topics", AsyncMock())
+    client = _fake_client()
+    client.reply_topic = "calf.reply"
+    client.broker.running = True
+    client.broker.start = AsyncMock()
+
+    await mod.provision_and_start_broker(client)
+
+    client.broker.start.assert_not_awaited()

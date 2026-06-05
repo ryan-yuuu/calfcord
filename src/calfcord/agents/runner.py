@@ -70,7 +70,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, agent_infra_topics, provision_extra_topics
+from calfcord._provisioning import PROVISIONING, agent_infra_topics, provision_and_start_broker
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.loader import load_agent_targets, load_agents_dir
@@ -573,45 +573,21 @@ async def _amain(args: argparse.Namespace) -> None:
         worker = Worker(calfkit_client, nodes)
         worker.register_handlers()
 
-        # Provision the registered agents' node topics (Worker.run()'s
-        # _on_startup hook is bypassed on this hand-rolled path), then the topics
-        # the broker.start() below subscribes that node-walking can't see — all
-        # BEFORE broker.start(), because a direct broker.start() blocks forever on
-        # a no-auto-create broker (Tansu) until every subscribed topic exists:
-        #   * the client's auto-generated reply topic — calfkit registers a reply
-        #     dispatcher on client.reply_topic at connect even though agents are
-        #     pure targets that never invoke (and so never receive replies); the
-        #     subscriber still activates on start and would otherwise spin on
-        #     "topic not found";
-        #   * bridge.discovery + each agent.{id}.control.in (raw control-sink
-        #     subscribers) and agent.state (announced at startup before the bridge
-        #     may be up).
-        # No-op on an auto-creating broker (Redpanda).
-        await worker.provision_topics()
-        await provision_extra_topics(
-            server_urls,
-            [
-                calfkit_client.reply_topic,
-                *agent_infra_topics(ref.current.agent_id for ref in definition_refs),
-            ],
+        # Provision the agents' node topics (Worker.run()'s _on_startup hook is
+        # bypassed on this hand-rolled path), the client reply topic, and the
+        # control-plane infra topics, then start the broker — all BEFORE
+        # publish_state_event below, which raises ``IncorrectState`` unless the
+        # producer is connected, and before the broker subscribes the reply
+        # dispatcher / control sinks (which on a no-auto-create broker must
+        # already exist). See provision_and_start_broker. Decomposing Worker.run
+        # this way (rather than calling worker.run() from _run_worker) also
+        # avoids a second FastStream signal-handler set overlapping the one
+        # _run_worker installs.
+        await provision_and_start_broker(
+            calfkit_client,
+            extra_topics=agent_infra_topics(ref.current.agent_id for ref in definition_refs),
+            worker=worker,
         )
-
-        # Start the broker BEFORE publishing initial state events.
-        # ``Client.connect`` opens the underlying transport but does NOT
-        # initialize FastStream's producer — only ``broker.start()`` does.
-        # Without this call, ``publish_state_event`` below raises
-        # ``IncorrectState: You can't use producer here, please connect
-        # broker first.`` on every agent boot. The guard mirrors
-        # ``bridge/gateway.py``'s ``if not broker.running`` because
-        # faststream's ``KafkaSubscriber.start`` is not idempotent.
-        #
-        # Decomposing ``Worker.run`` into ``register_handlers`` +
-        # ``broker.start`` (rather than calling ``worker.run()`` from
-        # ``_run_worker``) also avoids a second FastStream signal-handler
-        # set that would overlap with the one ``_run_worker`` installs —
-        # the same reason the bridge decomposes ``Worker.run`` manually.
-        if not calfkit_client.broker.running:
-            await calfkit_client.broker.start()
 
         logger.info(
             "starting worker with %d agent(s): %s",

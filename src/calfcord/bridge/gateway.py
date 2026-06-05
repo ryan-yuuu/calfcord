@@ -812,7 +812,7 @@ def main() -> None:
                     # published at boot, before any agent may be up). No-ops on an
                     # auto-creating broker; required on Tansu.
                     await worker.provision_topics()
-                    await provision_extra_topics(server_urls, bridge_infra_topics())
+                    await provision_extra_topics(calfkit_client, bridge_infra_topics())
 
                     # ``broker.running`` is the public-ish state flag faststream
                     # sets True at the end of start() and False in stop(). Guarding
