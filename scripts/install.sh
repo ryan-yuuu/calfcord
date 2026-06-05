@@ -272,7 +272,7 @@ usage() {
   cat <<'USAGE'
 usage:
   calfcord init                  guided first-run config (provider, Discord, broker)
-  calfcord doctor                check config, broker, Discord token, and agents
+  calfcord doctor                check config, broker, Discord token/app id, and agents
   calfcord run <bridge|agent|router|tools|mcp>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
@@ -286,7 +286,7 @@ USAGE
 }
 
 # Explicit help -> stdout, exit 0; a bare invocation -> usage on stderr, exit 2.
-# (Deliberately stdout-for-help, unlike calfcord-self — the better Unix convention.)
+# (stdout-for-help diverges from calfcord-self, which writes help to stderr; intentional.)
 case "${1:-}" in
   -h|--help|help) usage; exit 0 ;;
   "") usage >&2; exit 2 ;;
@@ -322,9 +322,9 @@ _default_env CALFKIT_AGENTS_DIR     "$H/agents"
 _default_env CALFKIT_STATE_DIR      "$H/state/agents"
 _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 
-# Translate friendly verbs to the underlying console scripts (the raw
-# `calfcord calfkit-*` names still work as hidden aliases via the passthrough
-# below). Management verbs go to the calfcord-cli argparse entry point.
+# Translate friendly verbs to the underlying console scripts. Management verbs go to the
+# calfcord-cli argparse entry point; raw `calfcord calfkit-*` runner names aren't matched
+# here and fall through to the `uv run` passthrough below, so they keep working unchanged.
 case "${1:-}" in
   init|agent|router|doctor) set -- calfcord-cli "$@" ;;
   run)
@@ -549,7 +549,8 @@ main() {
   else
     log "  agents:   $AGENTS_DIR"
   fi
-  log "  deploy:   calfcord calfkit-bridge | calfkit-agent | calfkit-router | calfkit-tools"
+  log "  check:    calfcord doctor"
+  log "  deploy:   calfcord run bridge | run agent | run router | run tools"
 }
 
 # Run main only when executed (``bash install.sh``) or piped (``curl | bash``),

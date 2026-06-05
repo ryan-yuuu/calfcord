@@ -66,7 +66,7 @@ calfcord router setup
 
 It explains the router, defaults to **your agent's provider** plus a fast/cheap
 model (the router runs one LLM call per ambient message), ensures that provider's
-credentials, and saves the choice. Then start `calfcord calfkit-router` (step 3)
+credentials, and saves the choice. Then start `calfcord run router` (step 3)
 alongside the other processes. Skip the wizard and `@mentions` still work. See
 [`ambient-routing.md`](ambient-routing.md) for how routing decides who answers.
 
@@ -105,19 +105,19 @@ The installer seeds a text-only starter agent at
 agent there with the provider, model, and tools you chose. Your agents live in
 `~/.calfcord/agents/` and survive `calfcord self update`. To add or remove an
 agent's tools interactively, run `calfcord agent tools [<name>]`, then restart
-`calfcord calfkit-agent` (tools are loaded at agent boot). See
+`calfcord run agent` (tools are loaded at agent boot). See
 [`authoring-agents.md`](authoring-agents.md) for the full field reference.
 
 The tools process's workspace defaults to **the directory you launch
-`calfcord calfkit-tools` from** — agents read and write files there, the same
+`calfcord run tools` from** — agents read and write files there, the same
 way Claude Code works. Mind the trust implications before pointing it at
 sensitive files: [`security.md`](security.md#33-tools-native-broker--others-in-docker).
 
 ## 3. Run
 
 First, sanity-check the install — `calfcord doctor` verifies the config file, broker
-reachability, the Discord bot token, and that your agents parse (exit code is non-zero if
-anything's wrong, so it works in scripts too):
+reachability, the Discord bot token + application id, and that your agents parse (exit code is
+non-zero on a hard failure — a ✗ — and 0 on warnings, so it gates scripts cleanly):
 
 ```bash
 calfcord doctor             # add --offline to skip the live Discord token check

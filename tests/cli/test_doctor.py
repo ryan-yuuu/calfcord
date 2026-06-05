@@ -31,7 +31,7 @@ def test_parse_broker_valid(url, expected):
     assert doctor._parse_broker(url) == expected
 
 
-@pytest.mark.parametrize("url", ["", "   ", "host:abc", ":9092"])
+@pytest.mark.parametrize("url", ["", "   ", "host:abc", ":9092", "host:99999", "host:0", "host:-1"])
 def test_parse_broker_invalid(url):
     assert doctor._parse_broker(url) is None
 
@@ -52,8 +52,8 @@ def _factory(handler):
     return lambda: httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def _resp_ok(request, username="TestBot"):
-    return httpx.Response(200, json={"username": username})
+def _resp_ok(request):
+    return httpx.Response(200, json={"username": "TestBot"})
 
 
 def _resp_401(request):
@@ -62,6 +62,26 @@ def _resp_401(request):
 
 def _raise_net(request):
     raise httpx.ConnectError("network down")
+
+
+def _resp_non_json(request):
+    return httpx.Response(200, text="<html>edge proxy interstitial</html>")
+
+
+def _resp_non_dict(request):
+    return httpx.Response(200, json=["not", "a", "dict"])
+
+
+def _resp_403(request):
+    return httpx.Response(403, json={"message": "403: Forbidden"})
+
+
+def _resp_429(request):
+    return httpx.Response(429, json={"message": "rate limited"})
+
+
+def _resp_500(request):
+    return httpx.Response(500, text="server error")
 
 
 def _boom_factory():
@@ -131,21 +151,24 @@ def test_broker_unreachable_fails(monkeypatch, tmp_path, capsys):
     assert "✗" in capsys.readouterr().out
 
 
-def test_token_rejected_fails_and_does_not_leak(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize(
+    "handler,rc,needle",
+    [
+        (_resp_401, 1, "rejected"),      # token not accepted -> hard fail
+        (_resp_403, 1, "rejected"),      # forbidden is also "won't boot" -> hard fail
+        (_resp_429, 0, "rate-limited"),  # rate limited -> warn, never fail
+        (_resp_500, 0, "⚠"),             # unexpected 5xx -> warn
+        (_resp_non_json, 0, "⚠"),        # 200 + non-JSON body must not crash -> warn
+        (_resp_non_dict, 0, "⚠"),        # 200 + non-dict JSON -> warn
+        (_raise_net, 0, "⚠"),            # transport error -> warn
+    ],
+)
+def test_token_check_classifies_response(monkeypatch, tmp_path, capsys, handler, rc, needle):
     env_path, agents_dir = _setup(monkeypatch, tmp_path)
-    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_401))
+    assert doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(handler)) == rc
     out = capsys.readouterr().out
-    assert rc == 1
-    assert "rejected" in out.lower()
+    assert needle in out.lower()  # ⚠ has no lowercase form, so the same check works for symbols
     assert TOKEN not in out
-
-
-def test_token_network_error_warns(monkeypatch, tmp_path, capsys):
-    env_path, agents_dir = _setup(monkeypatch, tmp_path)
-    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_raise_net))
-    out = capsys.readouterr().out
-    assert rc == 0  # couldn't reach Discord is a warning, not a failure
-    assert "⚠" in out
 
 
 def test_offline_skips_network(monkeypatch, tmp_path, capsys):
@@ -190,8 +213,45 @@ def test_appid_non_numeric_fails(monkeypatch, tmp_path, capsys):
     assert "✗" in capsys.readouterr().out
 
 
+def test_unreadable_env_fails_cleanly(monkeypatch, tmp_path, capsys):
+    # A non-UTF-8 .env must be reported, not crash doctor with a UnicodeDecodeError.
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+    env_path.write_bytes(b"\xff\xfe not utf-8")
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "unreadable" in out
+
+
+def test_empty_config_warns(monkeypatch, tmp_path, capsys):
+    # A present-but-empty .env (the fresh-install state) is a warning, not a "no config" failure.
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+    env_path.write_text("# only a comment\n", encoding="utf-8")
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 0  # config-empty is a warn; the real values come from os.environ
+    assert "⚠" in out
+
+
+def test_appid_missing_fails(monkeypatch, tmp_path, capsys):
+    env_path, agents_dir = _setup(monkeypatch, tmp_path, appid=None)
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "not set" in out
+
+
+def test_broker_unparseable_fails(monkeypatch, tmp_path, capsys):
+    env_path, agents_dir = _setup(monkeypatch, tmp_path, broker="host:abc")
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "unparseable" in out
+
+
 def test_token_never_leaks_across_paths(monkeypatch, tmp_path, capsys):
-    for handler in (_resp_ok, _resp_401, _raise_net):
+    handlers = (_resp_ok, _resp_401, _resp_403, _resp_429, _resp_500, _raise_net, _resp_non_json, _resp_non_dict)
+    for handler in handlers:
         env_path, agents_dir = _setup(monkeypatch, tmp_path / handler.__name__)
         doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(handler))
         captured = capsys.readouterr()

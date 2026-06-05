@@ -72,7 +72,7 @@ Already have a broker? Pick "I have a broker URL" in `calfcord init`, or run
 **5. Check your setup, then run the four processes** (each in its own terminal, or under a supervisor):
 
 ```bash
-calfcord doctor             # verify config, broker, Discord token, and agents
+calfcord doctor             # verify config, broker, Discord token + app id, and agents
 calfcord run bridge         # the Discord gateway
 calfcord run agent          # runs your agents
 calfcord run router         # routes un-mentioned messages
@@ -132,14 +132,14 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sente
 
 The frontmatter declares identity and runtime hints; the body is the system
 prompt. The filename must match `name`, and the slash command is always
-`/<name>`. Drop the file in, restart `calfcord calfkit-bridge` and
-`calfcord calfkit-agent`, and it's live.
+`/<name>`. Drop the file in, restart `calfcord run bridge` and
+`calfcord run agent`, and it's live.
 
 Prefer not to hand-write the file? The full lifecycle is on the CLI:
 `calfcord agent create | list | show | edit | set | rename | delete` (plus
 `calfcord agent tools` for just the tool list). `create` is a guided wizard,
 `edit` an interactive field menu, and `set` its scriptable equivalent; restart
-`calfcord calfkit-agent` after any change to apply it.
+`calfcord run agent` after any change to apply it.
 
 Full field reference (providers, models, tool scoping, thinking effort) and the
 `calfcord agent` CLI →

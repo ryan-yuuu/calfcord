@@ -225,19 +225,7 @@ printf 'ARGV=%s\\n' "${seen[*]}"
 
 def _run_shim_argv(home: Path, argv: list[str]) -> str:
     """Invoke the shim with ``argv`` and return the user-program argv the fake uv saw."""
-    (home / "bin").mkdir(parents=True, exist_ok=True)
-    uv = home / "bin" / "uv"
-    uv.write_text(_FAKE_UV_ECHO_ARGS)
-    uv.chmod(0o755)
-    (home / "current").mkdir(exist_ok=True)
-    (home / "config").mkdir(exist_ok=True)
-    (home / "config" / ".env").write_text("")
-
-    env = {**os.environ, "CALFCORD_HOME": str(home)}
-    result = subprocess.run(
-        [str(home / "shims" / "calfcord"), *argv],
-        env=env, capture_output=True, text=True, check=False,
-    )
+    result = _run_shim_proc(home, argv)
     assert result.returncode == 0, f"shim failed: {result.stderr}"
     for line in result.stdout.splitlines():
         key, _, value = line.partition("=")
@@ -347,6 +335,15 @@ def test_shim_unknown_subcommand_exits_2(tmp_path: Path, argv: list[str]) -> Non
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_proc(home, argv).returncode == 2
+
+
+@pytest.mark.parametrize("argv", [["run", "--help"], ["run", "-h"], ["mcp", "--help"], ["mcp", "-h"]])
+def test_shim_subcommand_help_exits_0(tmp_path: Path, argv: list[str]) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    result = _run_shim_proc(home, argv)
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
 
 
 def test_shim_exports_calfcord_home(tmp_path: Path) -> None:

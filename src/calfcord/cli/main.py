@@ -5,7 +5,8 @@ The native ``calfcord`` shim translates user-facing management subcommands
 and execs them through the same locked venv as the runners. ``prog="calfcord"``
 so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
-(``init`` / ``agent`` / ``router``) to dispatch them here.
+(``init`` / ``doctor`` / ``agent`` / ``router``) to dispatch them here. The ``run`` /
+``mcp`` / ``auth`` verbs are translated to console scripts in the shim itself, not here.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     doctor_p = sub.add_parser(
         "doctor",
-        help="Preflight an install: config, broker, Discord token, and agents.",
+        help="Preflight an install: config, broker, Discord token + app id, and agents.",
     )
     doctor_p.add_argument(
         "--offline",

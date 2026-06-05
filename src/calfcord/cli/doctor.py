@@ -1,7 +1,8 @@
 """``calfcord doctor`` — a non-interactive preflight for an install.
 
 Answers "will the four processes actually boot?" before the operator starts them, instead of
-letting a missing token / unreachable broker / unparseable agent surface only as a crash. It is
+letting a missing token / unreachable broker / missing app id / unparseable agent surface only as a
+crash. It is
 deliberately read-only and scriptable: each check yields a :class:`Result`, the whole set renders
 once, and the exit code is the contract (``1`` iff any check ``fail``s; warnings never fail).
 
@@ -11,7 +12,8 @@ populates from ``config/.env`` via ``uv run --env-file``, with shell exports win
 consulted only to answer "is there a config file at all".
 
 The bot token is a secret: it is sent only in the ``Authorization`` header and NEVER printed — not
-in a detail line, a summary, or an error (raw httpx exceptions are swallowed, not echoed).
+in a detail line, a summary, or an error. The underlying httpx exception text is never echoed; only
+a fixed message or the bare HTTP status code is shown, so the token can't leak through an error path.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from __future__ import annotations
 import os
 import socket
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 
 from calfcord.cli._envfile import read_env
 
@@ -32,15 +34,20 @@ if TYPE_CHECKING:
 _DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 _TCP_TIMEOUT = 2.0
 _HTTP_TIMEOUT = 5.0
-_SYMBOLS = {"ok": "✓", "warn": "⚠", "fail": "✗"}
+
+Status = Literal["ok", "warn", "fail"]
+_SYMBOLS: dict[Status, str] = {"ok": "✓", "warn": "⚠", "fail": "✗"}
+# A typo'd status would silently miscount the exit code, so pin the render map to the
+# status domain at import (mirrors the THINKING_EFFORTS drift assert in _fields.py).
+assert set(_SYMBOLS) == set(get_args(Status)), "_SYMBOLS drifted from Status"
 
 
 @dataclass(frozen=True)
 class Result:
-    """One preflight check's outcome. ``status`` is ``"ok"`` | ``"warn"`` | ``"fail"``."""
+    """One preflight check's outcome — a :data:`Status` plus a human-readable detail line."""
 
     name: str
-    status: str
+    status: Status
     detail: str
 
 
@@ -71,13 +78,16 @@ def _parse_broker(url: str) -> tuple[str, int] | None:
     if not port_str:
         return (host, 9092)
     try:
-        return (host, int(port_str))
+        port = int(port_str)
     except ValueError:
         return None
+    if not (1 <= port <= 65535):
+        return None
+    return (host, port)
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = _TCP_TIMEOUT) -> bool:
-    """True if a TCP connection to ``host:port`` opens within ``timeout``. Module-level so tests can patch it."""
+    """TCP reachability probe — module-level so tests can monkeypatch it; closes the socket, never raises."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -89,8 +99,8 @@ def _discord_username(token: str, *, client_factory: Callable[[], httpx.Client] 
     """GET ``/users/@me`` and return the bot username. The token rides ONLY in the header.
 
     Raises the underlying httpx error (``HTTPStatusError`` for non-2xx, other ``HTTPError`` for
-    transport failures); the caller classifies it. httpx is imported lazily so the CLI entry point
-    stays light.
+    transport failures); the caller classifies it. httpx is imported lazily so importing ``doctor``
+    itself stays cheap and the offline path never imports it.
     """
     import httpx
 
@@ -102,9 +112,15 @@ def _discord_username(token: str, *, client_factory: Callable[[], httpx.Client] 
 
 
 def _check_config(env_path: Path) -> Result:
-    if env_path.is_file() and read_env(env_path):
-        return Result("config", "ok", str(env_path))
-    return Result("config", "fail", f"no config at {env_path} — run `calfcord init`")
+    if not env_path.is_file():
+        return Result("config", "fail", f"no config at {env_path} — run `calfcord init`")
+    try:
+        values = read_env(env_path)
+    except (OSError, ValueError) as exc:  # unreadable / non-UTF-8 / malformed — don't let it crash doctor
+        return Result("config", "fail", f"config at {env_path} is unreadable: {exc}")
+    if not values:
+        return Result("config", "warn", f"{env_path} has no values yet — fill it in (or run `calfcord init`)")
+    return Result("config", "ok", str(env_path))
 
 
 def _check_broker() -> Result:
@@ -121,19 +137,25 @@ def _check_broker() -> Result:
 
 
 def _check_token(*, offline: bool, client_factory: Callable[[], httpx.Client] | None) -> Result:
-    import httpx
-
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
         return Result("discord token", "fail", "DISCORD_BOT_TOKEN not set")
     if offline:
         return Result("discord token", "ok", "set (not validated, --offline)")
+
+    import httpx  # imported here so the offline / missing-token paths stay network- and import-free
+
     try:
         username = _discord_username(token, client_factory=client_factory)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 401:
-            return Result("discord token", "fail", "token rejected by Discord (401)")
-        return Result("discord token", "warn", f"unexpected response from Discord ({exc.response.status_code})")
+        code = exc.response.status_code
+        if code in (401, 403):  # token not accepted -> the runner won't boot, so this is a hard fail
+            return Result("discord token", "fail", f"token rejected by Discord ({code})")
+        if code == 429:
+            return Result("discord token", "warn", "Discord rate-limited the check; try again shortly")
+        return Result("discord token", "warn", f"unexpected response from Discord ({code})")
+    except (ValueError, AttributeError):  # a 200 with a non-JSON / non-dict body (edge proxy, interstitial)
+        return Result("discord token", "warn", "reached Discord but couldn't read the response")
     except (httpx.HTTPError, OSError):
         return Result("discord token", "warn", "couldn't reach Discord to validate the token")
     return Result("discord token", "ok", f"valid (bot: {username})")
@@ -149,7 +171,7 @@ def _check_appid() -> Result:
 
 
 def _check_agents(agents_dir: Path) -> Result:
-    # Imported in-body to keep the CLI entry point light (agent_inspect transitively pulls heavier deps).
+    # Imported in-body so importing ``doctor`` stays cheap; agent_inspect transitively pulls heavier deps.
     from calfcord.cli.agent_inspect import _parse_all
 
     parsed, failed = _parse_all(agents_dir)
