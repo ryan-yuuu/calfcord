@@ -172,7 +172,7 @@ to the `.md`. The same checkbox is reachable as the *Tools* row of
 `calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
 sets the list non-interactively — see §9. Because the tool set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
-`calfcord calfkit-agent` restart — there is no live reload.
+`calfcord run agent` restart — there is no live reload.
 
 ### 3.4 Behavior (optional)
 

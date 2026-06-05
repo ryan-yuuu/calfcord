@@ -76,7 +76,7 @@ state directories are pinned under the install home — `CALFKIT_AGENTS_DIR` →
 `~/.calfcord/agents` (your `.md` files survive `calfcord self update`) and
 `CALFKIT_STATE_DIR` → `~/.calfcord/state/agents` — while the tools
 **workspace follows the launch directory** (`CALFCORD_WORKSPACE_DIR` → the
-`$PWD` of `calfcord calfkit-tools`, the Claude-Code model). See the
+`$PWD` of `calfcord run tools`, the Claude-Code model). See the
 [README quick start](../README.md#quick-start) and
 [`installation.md`](./installation.md) for the full walkthrough, and
 [`configuration.md`](./configuration.md) for overriding any of those dirs.

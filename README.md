@@ -90,6 +90,8 @@ calfcord run tools          # tools + the agent-to-agent channel
 A reply appears from your starter agent. You're live. 🎉
 
 > **Next steps**
+> - **Explore everything calfcord can do** → a task-by-task guide:
+>   [`docs/using-calfcord.md`](./docs/using-calfcord.md).
 > - **Customize your agent / add tools** → `calfcord agent tools`, then restart
 >   `calfcord run agent`. Field reference:
 >   [`docs/authoring-agents.md`](./docs/authoring-agents.md).
@@ -166,6 +168,7 @@ environment-variable reference.
 
 ## Documentation
 
+- [`docs/using-calfcord.md`](./docs/using-calfcord.md) — what you can do after the quick start, each task with its command.
 - [`docs/discord-setup.md`](./docs/discord-setup.md) — create the Discord app (~5 min).
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — every agent frontmatter field.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — add a built-in tool.

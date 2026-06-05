@@ -239,7 +239,7 @@ exactly the boundary.
 default.** Its tools step pre-checks every built-in — including `shell`,
 `write_file`, `edit_file`, and the web tools — so a freshly-configured
 agent has the full shell + file-write + web reach described above,
-running in the directory you launch `calfcord calfkit-tools` from and
+running in the directory you launch `calfcord run tools` from and
 drivable by anyone who can `@mention` it. The wizard prints a caution
 when those tools are kept. Deselect what the agent doesn't need (or trim
 later with `calfcord agent tools`), and keep the deployment on a
