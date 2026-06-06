@@ -46,3 +46,11 @@ In approximate chronological order (oldest first):
   native installer the primary onboarding path: a stable agents/state home, a
   provider-agnostic starter agent, and the guided `calfcord init` /
   `calfcord agent tools` sub-commands.
+- [`calfkit-worker-lifecycle-gaps.md`](./calfkit-worker-lifecycle-gaps.md) — the
+  upstream feature request enumerating why calfcord hand-rolls its run loops
+  (the four `Worker.run()` gaps), filed against calfkit and shipped in 0.5.2.
+- [`calfkit-0.5.4-lifecycle-adoption.md`](./calfkit-0.5.4-lifecycle-adoption.md) —
+  the adoption plan that closes those gaps: collapse the five runners onto the
+  managed `Worker.run()`/`async with worker` path, delete `_worker_runtime.py`
+  and the bespoke agent loop, and reduce calfcord's lifecycle deviation to one
+  `provision_infra` helper.
