@@ -29,6 +29,7 @@ import discord
 import pytest
 from calfkit.client import Client
 from calfkit.models import ToolContext
+from calfkit.worker.lifecycle import ResourceSetupContext
 
 from calfcord.agents.phonebook import PhonebookEntry, phonebook_to_deps
 from calfcord.bridge.egress import A2AChannelResolver
@@ -234,14 +235,10 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 def _a2a(deps: dict[str, Any]) -> pc._A2A:
     """Assemble the per-call ``_A2A`` working set from the ``deps`` fixture's
-    mocks — for tests that call resource-threaded helpers directly."""
-    bundle = deps["resources"]["a2a"]
-    return pc._A2A(
-        client=deps["resources"]["a2a_client"],
-        persona_sender=bundle.persona_sender,
-        resolver=bundle.resolver,
-        discord_client=bundle.discord_client,
-        timeout_seconds=bundle.timeout_seconds,
+    mocks — for tests that call resource-threaded helpers directly. Uses the
+    same canonical constructor as production so the two can't drift."""
+    return pc._A2A.from_parts(
+        client=deps["resources"]["a2a_client"], discord=deps["resources"]["a2a"]
     )
 
 
@@ -2040,8 +2037,6 @@ class TestA2AResource:
         anchor the audit channel) — fail boot loudly, here, not unconditionally
         in the runner."""
         monkeypatch.setattr(pc, "DiscordSettings", lambda: SimpleNamespace(guild_id=None))
-        from calfkit.worker.lifecycle import ResourceSetupContext
-
         agen = self._resource_genfn()(
             ResourceSetupContext(owner=pc.private_chat_tool, resources={})
         )
@@ -2051,8 +2046,6 @@ class TestA2AResource:
     async def test_yields_wired_bundle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The happy path wires the persona sender, the resolver, and the
         REST client (reused from the persona sender) into the yielded bundle."""
-        from calfkit.worker.lifecycle import ResourceSetupContext
-
         monkeypatch.delenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", raising=False)
         monkeypatch.setattr(pc, "DiscordSettings", lambda: SimpleNamespace(guild_id=777))
 
@@ -2093,8 +2086,6 @@ class TestA2AResource:
         """If ``DiscordSettings()`` itself raises (e.g. missing bot token / app
         id — distinct from a missing guild id), the bracket must surface it at
         startup before constructing any Discord connection, not midway."""
-        from calfkit.worker.lifecycle import ResourceSetupContext
-
         def _boom() -> object:
             raise RuntimeError("missing DISCORD_BOT_TOKEN")
 

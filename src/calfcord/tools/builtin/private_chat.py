@@ -221,6 +221,23 @@ class _A2A:
     discord_client: discord.Client
     timeout_seconds: float
 
+    @classmethod
+    def from_parts(cls, *, client: Client, discord: _A2ADiscord) -> _A2A:
+        """Merge the worker-scoped ``Client`` with the node-scoped Discord bundle.
+
+        The single canonical assembly point so production (:func:`_resources_from_ctx`)
+        and the tests can't drift when an ``_A2ADiscord`` field is added. Spreads
+        the fields explicitly (not ``dataclasses.asdict``, which would deep-copy
+        the live ``Client``/``discord.Client`` instead of sharing them).
+        """
+        return cls(
+            client=client,
+            persona_sender=discord.persona_sender,
+            resolver=discord.resolver,
+            discord_client=discord.discord_client,
+            timeout_seconds=discord.timeout_seconds,
+        )
+
 
 _DISCORD_HISTORY_MAX_LIMIT = 100
 """Discord's per-call REST cap for ``channel.history(limit=...)``. Matches
@@ -266,13 +283,7 @@ def _resources_from_ctx(ctx: ToolContext, correlation_id: str) -> _A2A:
             f"{' and '.join(missing)} (have keys: {sorted(ctx.resources)})",
             correlation_id=correlation_id,
         )
-    return _A2A(
-        client=client,
-        persona_sender=discord_res.persona_sender,
-        resolver=discord_res.resolver,
-        discord_client=discord_res.discord_client,
-        timeout_seconds=discord_res.timeout_seconds,
-    )
+    return _A2A.from_parts(client=client, discord=discord_res)
 
 
 def _build_thread_name(caller: str, target: str, content: str) -> str:
