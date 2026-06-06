@@ -25,7 +25,11 @@ from unittest.mock import MagicMock
 import pytest
 from calfkit.nodes.tool import ToolNodeDef
 
-from calfcord.tools.discovery import _resolve_alias_map, discover_tools
+from calfcord.tools.discovery import (
+    _clone_with_name,
+    _resolve_alias_map,
+    discover_tools,
+)
 
 
 def _write_package(root: Path, pkg_name: str, modules: dict[str, str]) -> Path:
@@ -576,6 +580,71 @@ def test_include_filter_does_not_short_circuit_import_errors(
 # deployments of the same tool. The tests below pin the parser
 # semantics, the additive registry behavior, the wire-level isolation
 # of clone vs. original, and the failure modes operators most often hit.
+
+
+class TestCloneCarriesLifecycle:
+    """A renamed clone must carry the source node's lifecycle registrations.
+
+    ``_clone_with_name`` rebuilds the node via ``dataclasses.replace``, which
+    copies only dataclass fields — the lifecycle ``@resource`` brackets and
+    hooks live in ``__dict__`` (lazily created by ``LifecycleHookMixin``), so
+    without an explicit carry-over a clone would silently lose them and the
+    aliased tool's body would never receive its node-scoped resource at runtime.
+    """
+
+    def test_clone_preserves_resource_brackets(self) -> None:
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.resource("conn")
+        async def _conn(ctx):  # noqa: ANN001 - ResourceSetupContext
+            yield object()
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        assert "conn" in dict(clone._resource_cms())
+
+    def test_clone_preserves_lifecycle_hooks(self) -> None:
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.on_startup
+        async def _warm(ctx) -> None:  # noqa: ANN001 - LifecycleContext
+            return None
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        assert clone._hooks_for("on_startup")
+
+    def test_clone_registry_is_independent_of_source(self) -> None:
+        """The carry-over must be a copy, not a shared container — registering
+        a new bracket on the clone must not mutate the original's registry."""
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.resource("conn")
+        async def _conn(ctx):  # noqa: ANN001 - ResourceSetupContext
+            yield object()
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        @clone.resource("extra")
+        async def _extra(ctx):  # noqa: ANN001 - ResourceSetupContext
+            yield object()
+
+        assert "extra" not in dict(node._resource_cms())
 
 
 class TestResolveAliasMap:
