@@ -1,24 +1,26 @@
 # Discord setup
 
-One-time, about 5 minutes. You'll create a Discord app, copy two values into
-`.env`, and invite the bot to your server.
+One-time, about 5 minutes. You'll create a Discord app, grab two values
+(the bot token and application ID), enable two intents, and invite the bot to
+your server. `calfcord init` takes it from there — it verifies the token, waits
+for the invite, and **discovers your server and channel for you**, so these two
+values are the only Discord IDs you ever paste.
 
 **Before you start:** you need a Discord server you own (or have **Manage
 Server** on).
 
 ## 1. Create the app
 
+Grab two values to hand to `calfcord init` when it asks (it writes them to
+`.env` for you):
+
 1. Open the [Developer Portal](https://discord.com/developers/applications) →
    **New Application** → name it → **Create**.
-2. On **General Information**, copy the **Application ID** into `.env`:
-   ```
-   DISCORD_APPLICATION_ID=your-application-id
-   ```
-3. Open the **Bot** tab → **Reset Token** → **Copy** into `.env`. Treat it like
-   a password and never commit `.env`:
-   ```
-   DISCORD_BOT_TOKEN=your-bot-token
-   ```
+2. On **General Information**, copy the **Application ID** — this is
+   `DISCORD_APPLICATION_ID`.
+3. Open the **Bot** tab → **Reset Token** → **Copy** — this is
+   `DISCORD_BOT_TOKEN`. Treat it like a password; `init` verifies it on the spot
+   when you paste it.
 
 ## 2. Enable two intents
 
@@ -44,24 +46,29 @@ The link grants only the permissions calfcord needs. Invite it **only to
 servers you trust** — agents can run code on the host (see
 [`security.md`](./security.md)).
 
-## 4. Start it and say hello
+## 4. The wizard takes it from here
 
-Launch calfcord (`docker compose up --build`, or see the
-[README quick start](../README.md#quick-start)). Then, in a channel the
+Discord setup is done — back in `calfcord init`, the wizard detects the moment
+the bot joins, picks up your server and channel, brings your agent online, and
+waits until it sees the first reply. When it finishes, confirm in a channel the
 bot can see:
 
 ```
-@scribe hello
+@assistant hello
 ```
 
-A reply appears under the agent's persona. You're connected.
+A reply appears under the agent's persona. You're connected. (`@assistant` is the
+default starter agent — use whatever name you gave yours in `init`.)
 
 ---
 
-## Optional `.env` values
+## Advanced: override what `init` auto-discovers
 
-Turn on **Developer Mode** (Discord → User Settings → Advanced), then
-right-click to **Copy ID**:
+`calfcord init` discovers your server and channel automatically, so you don't
+need these. They're here for cases where you want to set a value explicitly —
+e.g. pin slash-command sync to one guild, or unlock owner-only commands. Turn on
+**Developer Mode** (Discord → User Settings → Advanced), right-click to **Copy
+ID**, and set the key in `~/.calfcord/config/.env`:
 
 | `.env` key | Copy ID from | What it does |
 |---|---|---|

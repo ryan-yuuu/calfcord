@@ -222,13 +222,13 @@ applies stricter syscall filtering than the default
 calfkit-tools image.
 
 A **native install** lands squarely in this model. The `calfcord` shim
-defaults `CALFCORD_WORKSPACE_DIR` to **the directory `calfcord
-calfkit-tools` was launched from** (not a hidden dir), so running it
-inside a project dir gives every agent the same blast radius as Claude
-Code on that machine over that project. Launch the tools process from
-the narrowest directory the agents actually need, and keep the
-deployment off public Discord (§ 3.4) — anyone who can `@mention` an
-agent drives that surface.
+defaults `CALFCORD_WORKSPACE_DIR` to **the directory the workspace
+(`calfcord start`) was launched from** (not a hidden dir), so opening
+the workspace inside a project dir gives every agent the same blast
+radius as Claude Code on that machine over that project. Open the
+workspace from the narrowest directory the agents actually need, and
+keep the deployment off public Discord (§ 3.4) — anyone who can
+`@mention` an agent drives that surface.
 
 Note that this is *less* isolated than 3.1 in absolute terms (the
 process can now reach `$HOME`, `/etc`, and so on), but *more*
@@ -239,11 +239,11 @@ exactly the boundary.
 default.** Its tools step pre-checks every built-in — including `shell`,
 `write_file`, `edit_file`, and the web tools — so a freshly-configured
 agent has the full shell + file-write + web reach described above,
-running in the directory you launch `calfcord run tools` from and
-drivable by anyone who can `@mention` it. The wizard prints a caution
-when those tools are kept. Deselect what the agent doesn't need (or trim
-later with `calfcord agent tools`), and keep the deployment on a
-trusted/private server, never public Discord (§ 3.4). (The
+running in the directory the workspace (`calfcord start`) was launched
+from and drivable by anyone who can `@mention` it. The wizard prints a
+caution when those tools are kept. Deselect what the agent doesn't need
+(or trim later with `calfcord agent tools`), and keep the deployment on
+a trusted/private server, never public Discord (§ 3.4). (The
 installer-seeded `assistant.md` is text-only until you run
 `calfcord init`.)
 
@@ -317,7 +317,8 @@ matters in practice.
   bot token is the single secret that, if leaked, gives an attacker
   full control of the bot's actions in every guild it's in. Rotate
   via the Discord developer portal; update `DISCORD_BOT_TOKEN` in
-  `.env`; restart `calfkit-bridge`.
+  `.env`; restart the substrate so the bridge picks up the new token
+  (`calfcord stop` then `calfcord start`).
 - **Rotate provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
   on suspected compromise.** These have billing implications.
 
@@ -332,9 +333,9 @@ matters in practice.
 - **Limit which channels each agent subscribes to.** An agent only
   responds in channels its `state/agents/<name>.json` lists. The
   bootstrap env var (`CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS`)
-  is the seed; once the state file exists, edit it directly and
-  restart the agent. See `docs/authoring-agents.md` § Channel
-  subscriptions for the lifecycle.
+  is the seed; once the state file exists, edit it directly and run
+  `calfcord agent restart <name>` to reload it. See
+  `docs/authoring-agents.md` § Channel subscriptions for the lifecycle.
 
 ### 5.3 Process / log hygiene
 

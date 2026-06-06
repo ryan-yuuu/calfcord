@@ -42,7 +42,14 @@ In approximate chronological order (oldest first):
 - [`step-transcripts-and-live-streaming-plan.md`](./step-transcripts-and-live-streaming-plan.md) —
   ephemeral per-step status display, live step streaming, and the SQLite
   transcript store backing tool-call replay.
-- [`end-user-onboarding-plan.md`](./end-user-onboarding-plan.md) — making the
-  native installer the primary onboarding path: a stable agents/state home, a
+- [`end-user-onboarding-plan.md`](./end-user-onboarding-plan.md) — **superseded by
+  [`onboarding-redesign.md`](./onboarding-redesign.md)** — making the native
+  installer the primary onboarding path: a stable agents/state home, a
   provider-agnostic starter agent, and the guided `calfcord init` /
-  `calfcord agent tools` sub-commands.
+  `calfcord agent tools` sub-commands. Its installer-first direction was kept, but
+  the runtime model (substrate/roster split, Process Compose supervisor, an `init`
+  that ends live) was redesigned; retained for the reasoning record.
+- [`onboarding-redesign.md`](./onboarding-redesign.md) — the current onboarding &
+  process-lifecycle design: a guided, resumable `calfcord init` that ends with a
+  live agent, the substrate (broker + bridge) vs. roster (agents/tools/router/mcp)
+  split, and a Process Compose supervisor behind `calfcord start|stop|status|logs`.

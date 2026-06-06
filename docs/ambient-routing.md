@@ -216,9 +216,10 @@ retarget the router without editing or mounting a replacement `router.md`:
 `CALFKIT_ROUTER_PROVIDER` and `CALFKIT_ROUTER_MODEL`. Their precedence is
 **env var → `router.md` front matter → in-code default**; an unset/empty value
 is ignored, and an invalid value fails loudly at boot. The easiest way to set
-them is the `calfcord router setup` wizard — it defaults to your agent provider
+them is the `calfcord router edit` wizard — it defaults to your agent provider
 plus a fast/cheap model, ensures the provider's credentials, and writes both
-vars for you.
+vars for you. To set the provider/model non-interactively (scripting/CI) use
+`calfcord router set` instead.
 
 The body references the structured-output tool name and the
 `RoutingDecision` field names via `{{ROUTER_OUTPUT_TOOL}}` /
@@ -320,6 +321,17 @@ required.
 
 ### Running locally
 
+On a native install, ambient routing comes online with two commands:
+`calfcord start` opens the workspace substrate (broker + bridge), and
+`calfcord router start` brings the router online once it has config
+(`calfcord router edit`). Agents and tools come up on demand with
+`calfcord agent start <name>` / `calfcord tools start`. See
+`docs/using-calfcord.md` for the full day-2 command set.
+
+The low-level per-process invocation below is a dev/debugging escape
+hatch — it runs each process in the foreground so you can watch its
+output directly:
+
 ```bash
 uv sync
 docker compose up -d                  # Kafka broker
@@ -356,13 +368,15 @@ operator responsibilities the bridge cannot verify on its own.
    starts with an underscore; some `kafka-topics.sh --list`
    invocations hide it unless you pass the literal name.
 
-2. **Process startup order.** `calfkit-router` must be running
-   before `calfkit-bridge` starts accepting Discord traffic.
-   Without the router, ambient messages publish to
-   `discord.ambient.in` and sit there until retention expires; the
-   user sees no reply. There is no in-process health check for the
-   router from the bridge — coordinate via deployment ordering or
-   a readiness probe upstream of the bridge.
+2. **Process startup order.** The router must be running before the
+   bridge starts accepting Discord traffic. Without the router, ambient
+   messages publish to `discord.ambient.in` and sit there until
+   retention expires; the user sees no reply. There is no in-process
+   health check for the router from the bridge. On a native install the
+   workspace supervisor encodes this ordering via `depends_on`, so it
+   brings the router up health-gated before the bridge for you; on a
+   hand-rolled deployment, coordinate via deployment ordering or a
+   readiness probe upstream of the bridge.
 
 3. **External monitoring on the silent-router signal.** Wire an
    alert on the "publish-without-arrival" log diff (see "Hard
@@ -645,11 +659,13 @@ specific class of degradation.
 
 ### Adding a new assistant agent
 
-Existing flow is unchanged. Drop a new `agents/<name>.md`, restart
-the bridge (so the registry sees it), restart the affected agent
-processes. The router automatically sees the new agent on its next
-ambient invocation because the bridge stamps the phonebook onto
-`deps` on every publish.
+Existing flow is unchanged. Define a new agent (`calfcord agent create
+<name>`, which writes `agents/<name>.md`), then bring it online with
+`calfcord agent start <name>`; a brand-new agent also needs the bridge
+to re-read the registry, which the workspace handles when the agent
+clocks in. The router automatically sees the new agent on its next
+ambient invocation because the bridge stamps the phonebook onto `deps`
+on every publish.
 
 ## Topology reference
 
@@ -860,9 +876,9 @@ the tool call, one to produce a final output after the tool result).
   the router process. No Discord-side audit channel mirrors the
   decisions.
 - **Hot-reload of the router definition.** Edits to `router.md` (or the
-  file pointed at by `CALFKIT_ROUTER_PROMPT_PATH`) require a
-  `calfkit-router` restart — the loader caches the parsed config + prompt
-  at boot.
+  file pointed at by `CALFKIT_ROUTER_PROMPT_PATH`) require a router
+  restart (`calfcord router stop` then `calfcord router start`) — the
+  loader caches the parsed config + prompt at boot.
 
 ## Files
 

@@ -28,9 +28,12 @@ At boot, the bridge scans `agents/` via
 `src/calfcord/agents/definition.py`). The definitions feed
 the agent registry that powers ingress routing, the phonebook
 propagated to A2A peers, and the slash-command tree the bridge
-registers with Discord. **A new `.md` file requires a `calfkit-bridge`
-and `calfkit-agent` restart to be picked up** — the registry scan and
-the calfkit `Worker.register_handlers` are both one-shot at startup.
+registers with Discord. **A brand-new `.md` file is picked up by
+`calfcord agent start <name>` (it brings the new teammate online); the
+bridge owns the `/<name>` slash command, so a newly created or renamed
+agent also needs a bridge restart — `calfcord stop && calfcord start`**
+— the registry scan and the calfkit `Worker.register_handlers` are both
+one-shot at startup.
 
 calfcord runs as four processes (`calfkit-bridge`, `calfkit-agent`,
 `calfkit-router`, `calfkit-tools`). The bridge owns Discord I/O and the
@@ -63,9 +66,11 @@ You are Example, a friendly demo agent. Reply concisely (1-3
 sentences) to whatever the user says.
 ```
 
-Drop the file at `agents/example-bot.md`, restart `calfkit-bridge` and
-`calfkit-agent`, then `@example-bot hi` in a Discord channel the agent
-is subscribed to. The webhook reply will appear under the `Example`
+Drop the file at `agents/example-bot.md`, bring it online with `calfcord
+agent start example-bot`, then `@example-bot hi` in a Discord channel the
+agent is subscribed to. (A brand-new agent also needs the bridge to learn
+its `/<name>` slash command — `calfcord stop && calfcord start` once after
+the first create.) The webhook reply will appear under the `Example`
 persona.
 
 Field details, fallbacks, and reserved fields are in §3. The
@@ -172,7 +177,7 @@ to the `.md`. The same checkbox is reachable as the *Tools* row of
 `calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
 sets the list non-interactively — see §9. Because the tool set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
-`calfcord run agent` restart — there is no live reload.
+`calfcord agent restart <name>` — there is no live reload.
 
 ### 3.4 Behavior (optional)
 
@@ -336,8 +341,8 @@ the workflow for adding an agent to a new channel is:
 
 1. Edit `state/agents/<name>.json` to add the channel ID, or set the
    bootstrap env var and delete the state file.
-2. Restart `calfkit-agent` (or, in all-agents mode, the whole
-   `calfkit-agent` process).
+2. Restart the agent with `calfcord agent restart <name>` so it
+   re-reads its subscriptions.
 
 ## 6. Thinking-effort tiers
 
@@ -383,7 +388,7 @@ Ambient-channel messages do **not** pick up runtime changes without an
 agent restart. The tier is also baked into the calfkit `Agent`
 constructor at agent boot, and ambient routing has no per-call override
 path. If you change effort and want the agent's ambient behavior to
-shift, restart `calfkit-agent`.
+shift, run `calfcord agent restart <name>`.
 
 ### 6.2 Field-ordering note
 
@@ -397,11 +402,17 @@ file.
 
 ### 7.1 Logs
 
-The agent runner logs to stdout. In compose:
+The agent runner logs to stdout, which the supervisor captures to
+`$CALFCORD_HOME/state/logs/<name>.log`. Tail one agent (or follow with
+`-f`):
 
 ```bash
-docker compose logs -f agent
+calfcord logs example-bot -f       # one agent
+calfcord logs -f                   # all components, merged
 ```
+
+In a compose deployment the same stream is reachable as `docker compose
+logs -f agent`.
 
 When running one agent natively for crash isolation:
 
@@ -433,7 +444,8 @@ override if you want this in production.
   known tools:
   `agent 'foo' declares unknown tool(s) ['my_tool']; known tools: [...]`.
   Either fix the name or add the tool under
-  `src/calfcord/tools/builtin/` and restart `calfkit-tools`.
+  `src/calfcord/tools/builtin/` and restart the tools host
+  (`calfcord tools stop && calfcord tools start`, or `uv run calfkit-tools` in dev).
 - **`display_name == "Clyde"`.** Pydantic rejects this at parse time
   with a clear validator error — the agent never boots.
 - **Missing API key.** The provider's client construction succeeds (no
@@ -578,8 +590,8 @@ their own commands.
 
 These commands edit the `.md` on disk; the running agent bakes its
 config at boot (the same one-shot constraint behind every "restart
-required" note in §3.3, §5.2, and §6.1). So **restart `calfcord
-calfkit-agent`** after any edit to apply it — and **also `calfcord
-calfkit-bridge`** for a newly created or renamed agent, since the bridge
-owns the `/<name>` slash command. Each command prints the matching
-restart hint on success.
+required" note in §3.3, §5.2, and §6.1). So **run `calfcord agent
+restart <name>`** after any edit to apply it — and for a newly created
+or renamed agent **also bounce the bridge** (`calfcord stop && calfcord
+start`), since the bridge owns the `/<name>` slash command. Each command
+prints the matching restart hint on success.

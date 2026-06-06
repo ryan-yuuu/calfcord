@@ -427,9 +427,9 @@ fi
 usage() {
   cat <<'USAGE'
 usage:
-  calfcord init                  guided first-run config (provider, Discord, broker)
+  calfcord init                  guided setup; ends with your first agent live in Discord
   calfcord doctor                check config, broker, Discord token/app id, and agents
-  calfcord start                 bring up the local org (broker + bridge + roster)
+  calfcord start                 open the workspace (broker + bridge — the always-on substrate)
   calfcord stop                  stop the local org
   calfcord status                show what's running locally
   calfcord logs [component] [-f] tail unified or per-component logs
@@ -441,7 +441,8 @@ usage:
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
-  calfcord router setup          optional: configure the ambient-message router
+  calfcord router <show|set|edit|start|stop>
+                                 configure / run the optional ambient-message router
   calfcord tools <start|stop>    bring the tools host online / offline
   calfcord mcp <start|stop>      bring the MCP host online / offline
   calfcord mcp <add|codegen> [args]
@@ -745,7 +746,8 @@ main() {
     log "  agents:   $AGENTS_DIR"
   fi
   log "  check:    calfcord doctor"
-  log "  deploy:   calfcord run bridge | run agent | run router | run tools"
+  log "  setup:    calfcord init      (guided; ends with your first agent live in Discord)"
+  log "  status:   calfcord status    (the org board, once you're up)"
 }
 
 # Run main only when executed (``bash install.sh``) or piped (``curl | bash``),

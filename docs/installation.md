@@ -1,9 +1,10 @@
 # Install & run calfcord
 
 Install calfcord on a machine with a single command and configure it with a
-guided prompt — no repo clone, and no Python, Docker, or git to set up first.
-This is the path the [README quick start](../README.md#quick-start) follows.
-(Want to hack on calfcord itself instead? Don't use the installer — see
+guided session that ends with your **first agent live in Discord** — no repo
+clone, and no Python, Docker, or git to set up first. This is the path the
+[README quick start](../README.md#quick-start) follows. (Want to hack on calfcord
+itself instead? Don't use the installer — see
 [Developing calfcord](#developing-calfcord).)
 
 ## 1. Install
@@ -13,19 +14,17 @@ curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/ins
 ```
 
 You don't need Python, Docker, or git installed first — the installer handles
-everything. When it finishes, **restart your shell** (or open a new terminal)
+everything, including a native **Tansu** broker and a process supervisor (more
+on both below). When it finishes, **restart your shell** (or open a new terminal)
 so the `calfcord` command is on your `PATH`.
 
-## 2. Configure
-
-The guided setup configures your first agent **and** the install's `.env` in one
-pass:
+## 2. Configure — `calfcord init`
 
 ```bash
 calfcord init
 ```
 
-It asks for:
+`init` is one continuous, resumable session. It asks for:
 
 - A **model provider** (Anthropic / OpenAI / Codex subscription) and its API
   key. If you pick **Codex**, it logs you into ChatGPT inline via a device code
@@ -36,8 +35,11 @@ It asks for:
   can't enter a slug the provider would reject), and its **tools** — a checkbox
   of every built-in with **all pre-selected**; deselect any you don't want, or
   keep them all.
-- Your **Discord bot token and application ID**.
-- A **Kafka broker** (see [Pick a broker](#pick-a-broker)).
+- Your **Discord bot token** (verified the instant you paste it — you'll see
+  `✓ Connected as <bot>`) **and application ID**. It then shows the invite link,
+  **waits while you authorize the bot, and auto-detects your server and channel**
+  — no numeric IDs to copy. See [`discord-setup.md`](discord-setup.md) for the
+  token + app-ID prerequisites.
 
 It writes `~/.calfcord/config/.env` plus the agent at
 `~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because the
@@ -45,8 +47,14 @@ tools step defaults to *every* tool, a freshly-configured agent has shell,
 file-write, and web reach — see [`security.md`](security.md#33-tools-native-broker--others-in-docker)
 before exposing it.
 
+**`init` ends live.** After config it opens your workspace, brings your agent
+online, and watches Discord until it sees the first reply — so the session
+finishes with a working agent, not a "now run these commands" wall. Saying
+`@assistant hello` afterward is a confirmation, not the moment of truth.
+
 It's idempotent — re-run it any time to change a setting (an existing agent of
-the same name is updated in place, body preserved). Prefer to edit by hand? Open
+the same name is updated in place, body preserved), and a crash or Ctrl-C
+resumes where you left off instead of restarting. Prefer to edit by hand? Open
 `~/.calfcord/config/.env` directly (it's commented; the full list is in
 [`configuration.md`](configuration.md)):
 
@@ -54,100 +62,166 @@ the same name is updated in place, body preserved). Prefer to edit by hand? Open
 $EDITOR ~/.calfcord/config/.env
 ```
 
-### Enable ambient routing (optional)
+## How the workspace runs
 
-By default an agent answers only when you `@mention` it; messages **without** an
-`@mention` simply go unanswered (nothing errors). To have an agent also answer
-those ambient messages, run the optional router wizard:
+`init` leaves you with a running **workspace**: a local Kafka broker plus the
+Discord bridge, kept alive in the background by a process supervisor the
+installer bootstraps ([Process Compose](https://f1bonacc1.github.io/process-compose),
+a single static binary, downloaded to `~/.calfcord/bin/process-compose` — the
+same way the Tansu broker binary is). You never edit the supervisor's config;
+calfcord generates it from your agents and `.env`.
 
-```bash
-calfcord router setup
-```
+Two layers are worth keeping straight:
 
-It explains the router, defaults to **your agent's provider** plus a fast/cheap
-model (the router runs one LLM call per ambient message), ensures that provider's
-credentials, and saves the choice. Then start `calfcord run router` (step 3)
-alongside the other processes. Skip the wizard and `@mentions` still work. See
-[`ambient-routing.md`](ambient-routing.md) for how routing decides who answers.
+- **The substrate** — the broker and the bridge. This is the always-on office.
+  `calfcord start` brings it up (detached, health-gated); `calfcord stop` closes
+  it. `start` brings up **only** the substrate — nothing else runs that you
+  didn't ask for.
+- **The roster** — your agents, the tools host, the ambient router, and the MCP
+  host. These are teammates that clock into the running office on demand:
+  `calfcord agent start <name>`, `calfcord tools start`, and so on.
 
-### Pick a broker
+> **Reboot non-survival.** The workspace is session-scoped — it does **not**
+> come back automatically after a reboot. After restarting your machine, run
+> `calfcord start` again (then bring your agents back online). For a workspace
+> that survives reboots, register a launchd (macOS) or systemd (Linux) user unit
+> — `calfcord deploy systemd` generates a starting point (see
+> [Going to production](#going-to-production)).
 
-calfcord's processes talk to each other through a **Kafka broker**, so you need
-one running and must point calfcord at it.
+### The workspace runs the broker for you
 
-**Easy path — the native Tansu broker** (no Docker). The installer bootstraps a
-single Tansu binary to `~/.calfcord/bin/tansu`; `calfcord init` selects
-`CALF_HOST_URL=localhost:9092`. Start it in its own terminal:
-
-```bash
-calfcord broker
-```
+calfcord's processes talk to each other through a **Kafka broker**. You don't
+have to run one yourself: the installer bootstraps a single Tansu binary to
+`~/.calfcord/bin/tansu`, `calfcord init` selects `CALF_HOST_URL=localhost:9092`,
+and `calfcord start` launches the broker as part of the substrate. There is no
+separate "start the broker" step.
 
 Tansu's default storage is **ephemeral memory** — topics and messages reset when
 the broker restarts, and calfcord re-creates the topics it needs on startup. For
-persistence across restarts, start the broker with a libsql/SQLite or postgres
-store via the `STORAGE_ENGINE` env var (or `--storage-engine` flag); see
+persistence across restarts, configure the broker with a libsql/SQLite or
+postgres store via the `STORAGE_ENGINE` env var; see
 [Tansu's docs](https://docs.tansu.io/).
 
 **Bring your own / a shared broker.** Choose "I have a broker URL" in
-`calfcord init`, or set it later:
+`calfcord init`, or point an existing install at one later:
 
 ```bash
 calfcord self set-broker my-broker-host:9092
 ```
 
-Running agents across machines or environments uses **one shared broker URL** —
-install calfcord on each host and point them all at the same broker. See
+Running agents across machines uses **one shared broker URL** — install calfcord
+on each host and point them all at the same broker. See
 [`distributed-deployment.md`](distributed-deployment.md).
 
-## Where your agents live
+## 3. Day-to-day — start, status, logs
 
-The installer seeds a text-only starter agent at
-`~/.calfcord/agents/assistant.md`; `calfcord init` (step 2) writes or updates the
-agent there with the provider, model, and tools you chose. Your agents live in
-`~/.calfcord/agents/` and survive `calfcord self update`. To add or remove an
-agent's tools interactively, run `calfcord agent tools [<name>]`, then restart
-`calfcord run agent` (tools are loaded at agent boot). See
-[`authoring-agents.md`](authoring-agents.md) for the full field reference.
+`init` already opened your workspace once. From then on, these are the commands
+you live in:
 
-The tools process's workspace defaults to **the directory you launch
-`calfcord run tools` from** — agents read and write files there, the same
-way Claude Code works. Mind the trust implications before pointing it at
-sensitive files: [`security.md`](security.md#33-tools-native-broker--others-in-docker).
+```bash
+calfcord start              # open the workspace (broker + bridge), detached
+calfcord agent start <name> # bring an agent online (a teammate clocks in)
+calfcord status             # the org board: substrate + roster health
+calfcord logs -f            # tail the whole workspace (add a component to scope it)
+calfcord stop               # close the workspace (stops everything it manages)
+```
 
-## 3. Run
+The minimum path to a live agent is two honest commands — open the office, then
+bring a teammate in:
 
-First, sanity-check the install — `calfcord doctor` verifies the config file, broker
-reachability, the Discord bot token + application id, and that your agents parse (exit code is
-non-zero on a hard failure — a ✗ — and 0 on warnings, so it gates scripts cleanly):
+```bash
+calfcord start
+calfcord agent start assistant
+```
+
+`start` is substrate-only by design, so after a fresh `start` nothing replies
+until you bring an agent online; the success banner names that next step for you.
+
+Manage which agents exist and which are running with the `agent` group:
+
+```bash
+calfcord agent list          # agents DEFINED on disk (the .md files)
+calfcord agent ps            # agents RUNNING right now
+calfcord agent restart <name># reload a running agent after editing its .md
+calfcord agent stop <name>   # take an agent offline
+```
+
+`logs` reads the supervisor's per-component log files (which also live on disk at
+`~/.calfcord/state/logs/<name>.log`); pass a component name to scope the tail,
+e.g. `calfcord logs -f bridge`.
+
+### Sanity-check with `doctor`
+
+`calfcord doctor` is the deliberate, authoritative health check. It runs the
+**static config checks** — config file, broker reachability, the Discord bot
+token + application id, and that your agents parse — and, **when the workspace is
+running**, adds **runtime checks**: that the daemon is alive (not a zombie), that
+the bridge is connected to Discord, an end-to-end control-plane probe that
+confirms the broker and bridge actually function together, and a drift check
+(agents running vs. agents registered). The exit code is non-zero on a hard
+failure (a ✗) and 0 on warnings, so it gates scripts cleanly.
 
 ```bash
 calfcord doctor             # add --offline to skip the live Discord token check
 ```
 
-Then start each process with `calfcord run <svc>`:
+Reach for `doctor` when `status` looks green but nothing is replying — the deep
+probe is the only check that can see that case. `status` is the cheap, glanceable
+view; `doctor` is the thorough one.
+
+### Enable ambient routing (optional)
+
+By default an agent answers only when you `@mention` it; messages **without** an
+`@mention` simply go unanswered (nothing errors). To have an agent also answer
+those ambient messages, configure the router, then bring it online as a roster
+member:
 
 ```bash
-calfcord run bridge         # the Discord gateway
-calfcord run agent          # runs your agents
-calfcord run router         # routes un-mentioned messages
-calfcord run tools          # tools + the agent-to-agent channel
+calfcord router edit         # pick the router's provider + model
+calfcord router start        # bring the router online
 ```
 
-(`calfcord run <svc>` is the friendly form; the raw `calfcord calfkit-<svc>` names still work.
-`calfcord mcp <add|codegen>` and `calfcord auth` are likewise available; run `calfcord --help`
-for the full list.)
+`router edit` defaults to **your agent's provider** plus a fast/cheap model (the
+router runs one LLM call per ambient message) and ensures that provider's
+credentials. `router start` refuses to launch until the router is configured. The
+router's config is editable anytime — `calfcord router show` to inspect it,
+`calfcord router set` to change it non-interactively. Skip routing entirely and
+`@mentions` still work. See [`ambient-routing.md`](ambient-routing.md) for how
+routing decides who answers.
 
-On one machine you'll usually run all four. To spread them across machines,
-install calfcord on each, point them all at the **same** broker (step 2), and
-run only the processes that machine should handle — see
+## Where your agents live
+
+The installer seeds a text-only starter agent at
+`~/.calfcord/agents/assistant.md`; `calfcord init` writes or updates the agent
+there with the provider, model, and tools you chose. Your agents live in
+`~/.calfcord/agents/` and survive `calfcord self update`. To add or remove an
+agent's tools interactively, run `calfcord agent tools [<name>]`, then
+`calfcord agent restart <name>` (tools are loaded at agent boot). See
+[`authoring-agents.md`](authoring-agents.md) for the full field reference.
+
+The tools host's workspace defaults to **the directory you launch the workspace
+(`calfcord start`) from** — agents read and write files there, the same way
+Claude Code works. Mind the trust implications before pointing it at sensitive
+files: [`security.md`](security.md#33-tools-native-broker--others-in-docker).
+
+## Going to production
+
+Running the same agents across machines is a deployment change, not a rewrite:
+the same `.env`, the same `agents/*.md`, and the same commands work on one host
+or twenty. Install calfcord on each host, point them all at the **same** broker
+(`calfcord self set-broker`), and on each host `calfcord start` the substrate and
+`calfcord agent start` only the agents that host should run.
+
+When you're ready for managed deployment, `calfcord deploy` renders manifests you
+can hand to an init system or orchestrator:
+
+```bash
+calfcord deploy systemd -o calfcord.service   # or: k8s, docker
+```
+
+For the full picture, run `calfcord explain topology` (one screen on how the
+pieces split and why) and read
 [`distributed-deployment.md`](distributed-deployment.md).
-
-Then, in any channel the bot can see, say hello to the starter agent:
-
-```
-@assistant hello
-```
 
 ## 4. Keep it up to date
 

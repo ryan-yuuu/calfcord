@@ -36,9 +36,19 @@ Both commands persist data under `~/.calfcord/` on your host:
 
 The host CLI is the source of truth for both. Token rotation that happens later inside any container writes back through the bind mount to these same files, so the host CLI always sees the latest state.
 
-## Containerized agents
+## Bringing a Codex agent online
 
-The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent (and router) container, so once you've completed the host login above, `docker compose up agent` works:
+On a native install the host login above is all the auth a Codex-backed agent needs — it reads `~/.calfcord/auth/openai_oauth.json` directly. Bring the agent online the same way as any other teammate:
+
+```bash
+calfcord agent start codex_demo
+```
+
+If it reports `CodexNotLoggedInError`, the host hasn't been logged in yet — run `uv run calfkit-auth codex login` on the host, then retry.
+
+### Containerized agents
+
+The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent (and router) container, so once you've completed the host login above, `docker compose up agent` is the compose equivalent of `calfcord agent start`:
 
 ```yaml
 agent:
@@ -47,7 +57,7 @@ agent:
     - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
 ```
 
-If `docker compose up agent` reports `CodexNotLoggedInError`, it means the host hasn't been logged in yet — run `uv run calfkit-auth codex login` on the host, then retry.
+The same `CodexNotLoggedInError` means the same thing — log in on the host, then retry.
 
 ## Declaring a Codex-backed agent
 

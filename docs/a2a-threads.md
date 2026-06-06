@@ -31,6 +31,10 @@ conversation history). Only the **callee** receives injected history,
 and only on opt-in. This keeps A2A symmetric in cost (you only pay
 the history-fetch tokens when continuation is wanted).
 
+A2A is the out-of-band channel an agent reaches for when an ambient or
+`/task` conversation needs a peer's input; the router itself never fans
+out (see [`docs/ambient-routing.md`](./ambient-routing.md)).
+
 ## Architecture at a glance
 
 ```

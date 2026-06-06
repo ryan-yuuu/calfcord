@@ -1,5 +1,12 @@
 # End-user onboarding + interactive tool editor
 
+> **Superseded by [onboarding-redesign.md](./onboarding-redesign.md).** Retained for history.
+> The installer-first direction here was carried forward, but the runtime model
+> (substrate/roster split, Process Compose supervisor, an `init` that *ends live*)
+> replaced the run-the-processes-yourself flow this plan assumed. Specific
+> now-wrong decisions carry an inline "superseded" note below; the unique
+> findings/decision tables are preserved as-is for the reasoning record.
+
 > **Status:** in progress on `feat/end-user-onboarding` (PR 1 landed first).
 > **Baseline:** calfcord @ `eecc4e5`.
 > **Audience:** calfcord maintainers. Captures the decisions behind making the
@@ -47,6 +54,9 @@ validators, or provider plumbing are introduced.
 - A **native Tansu broker** (`calfcord broker`) as the recommended local broker
   now; broker auth (SASL/TLS) for hosted/serverless Kafka is a **deferred
   fast-follow**.
+  **Superseded — see [onboarding-redesign.md](./onboarding-redesign.md) §2/§4.6:**
+  the broker is now a supervised substrate process brought up by `calfcord start`;
+  `calfcord broker` survives only as an advanced/dev escape hatch.
 - Provider-agnostic starter named **`assistant`** (general-purpose), `tools: []`.
 - Agents + state **pinned** under `~/.calfcord/`; the tools **workspace follows
   the launch directory** (Claude Code model).
@@ -91,6 +101,13 @@ _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 Dev (`uv run`) and Docker never see the shim and keep their current defaults.
 
 ### `calfcord init` (config only; never seeds)
+
+> **Superseded — see [onboarding-redesign.md](./onboarding-redesign.md) §4.6.**
+> `init` is no longer config-only: it is one continuous, resumable guided session
+> that *ends live* — `start` (substrate) → `agent start assistant` → wait for the
+> first real reply. The step-5 "Next → start broker · run the 4 processes ·
+> @assistant hello" funnel below is the old run-it-yourself flow and is retained
+> only for history.
 
 Writes `~/.calfcord/config/.env` (dev: `./.env`), idempotent, secrets masked,
 `chmod 600`. Seeding the starter is the installer's job — `init` only *detects

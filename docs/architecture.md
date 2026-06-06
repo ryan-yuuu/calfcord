@@ -1,9 +1,15 @@
 # Architecture
 
-Calfcord is four independent processes that communicate **exclusively through
-Kafka**. Each is safe to deploy on its own host, and switching between
-deployment styles (all-in-Docker, all-native, or a mix) needs no code changes —
-they share the same `.env` and `agents/*.md`.
+Calfcord is a set of independent processes that communicate **exclusively
+through Kafka**. Each is safe to deploy on its own host, and switching between
+deployment styles (supervised native, all-in-Docker, or a mix) needs no code
+changes — they share the same `.env` and `agents/*.md`.
+
+Two layers sit on top of those processes — a **substrate** that is always on and
+a **roster** of teammates that clock in and out. The
+[runtime model](#runtime-model-substrate--roster) below is how you operate them;
+the process list and decoupling invariants that follow are what is actually
+running underneath.
 
 ## The four processes
 
@@ -18,8 +24,9 @@ they share the same `.env` and `agents/*.md`.
   any) should handle a non-`@`-mentioned message in a watched channel. It is
   **optional** — without it, `@mention` and slash messages still route directly
   to agents and only ambient messages go unanswered. Configure it with
-  `calfcord router setup` (which sets `CALFKIT_ROUTER_PROVIDER` /
-  `CALFKIT_ROUTER_MODEL`). See [`ambient-routing.md`](./ambient-routing.md).
+  `calfcord router edit` (which sets `CALFKIT_ROUTER_PROVIDER` /
+  `CALFKIT_ROUTER_MODEL`), then bring it online with `calfcord router start`.
+  See [`ambient-routing.md`](./ambient-routing.md).
 - **`calfkit-tools`** — runs the A2A `private_chat` tool plus the built-in
   filesystem / shell / search / web / todo tools. Intentionally decoupled from
   the bridge (see below).
@@ -67,25 +74,132 @@ For splitting tools and agents across multiple hosts (slim per-tool images via
 `calfcord-package-tools`, the multi-host `--rename` pattern, and broker
 auth/TLS), see [`distributed-deployment.md`](./distributed-deployment.md).
 
+## Runtime model: substrate + roster
+
+The processes above are the *what*; this is the *how you run them*. Calfcord
+splits the running system into two layers so the always-on plumbing is separate
+from the teammates you stand up on demand:
+
+- **Substrate** — the **broker** (Kafka / Tansu) and the **bridge**. This is the
+  office: the message bus plus the single Discord gateway. `calfcord start`
+  brings up *only* the substrate, detached and **health-gated** — it does not
+  return until the bridge reports it is connected to Discord (the bridge writes
+  its first heartbeat on Discord `on_ready`, so "substrate healthy" *means*
+  "connected to Discord"). The broker is a fast-fail precondition; the bridge
+  readiness is what the gate waits on.
+- **Roster** — the **agents**, **tools**, **router**, and **mcp** hosts. These
+  are the teammates that clock into the live office. `start` deliberately does
+  **not** auto-start any roster member — "nothing runs that you didn't start" is
+  a trust property — so you bring each one online explicitly: `calfcord agent
+  start <name>`, `calfcord router start`, `calfcord tools start`, `calfcord mcp
+  start` (and the matching `stop`). `calfcord agent restart <name>` reloads a
+  running agent after you edit its `.md`.
+
+> **There are effectively five process types, not four.** The `mcp` host is a
+> roster member alongside agents, tools, and router. It is called out separately
+> from the [four processes](#the-four-processes) above because it holds MCP
+> transport config and secrets and is bridge-adjacent; see
+> [`mcp-tools.md`](./mcp-tools.md).
+
+The minimum path to a live agent is two honest commands — open the office, then
+clock a teammate in:
+
+```bash
+calfcord start                  # substrate only (broker + bridge), health-gated
+calfcord agent start assistant  # roster: a teammate joins the live org → replies in Discord
+```
+
+`calfcord init` runs this whole sequence for a newcomer, walking both layers
+visibly so the substrate↔roster split is learned by doing it. After that,
+`calfcord status` is the org board (substrate health + which roster members are
+online), `calfcord agent ps` shows what is *running* now (vs. `agent list`, which
+shows what is *defined* on disk), and `calfcord logs [component] [-f]` tails the
+unified or per-component logs.
+
+### Process Compose supervises one host
+
+On a single host the substrate and roster are managed by
+**[Process Compose](https://f1bonacc1.github.io/process-compose)**, a
+cross-platform single-binary supervisor that calfcord bootstraps the same way it
+bootstraps the Tansu broker (a pinned binary under `$CALFCORD_HOME/bin`, kept out
+of the agent Python path). The supervisor configuration is **derived state**:
+calfcord generates `$CALFCORD_HOME/state/process-compose.yaml` from your
+`agents/*.md` and config — you never hand-edit it. The CLI verbs are a thin
+veneer over the supervisor's REST API.
+
+This is where the layer split becomes mechanical. In the generated config the
+substrate (broker, bridge) is declared `autostart`, while every defined agent,
+plus tools, router, and mcp, is declared but **disabled** — present but not
+started until you run its `start`. The supervisor absorbs the lifecycle work
+calfcord would otherwise hand-roll:
+
+- **Dependency ordering and health gates** — `depends_on` keeps the bridge from
+  starting until the broker is healthy, and keeps roster members waiting on the
+  substrate. Both the dependency gates and the `start` readiness poll are driven
+  by the *same* signal: an exec readiness probe that runs
+  `calfcord _healthcheck <component>` against the per-component heartbeat files
+  under `$CALFCORD_HOME/state/health/`.
+- **Autorestart** — the bridge and agents exit 0 on a clean return, so they use
+  `restart: always`; tools, router, and mcp run on the
+  [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper that
+  forces a non-zero exit on a clean, signal-less return, so they use
+  `restart: on_failure`. An intentional `stop` does not trigger a restart.
+- **Per-process log capture** — each component's stdout/stderr lands at
+  `$CALFCORD_HOME/state/logs/<component>.log` (what `calfcord logs` tails).
+
+### The same commands graduate to distributed
+
+The substrate/roster model is host-agnostic. The substrate just needs to be
+reachable over a broker URL, so graduating from one host to many does not change
+the commands — it changes *where the broker is*. Point a second host's
+`CALF_HOST_URL` at the shared substrate (`calfcord self set-broker <url>`) and
+the same `calfcord agent start <name>` / `calfcord tools start` clock a teammate
+into the *same* live org from a different machine. Idempotency is enforced
+org-wide over the broker, not per host: `agent start` first probes the live
+`agent.state` roster across the broker, so it will not start a duplicate of an
+agent that is already running anywhere in the organization.
+
+For the multi-host walkthrough (per-host broker config, slim per-role images, and
+broker auth/TLS) see
+[`distributed-deployment.md`](./distributed-deployment.md).
+
 ## Running modes
 
-The primary end-user path is the **native installer**: `curl … | bash` drops a
-`calfcord` shim under `~/.calfcord/`, then `calfcord init` walks you through
-first-run config (provider, Discord, broker). On a native install the agent and
-state directories are pinned under the install home — `CALFKIT_AGENTS_DIR` →
-`~/.calfcord/agents` (your `.md` files survive `calfcord self update`) and
-`CALFKIT_STATE_DIR` → `~/.calfcord/state/agents` — while the tools
-**workspace follows the launch directory** (`CALFCORD_WORKSPACE_DIR` → the
-`$PWD` of `calfcord run tools`, the Claude-Code model). See the
-[README quick start](../README.md#quick-start) and
-[`installation.md`](./installation.md) for the full walkthrough, and
+The same processes can run three ways, all sharing one `.env` and `agents/*.md`.
+Pick by intent — operating an install, hacking on the source, or containerizing.
+
+### 1. Supervised native (primary)
+
+The end-user path. The native installer (`curl … | bash`) drops a `calfcord`
+shim under `~/.calfcord/`; `calfcord init` walks you through first-run config and
+ends with your first agent online. From then on you operate the
+[substrate and roster](#runtime-model-substrate--roster) through the shim, and
+**Process Compose supervises everything on the host** — health-gated startup,
+dependency ordering, autorestart, and per-component logs, no terminal-juggling:
+
+```bash
+calfcord start                  # substrate (broker + bridge), detached, health-gated
+calfcord agent start assistant  # roster: clock a teammate in → replies in Discord
+calfcord status                 # org board: substrate + roster health
+calfcord logs -f                # follow the unified supervisor log
+calfcord stop                   # close the office (stops the supervised substrate)
+```
+
+On a native install the agent and state directories are pinned under the install
+home so they survive `calfcord self update` and are found from any directory —
+`CALFKIT_AGENTS_DIR` → `~/.calfcord/agents`, `CALFKIT_STATE_DIR` →
+`~/.calfcord/state/agents` — while the tools **workspace follows the launch
+directory** (`CALFCORD_WORKSPACE_DIR` defaults to the `$PWD` where the substrate
+was launched, the Claude-Code model — agents act where you opened the office).
+See the [README quick start](../README.md#quick-start) and
+[`installation.md`](./installation.md) for the walkthrough, and
 [`configuration.md`](./configuration.md) for overriding any of those dirs.
 
-Three modes work with the same `.env` and `agents/*.md`. The bare `uv run` and
-Docker Compose paths below never see the shim and keep their CWD-relative
-defaults (`agents/`, `state/agents/`, `state/workspace/`):
+### 2. Low-level `uv run` (development)
 
-### Native (no Docker for calfcord)
+For working *on* calfcord, you can run each process in the foreground yourself,
+bypassing the shim and the supervisor. This is the dev/debug path; it keeps the
+CWD-relative defaults (`agents/`, `state/agents/`, `state/workspace/`):
 
 ```bash
 uv sync                                              # install dependencies
@@ -94,7 +208,7 @@ calfcord broker                                      # native Tansu broker — o
 # Add to .env so every uv-run terminal picks it up automatically:
 echo 'CALF_HOST_URL=localhost:9092' >> .env
 
-# Each in its own terminal (or process supervisor):
+# Each in its own terminal:
 uv run calfkit-bridge
 uv run calfkit-agent                                 # all agents on one Worker
 # or for crash isolation per agent:
@@ -110,16 +224,29 @@ broker restart and calfcord re-creates the topics it needs on startup. Writing
 the value to `.env` rather than `export`ing it means every `uv run` terminal
 picks it up via `python-dotenv` without a per-shell re-export.
 
-### Mixing modes
+> The `calfcord broker` and `calfcord run <bridge|agent|router|tools|mcp>` shim
+> verbs are the same low-level escape hatches surfaced for when you want one
+> process in the foreground without the supervisor. The supervised native path
+> above is what most installs use.
 
-Anything in between works too: run the bridge in compose while you iterate on the
-agent locally, or the reverse. Each process reads `.env` independently, and a
-shared Kafka broker is the only wire-format contract between them. Native-side
-processes still need `CALF_HOST_URL=localhost:9092` in `.env`; containerized
+### 3. Docker (advanced)
+
+The bundled `docker-compose.yml` runs the broker and each process as a service,
+which is the right tier when you want containerized isolation or a reproducible
+image build. Each process reads `.env` independently, and a shared Kafka broker
+is the only wire-format contract between them, so modes also **mix**: run the
+bridge in compose while you iterate on an agent natively, or the reverse.
+Native-side processes need `CALF_HOST_URL=localhost:9092` in `.env`; containerized
 services pick up `tansu:9092` from compose's per-service environment block. (To
 run only the broker in Docker but the calfcord processes natively on the host,
 advertise the host address: `TANSU_ADVERTISE=localhost docker compose up tansu`,
 then point the native processes at `localhost:9092`.)
+
+For unattended production hosts, `calfcord deploy <systemd|k8s|docker>` renders
+the matching manifests (a systemd unit, Kubernetes resources, or a Docker
+artifact) from your current config and agents, so you can hand the supervised
+model off to the host's own init system or an orchestrator. See
+[`distributed-deployment.md`](./distributed-deployment.md).
 
 ### Worker lifecycle
 

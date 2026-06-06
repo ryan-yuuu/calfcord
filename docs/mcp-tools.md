@@ -372,12 +372,14 @@ isolation guarantee from §3.
    with its command/url plus `$VAR` secret references (§5). The bridge
    attaches `MCP_CATALOG["<server>"]` automatically.
 3. **Reference it from an agent** by adding `mcp/<server>` or
-   `mcp/<server>/<tool>` to that agent's `tools:` list (§2). Restart
-   `calfkit-bridge` and `calfkit-agent` so the agent registry re-reads the
-   `.md`.
-4. **Deploy the `calfkit-mcp` bridge** (or restart it if already running)
-   with the server's `$VAR` secrets and, for stdio servers, a Node runtime
-   in its environment (§6).
+   `mcp/<server>/<tool>` to that agent's `tools:` list (§2). Apply it with
+   `calfcord agent restart <name>` so the agent re-reads the `.md` (a
+   brand-new agent also needs a bridge bounce — `calfcord stop && calfcord
+   start` — to register its `/<name>` slash command).
+4. **Bring the MCP host up** with `calfcord mcp start` (or `calfcord mcp
+   stop && calfcord mcp start` to restart an already-running one) with the
+   server's `$VAR` secrets and, for stdio servers, a Node runtime in its
+   environment (§6).
 
 Steps 1–2 are a single reviewed commit; step 3 is an agent edit; step 4 is
 an ops action. The agent edit and the bridge deploy are independent — an
@@ -411,7 +413,10 @@ Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.
   expected forms. Fix: use exactly one or two segments after `mcp/`.
 - **An MCP tool call hangs and never returns.** The agent advertised the
   schema (so the call published to `mcp.<server>.<tool>.input`) but no
-  bridge is serving that topic. Fix: deploy/restart `calfkit-mcp` (§6).
+  bridge is serving that topic. Fix: bring the MCP host up with `calfcord
+  mcp start` (or `calfcord mcp stop && calfcord mcp start` to restart it),
+  §6. The `calfcord-mcp` process is the `calfkit-mcp` bridge under the
+  hood.
   This is the expected behavior when the schema is committed but the bridge
   isn't up — the agent half intentionally has no way to know the bridge is
   missing.
