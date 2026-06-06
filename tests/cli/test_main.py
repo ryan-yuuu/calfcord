@@ -13,7 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, doctor, init, router_setup
+from calfcord.cli import (
+    agent_create,
+    agent_edit,
+    agent_inspect,
+    agent_lifecycle,
+    doctor,
+    init,
+    router_config,
+)
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
 from calfcord.supervisor import lifecycle, roster
@@ -56,7 +64,9 @@ def test_main_router_setup_dispatches_with_resolved_env_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # The shim exports CALFCORD_HOME; main must resolve the install's config/.env
-    # via init.resolve_paths and hand exactly that path to router_setup.run.
+    # via init.resolve_paths and hand exactly that path to the ONE wizard. After
+    # the DRY reconciliation `router setup` is a deprecated alias of `router edit`,
+    # so it dispatches to router_config.edit — there is no second wizard module.
     home = tmp_path / "home"
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
@@ -67,7 +77,7 @@ def test_main_router_setup_dispatches_with_resolved_env_path(
         captured["env_path"] = env_path
         return 0
 
-    monkeypatch.setattr(router_setup, "run", _sentinel)
+    monkeypatch.setattr(router_config, "edit", _sentinel)
 
     assert main(["router", "setup"]) == 0
     assert captured["env_path"] == home / "config" / ".env"
@@ -277,14 +287,15 @@ def test_main_doctor_help_exits_zero() -> None:
 
 
 def test_main_doctor_dispatches_with_resolved_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # The shim exports CALFCORD_HOME; doctor must run against the install's config/.env + agents/.
+    # The shim exports CALFCORD_HOME; doctor must run against the install's config/.env + agents/,
+    # and (phase 4) the install home must be threaded through so the runtime section activates.
     home = tmp_path / "home"
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
     captured: dict[str, object] = {}
 
-    def _run(*, env_path: Path, agents_dir: Path, offline: bool = False, client_factory: object = None) -> int:
-        captured.update(env_path=env_path, agents_dir=agents_dir, offline=offline)
+    def _run(*, env_path: Path, agents_dir: Path, offline: bool = False, home: object = None, **kwargs: object) -> int:
+        captured.update(env_path=env_path, agents_dir=agents_dir, offline=offline, home=home)
         return 0
 
     monkeypatch.setattr(doctor, "run", _run)
@@ -292,6 +303,39 @@ def test_main_doctor_dispatches_with_resolved_paths(monkeypatch: pytest.MonkeyPa
     assert captured["env_path"] == home / "config" / ".env"
     assert captured["agents_dir"] == home / "agents"
     assert captured["offline"] is True
+    # The resolved install home is passed so doctor's runtime daemon-health section runs.
+    assert captured["home"] == home
+
+
+def test_main_doctor_passes_none_home_in_dev_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A dev run (no CALFCORD_HOME) has no install heartbeats; doctor must receive
+    # home=None so the runtime section is correctly skipped (not a half-built probe).
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    monkeypatch.setenv("CALFKIT_AGENTS_DIR", str(tmp_path / "agents"))
+    captured: dict[str, object] = {}
+
+    def _run(*, env_path: Path, agents_dir: Path, offline: bool = False, home: object = None, **kwargs: object) -> int:
+        captured.update(home=home)
+        return 0
+
+    monkeypatch.setattr(doctor, "run", _run)
+    assert main(["doctor"]) == 0
+    assert captured["home"] is None
+
+
+def test_main_doctor_fix_flag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `--fix` is DEFERRED (no auto-repair plumbing in doctor.run), so the flag was
+    # removed rather than advertised in --help while doing nothing. An unrecognized
+    # flag must make argparse error (exit 2), never silently accept-and-no-op.
+    def _boom(**kwargs: object) -> int:
+        raise AssertionError("doctor.run must not run for an unrecognized flag")
+
+    monkeypatch.setattr(doctor, "run", _boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["doctor", "--fix"])
+    assert exc.value.code == 2
 
 
 # --- _healthcheck: hidden readiness-probe subcommand -----------------------
@@ -831,3 +875,266 @@ def test_main_agent_list_and_ps_are_distinct(
     monkeypatch.setattr(agent_inspect, "run_list", _run_list)
     monkeypatch.setattr(roster, "agent_ps", _ps_boom)
     assert main(["agent", "list"]) == 0
+
+
+# --- router config + lifecycle: show / set / edit / start / stop ------------
+
+
+@pytest.mark.parametrize("verb", ["show", "set", "edit", "start", "stop"])
+def test_main_router_subcommand_help_exits_zero(verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["router", verb, "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_router_show_dispatches_with_resolved_env_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router show` resolves the install's config/.env via init.resolve_paths and
+    # hands exactly that path to router_config.show, propagating its exit code.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _show(*, env_path: Path) -> int:
+        captured["env_path"] = env_path
+        return 0
+
+    monkeypatch.setattr(router_config, "show", _show)
+    assert main(["router", "show"]) == 0
+    assert captured["env_path"] == home / "config" / ".env"
+
+
+def test_main_router_set_dispatches_provider_and_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router set --provider P --model M` resolves env_path and forwards both flags
+    # verbatim (validation lives in router_config.set_config, not the CLI wiring).
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _set(*, env_path: Path, provider: str | None, model: str | None) -> int:
+        captured.update(env_path=env_path, provider=provider, model=model)
+        return 0
+
+    monkeypatch.setattr(router_config, "set_config", _set)
+    assert main(["router", "set", "--provider", "openai", "--model", "gpt-5-nano"]) == 0
+    assert captured == {
+        "env_path": home / "config" / ".env",
+        "provider": "openai",
+        "model": "gpt-5-nano",
+    }
+
+
+def test_main_router_set_defaults_unset_flags_to_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Omitted --provider / --model arrive as None so a partial set is honoured
+    # downstream (set_config writes only the flag(s) given).
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _set(*, env_path: Path, provider: str | None, model: str | None) -> int:
+        captured.update(provider=provider, model=model)
+        return 0
+
+    monkeypatch.setattr(router_config, "set_config", _set)
+    assert main(["router", "set", "--model", "gpt-5-nano"]) == 0
+    assert captured == {"provider": None, "model": "gpt-5-nano"}
+
+
+def test_main_router_set_propagates_validation_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    def _set(*, env_path: Path, provider: str | None, model: str | None) -> int:
+        return 1
+
+    monkeypatch.setattr(router_config, "set_config", _set)
+    assert main(["router", "set", "--provider", "nope"]) == 1
+
+
+def test_main_router_edit_dispatches_with_prompter_and_env_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router edit` is the interactive wizard: it gets a prompter + resolved env_path.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _edit(prompter: object, *, env_path: Path) -> int:
+        captured.update(env_path=env_path, has_prompter=prompter is not None)
+        return 0
+
+    monkeypatch.setattr(router_config, "edit", _edit)
+    assert main(["router", "edit"]) == 0
+    assert captured["env_path"] == home / "config" / ".env"
+    assert captured["has_prompter"] is True
+
+
+def test_main_router_start_dispatches_with_home_and_env_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router start` is async and needs BOTH the install home (for pc_port_for, the
+    # supervisor REST port — same home agent start/stop pass) AND env_path (for the
+    # fail-fast unconfigured check). It must NOT consult CALF_HOST_URL (component
+    # lifecycle does not probe the broker). Exit code is propagated unchanged.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, env_path, **kwargs):
+        captured.update(home=home_arg, env_path=env_path)
+        return 0
+
+    monkeypatch.setattr(router_config, "router_start", _start)
+    assert main(["router", "start"]) == 0
+    # The home is the $CALFCORD_HOME dir itself (what pc_port_for keys on), exactly
+    # as the agent roster / substrate lifecycle pass it — NOT env_path's parent.
+    assert captured["home"] == home
+    assert captured["env_path"] == home / "config" / ".env"
+
+
+def test_main_router_start_propagates_unconfigured_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _start(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(router_config, "router_start", _start)
+    assert main(["router", "start"]) == 1
+
+
+def test_main_router_stop_dispatches_with_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router stop` is async and needs only the install home (for the supervisor
+    # REST port); no env_path config check, no broker probe.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _stop(home_arg, **kwargs):
+        captured["home"] = home_arg
+        return 0
+
+    monkeypatch.setattr(router_config, "router_stop", _stop)
+    assert main(["router", "stop"]) == 0
+    assert captured["home"] == home
+
+
+def test_main_router_stop_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _stop(*args, **kwargs):
+        return 3
+
+    monkeypatch.setattr(router_config, "router_stop", _stop)
+    assert main(["router", "stop"]) == 3
+
+
+def test_main_router_start_and_stop_pass_the_same_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # pc_port_for keys on the home dir, so start and stop MUST pass the identical
+    # home value (the $CALFCORD_HOME root) or they'd talk to different REST ports.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    seen: dict[str, object] = {}
+
+    async def _start(home_arg, *, env_path, **kwargs):
+        seen["start_home"] = home_arg
+        return 0
+
+    async def _stop(home_arg, **kwargs):
+        seen["stop_home"] = home_arg
+        return 0
+
+    monkeypatch.setattr(router_config, "router_start", _start)
+    monkeypatch.setattr(router_config, "router_stop", _stop)
+    assert main(["router", "start"]) == 0
+    assert main(["router", "stop"]) == 0
+    assert seen["start_home"] == seen["stop_home"] == home
+
+
+@pytest.mark.parametrize("verb", ["start", "stop"])
+def test_main_router_lifecycle_without_home_errors_native_install(
+    verb: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Router lifecycle drives the install-scoped supervisor (port derived from
+    # $CALFCORD_HOME), so a dev run with no home must refuse with a clear message
+    # rather than crash inside os.fspath(None) — mirroring agent/substrate lifecycle.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("router lifecycle must not run without a home")
+
+    monkeypatch.setattr(router_config, "router_start", _boom)
+    monkeypatch.setattr(router_config, "router_stop", _boom)
+    assert main(["router", verb]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("verb", ["show", "edit"])
+def test_main_router_config_works_without_home_in_dev_mode(
+    verb: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Config verbs use env_path (dev: ./.env), not the supervisor home, so they
+    # must still work in dev mode — the native-install guard gates lifecycle only.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _show(*, env_path: Path) -> int:
+        captured["env_path"] = env_path
+        return 0
+
+    def _edit(prompter: object, *, env_path: Path) -> int:
+        captured["env_path"] = env_path
+        return 0
+
+    monkeypatch.setattr(router_config, "show", _show)
+    monkeypatch.setattr(router_config, "edit", _edit)
+    assert main(["router", verb]) == 0
+    assert captured["env_path"] == Path(".env")
+
+
+def test_main_router_setup_still_dispatches_back_compat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `router setup` is kept as a DEPRECATED alias of the editable wizard; after the
+    # DRY reconciliation there is ONE wizard (router_config.edit), so `setup` must
+    # dispatch to it (not to a removed router_setup.run) and print a deprecation
+    # note steering the operator at `router edit`.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _sentinel(prompter: object, *, env_path: Path) -> int:
+        captured["env_path"] = env_path
+        return 0
+
+    monkeypatch.setattr(router_config, "edit", _sentinel)
+    assert main(["router", "setup"]) == 0
+    assert captured["env_path"] == home / "config" / ".env"
+    out = capsys.readouterr().out.lower()
+    assert "deprecated" in out
+    assert "router edit" in out

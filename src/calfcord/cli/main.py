@@ -26,7 +26,7 @@ from calfcord.cli import (
     agent_tools,
     doctor,
     init,
-    router_setup,
+    router_config,
 )
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
@@ -52,6 +52,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the live Discord token check (no network).",
     )
+    # doctor is intentionally read-only. ``--fix`` (safe auto-repairs: free-port
+    # selection, missing dirs) is DEFERRED out of this phase (design §4.4), so the
+    # flag is NOT registered — advertising it in --help while doctor.run can't act
+    # on it would be a no-op that lies. Re-add it together with the auto-repair
+    # plumbing in doctor.run.
 
     # ``agent`` is a verb group, not a leaf: ``required=True`` on its
     # sub-parsers makes a bare ``calfcord agent`` print help + exit non-zero
@@ -107,10 +112,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ``router`` mirrors ``agent``: a verb group, not a leaf. ``required=True``
     # makes a bare ``calfcord router`` print help + exit non-zero so the group
-    # can grow further commands later.
+    # can grow further commands later. The router holds an LLM connection like an
+    # agent, so it gets a first-class, *editable* config surface (show/set/edit)
+    # rather than a one-shot wizard, plus its own roster lifecycle (start/stop).
     router_p = sub.add_parser("router", help="Manage the ambient-message router.")
     router_sub = router_p.add_subparsers(dest="router_command", required=True)
-    router_sub.add_parser("setup", help="Configure the OPTIONAL ambient router (provider, model).")
+    router_sub.add_parser("show", help="Show the router's configured provider/model.")
+    router_set_p = router_sub.add_parser("set", help="Set the router's LLM provider/model.")
+    router_set_p.add_argument("--provider")  # validated in router_config.set_config against the Provider literal
+    router_set_p.add_argument("--model")
+    router_sub.add_parser("edit", help="Configure the OPTIONAL ambient router interactively (provider, model).")
+    router_sub.add_parser("start", help="Bring the router online (needs config).")
+    router_sub.add_parser("stop", help="Take the router offline.")
+    # ``setup`` is the pre-redesign wizard, now SUPERSEDED by ``edit``. Kept as a
+    # back-compat alias so existing muscle memory / docs / scripts keep working;
+    # it dispatches to the same one-shot ambient-router wizard it always has.
+    router_sub.add_parser("setup", help="Deprecated alias of `router edit`.")
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
     # bridge) up detached, close it, and glance at the org board. These are thin
@@ -347,6 +364,57 @@ def _run_lifecycle(command: str) -> int:
     )
 
 
+def _run_router(args: argparse.Namespace) -> int:
+    """Dispatch a ``calfcord router <verb>`` command (design §4.3 / §12.0).
+
+    The router holds an LLM connection like an agent, so it has a first-class,
+    editable *config* surface (``show`` / ``set`` / ``edit``) plus its own roster
+    *lifecycle* (``start`` / ``stop``). The two halves resolve different seams:
+
+    * **Config** verbs only need ``env_path`` — they read/write the two
+      ``CALFKIT_ROUTER_*`` vars in the same ``config/.env`` (dev: ``./.env``) the
+      runner reads, so a change is picked up on the router's next (re)start.
+    * **Lifecycle** verbs are async and drive the *install-scoped* Process Compose
+      supervisor, whose REST port is derived from the ``$CALFCORD_HOME`` dir (via
+      :func:`~calfcord.supervisor.lifecycle.pc_port_for`). So they pass that home
+      dir itself — the SAME value ``agent start/stop`` and the substrate lifecycle
+      pass — never ``env_path``'s parent, or the port would disagree. ``start``
+      additionally needs ``env_path`` for its fail-fast unconfigured precondition.
+      No broker URL is consulted: component lifecycle does not probe the broker.
+
+    Each handler's exit code is propagated unchanged.
+    """
+    env_path, _ = init.resolve_paths(_resolve_home())
+
+    if args.router_command == "show":
+        return router_config.show(env_path=env_path)
+    if args.router_command == "set":
+        return router_config.set_config(env_path=env_path, provider=args.provider, model=args.model)
+    if args.router_command in ("edit", "setup"):
+        if args.router_command == "setup":
+            # ``setup`` is a deprecated alias kept only for muscle memory / old
+            # docs; there is now ONE wizard. Steer the operator at the new verb,
+            # then dispatch to the SAME implementation so the two can never drift.
+            print("note: `router setup` is deprecated; use `router edit`.")
+        return router_config.edit(make_prompter(), env_path=env_path)
+
+    # Lifecycle (async): the home dir is the supervisor key, identical to what
+    # agent start/stop and the substrate lifecycle pass, so pc_port_for agrees. A
+    # dev run (no CALFCORD_HOME) has no stable home for the supervisor, so these
+    # verbs refuse with the same actionable native-install message every other
+    # lifecycle surface uses — rather than crashing in os.fspath(None) downstream.
+    home = _resolve_home()
+    if home is None:
+        print(
+            f"error: `calfcord router {args.router_command}` needs a native install — set "
+            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
+        )
+        return 1
+    if args.router_command == "start":
+        return asyncio.run(router_config.router_start(home, env_path=env_path))
+    return asyncio.run(router_config.router_stop(home))
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command in ("start", "stop", "status"):
@@ -357,9 +425,14 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return init.run(make_prompter(), env_path=env_path, agents_dir=agents_dir)
 
     if args.command == "doctor":
-        # Preflight the same config/.env + agents/ the runners load.
+        # Preflight the same config/.env + agents/ the runners load. Passing the
+        # resolved install ``home`` (None in dev mode) activates doctor's runtime
+        # daemon-health section when the workspace is open; it stays correctly
+        # skipped on a dev run with no install heartbeats to read.
         env_path, agents_dir = init.resolve_paths(_resolve_home())
-        return doctor.run(env_path=env_path, agents_dir=agents_dir, offline=args.offline)
+        return doctor.run(
+            env_path=env_path, agents_dir=agents_dir, offline=args.offline, home=_resolve_home()
+        )
 
     if args.command == "agent":
         return _run_agent(args)
@@ -367,11 +440,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "_healthcheck":
         return _run_healthcheck(args.component)
 
-    if args.command == "router" and args.router_command == "setup":
-        # Reuse init's path resolution so the router wizard writes the same
-        # config/.env the runners load (native: $H/config/.env; dev: ./.env).
-        env_path, _ = init.resolve_paths(_resolve_home())
-        return router_setup.run(make_prompter(), env_path=env_path)
+    if args.command == "router":
+        return _run_router(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits
