@@ -10,8 +10,11 @@ matching, so a formatting change never breaks them while a contract change
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -248,4 +251,40 @@ def test_compose_does_not_import_mcp_config() -> None:
     assert "ISOLATION_OK" in result.stdout, (
         "isolation subprocess exited 0 but did not run to completion "
         f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+# The golden tests above pin the *structure* against our reading of the §13.2
+# contract; this gated lane is the complement that catches the failure they
+# can't — a project that parses fine as a dict but the REAL ``process-compose``
+# binary rejects (an unknown field, a wrong type, a schema-version drift). It
+# writes ``render_compose`` to a tmpfile and runs ``process-compose up
+# --dry-run`` ("validate the config and exit"), asserting exit 0. Gated behind
+# ``CALF_TEST_PC`` with the binary on PATH — mirrors the ``test_pc_client.py``
+# real-binary lane — so it skips cleanly on a host without the binary and never
+# blocks the unit suite::
+#
+#     CALF_TEST_PC=1 PATH="$HOME/.calfcord/bin:$PATH" \
+#         uv run pytest tests/supervisor/test_compose.py
+_PC_GATE = pytest.mark.skipif(
+    not os.getenv("CALF_TEST_PC") or shutil.which("process-compose") is None,
+    reason="set CALF_TEST_PC=1 with `process-compose` on PATH to validate against the real binary",
+)
+
+
+@_PC_GATE
+def test_rendered_compose_validates_against_the_real_binary(tmp_path: Path) -> None:
+    project = tmp_path / "process-compose.yaml"
+    project.write_text(
+        render_compose(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER)
+    )
+    result = subprocess.run(
+        ["process-compose", "up", "--dry-run", "-f", str(project)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "process-compose rejected the generated project "
+        f"(exit={result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
