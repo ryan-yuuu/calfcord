@@ -335,15 +335,37 @@ def test_postable_channels_filters_visible_but_not_postable():
 
 
 def test_postable_channels_channel_overwrite_denies_post():
-    # Base perms allow posting, but a channel @everyone overwrite denies Send Messages -> unpostable.
+    # Base perms allow posting (incl. View), but a channel @everyone overwrite denies Send Messages
+    # -> unpostable. View is granted so the denied Send bit is the operative reason, not missing View.
     handler = _routes_for_channels(
-        guild=_guild(permissions=str(POSTABLE)),
+        guild=_guild(permissions=str(POSTABLE | VIEW_CHANNEL)),
         member=_member(),
         channels=_channels(
             _text_channel(
                 "c1",
                 "locked",
                 overwrites=[_overwrite(GUILD_ID, 0, deny=SEND_MESSAGES)],
+            )
+        ),
+    )
+    listing = dd.list_postable_channels(TOKEN, GUILD_ID, client_factory=_factory(handler))
+    assert listing.postable == []
+    assert [c.id for c in listing.unpostable] == ["c1"]
+
+
+def test_postable_channels_channel_overwrite_denies_view_only():
+    # A channel that grants Send + Manage Webhooks but an @everyone overwrite denies ONLY View
+    # Channel: without View the bot literally cannot see (and so cannot reply in) the channel, so it
+    # must be unpostable. Guards against treating Send|Manage as sufficient while ignoring View — a
+    # green light that lies (the wizard would offer a channel the bot can never reply in).
+    handler = _routes_for_channels(
+        guild=_guild(permissions=str(POSTABLE | VIEW_CHANNEL)),
+        member=_member(),
+        channels=_channels(
+            _text_channel(
+                "c1",
+                "hidden",
+                overwrites=[_overwrite(GUILD_ID, 0, deny=VIEW_CHANNEL)],
             )
         ),
     )
@@ -418,7 +440,7 @@ def test_postable_channels_administrator_short_circuits_to_all():
 def test_postable_channels_excludes_non_text_channels():
     # Voice (2) / category (4) channels are not message targets; only text (0) is considered.
     handler = _routes_for_channels(
-        guild=_guild(permissions=str(POSTABLE)),
+        guild=_guild(permissions=str(POSTABLE | VIEW_CHANNEL)),
         member=_member(),
         channels=httpx.Response(
             200,

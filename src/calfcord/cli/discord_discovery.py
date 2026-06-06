@@ -48,9 +48,12 @@ _SEND_MESSAGES = 1 << 11
 _ADMINISTRATOR = 1 << 3
 _MANAGE_WEBHOOKS = 1 << 29
 
-# What the persona-reply path actually requires in a channel: Send Messages (the bot user speaks)
-# AND Manage Webhooks (the bridge posts agent replies as persona webhooks). Both, not either.
-_POST_REQUIRED = _SEND_MESSAGES | _MANAGE_WEBHOOKS
+# What the persona-reply path actually requires in a channel: View Channel (without it the bot can't
+# see the channel at all — and Send/Manage are dead bits), Send Messages (the bot user speaks), AND
+# Manage Webhooks (the bridge posts agent replies as persona webhooks). All three, not any subset:
+# a channel granting Send|Manage while denying View is one the bot can never reply in, so classifying
+# it postable would be a green light that lies.
+_POST_REQUIRED = _VIEW_CHANNEL | _SEND_MESSAGES | _MANAGE_WEBHOOKS
 
 # Permission overwrite target types in the channel object (`permission_overwrites[].type`).
 _OVERWRITE_ROLE = 0

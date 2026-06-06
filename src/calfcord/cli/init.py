@@ -189,7 +189,14 @@ def run(
         and _agent_md_parses(agents_dir, checkpoint.agent_name)
     )
     if resuming:
-        print(f"Welcome back — provider and agent ({checkpoint.agent_name}) are done; let's finish setup.")
+        # Honest wording (nit #18a): the resume RE-WALKS the create flow rather
+        # than skipping it, so don't claim the agent step is settled. We pre-fill
+        # the create defaults from the saved agent (a blank answer keeps it) — the
+        # re-walk confirms/edits in place, it doesn't restart from scratch.
+        print(
+            f"Welcome back — picking up where you left off (agent {checkpoint.agent_name}). "
+            "Press enter to keep each saved answer."
+        )
     print()
 
     # --- Phase 1: agent identity + provider + model + tools + write --------
@@ -198,7 +205,17 @@ def run(
     # usable agent landed, so abort before Discord / broker / the live finish.
     try:
         created = create_agent(
-            prompter, agents_dir=agents_dir, env_path=env_path, prune_seed=True, offer_prompt=False
+            prompter,
+            agents_dir=agents_dir,
+            env_path=env_path,
+            # On resume, default the name prompt to the agent the operator was
+            # mid-creating (nit #18b): in a 2+-agent install ``create_agent``'s own
+            # default falls back to the starter (its lone-existing rule needs
+            # exactly one agent), so without this the re-walk would re-create under
+            # the wrong name. A fresh run passes None and lets that default logic own it.
+            name_default=checkpoint.agent_name if resuming else None,
+            prune_seed=True,
+            offer_prompt=False,
         )
     except (ValueError, OSError) as e:
         print(f"error: could not create agent: {e}")
@@ -624,7 +641,19 @@ async def _finish_live(
             await ready_wait
     prompter.confirm(f"In Discord, say:  @{name} hello   — press enter once you've sent it.", default=True)
     print("Watching for the first reply…")
-    detected = await watch_task
+    # The org is ALREADY live (substrate + agent both started). First-reply
+    # detection is advisory, and the watcher opens its OWN Client.connect /
+    # worker.start — a broker drop or transient connect blip mid-watch raises out
+    # of wait_for_first_reply (which only swallows TimeoutError). Don't let that
+    # crash the wizard after the org came up: degrade any non-timeout failure into
+    # the same bounded "org is live — try it yourself / run doctor" fallback below.
+    # ``except Exception`` (not bare) deliberately lets asyncio.CancelledError
+    # propagate — swallowing the rest is correct here: the failure is in detection,
+    # not in the (already-live) org.
+    try:
+        detected = await watch_task
+    except Exception:
+        detected = False
     if detected:
         print(f"🎉 {name} replied — your organization is live!")
     else:

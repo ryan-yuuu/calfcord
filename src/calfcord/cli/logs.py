@@ -38,13 +38,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 from calfcord.cli._agents import detect_agents
-from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES, _log_location
+from calfcord.supervisor.compose import (
+    _RESERVED_PROCESS_NAMES,
+    SUPERVISOR_LOG_STEM,
+    _log_location,
+)
 
 # The supervisor's own log (``process-compose up -L ...``) sits beside the
 # per-process logs and is a legitimate, useful tail target (it captures
 # supervisor-level start/restart events), so it is part of the known set even
-# though it is not a process the generator declares.
-_SUPERVISOR_LOG_NAME = "process-compose"
+# though it is not a process the generator declares. Its name is the shared stem
+# ``compose`` owns so it can never drift from the filename ``lifecycle`` writes.
+_SUPERVISOR_LOG_NAME = SUPERVISOR_LOG_STEM
 
 # How long the follow loop waits between polls for appended bytes. Small enough
 # to feel live, large enough that the loop never busy-spins a CPU. Injectable via
@@ -79,8 +84,14 @@ def _emit_file(path: Path, *, label: str | None, out: Callable[..., None]) -> No
     dropped so an empty tail does not print blank rows. This is the one-shot dump
     only; the follow path tracks its own per-file byte offsets, so there is no
     offset to hand back here.
+
+    Decoding is tolerant (``errors="replace"``) to match the follow path: a log
+    line with non-UTF-8 bytes (a partial multibyte write, a binary splat, a
+    mis-encoded child) must never raise an uncaught ``UnicodeDecodeError`` and
+    crash the command — "always show what the broker said before it died" holds
+    even when what it said was not clean UTF-8.
     """
-    data = path.read_text(encoding="utf-8")
+    data = path.read_text(encoding="utf-8", errors="replace")
     for line in data.splitlines():
         out(f"{label} | {line}" if label is not None else line)
 

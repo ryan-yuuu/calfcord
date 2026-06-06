@@ -719,6 +719,35 @@ def test_live_finish_reply_timeout_downgrades_to_try_yourself(
     assert "calfcord doctor" in out
 
 
+def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A NON-timeout watcher failure (broker drop / transient connect blip) must
+    degrade into the bounded live-org fallback, not crash the wizard AFTER the
+    org is already live (minor #8).
+
+    The substrate and agent already started successfully — the org IS live — so a
+    first-reply detection error is advisory: the watcher's ``RuntimeError`` is
+    caught and mapped to the same honest "org is live; try @agent hello; if
+    nothing run doctor" downgrade a clean timeout takes, and the run returns 0."""
+
+    class _RaisingFinish(_FinishStub):
+        async def first_reply(self, server_urls, *, ready=None, **kwargs) -> bool:
+            # Signal readiness so the wizard proceeds to the prompt, then fail the
+            # detection itself — exactly a broker drop mid-watch after a live org.
+            if ready is not None:
+                ready.set()
+            self.reply_calls.append({"server_urls": server_urls, **kwargs})
+            raise RuntimeError("broker connection dropped while watching")
+
+    finish = _RaisingFinish()
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    assert rc == 0  # clean return — the org is live, detection is advisory
+    assert "@scribe hello" in out
+    assert "calfcord doctor" in out
+
+
 def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
     """The ``@agent hello`` prompt happens INSIDE init (fixes the §12.6 step3/4
     contradiction) — the human is asked to send it, then we watch the outbox."""
@@ -935,6 +964,69 @@ def test_resume_welcome_back_when_agent_already_done(
     assert _run(p2, tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
     out = capsys.readouterr().out
     assert "Welcome back" in out
+
+
+def test_resume_threads_checkpoint_agent_name_into_create_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On resume the advisory agent re-walk must default to the checkpointed agent
+    name (nit #18b).
+
+    Without threading the name, a 2+-agent install hits the
+    ``len(existing) != 1 → STARTER_AGENT_NAME`` branch in ``create_agent`` and the
+    re-walk defaults to the wrong (starter) name instead of the agent the operator
+    was mid-creating. We capture the ``name_default`` ``init.run`` passes to
+    ``create_agent`` and assert it carries the checkpoint's agent name."""
+    agents_dir = tmp_path / "agents"
+    # First full run binds a real, parseable agent + a checkpoint naming it.
+    assert _run(_prompter(name="scribe"), tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
+
+    captured: dict[str, str | None] = {}
+    real_create = init.create_agent
+
+    def _spy(prompter, **kwargs):
+        captured["name_default"] = kwargs.get("name_default")
+        return real_create(prompter, **kwargs)
+
+    monkeypatch.setattr(init, "create_agent", _spy)
+    # Resume run: the checkpoint says scribe is done + the .md still parses.
+    assert _run(_prompter(name="scribe"), tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
+    assert captured["name_default"] == "scribe"
+
+
+def test_fresh_run_passes_no_name_default_to_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh (non-resume) run must NOT pin a name default — ``create_agent``'s own
+    lone-existing / starter default logic owns the fresh case (nit #18b)."""
+    captured: dict[str, str | None] = {}
+    real_create = init.create_agent
+
+    def _spy(prompter, **kwargs):
+        captured["name_default"] = kwargs.get("name_default")
+        return real_create(prompter, **kwargs)
+
+    monkeypatch.setattr(init, "create_agent", _spy)
+    assert _run(_prompter(name="scribe"), tmp_path, home=tmp_path) == 0
+    assert captured["name_default"] is None
+
+
+def test_resume_greeting_reflects_advisory_rewalk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The resume greeting must not claim the agent step is finished while it then
+    unconditionally re-walks the create flow (nit #18a). It keeps the test-asserted
+    'Welcome back' substring but softens the wording to reflect the advisory
+    re-walk — it must NOT assert the step is 'done; let's finish setup'."""
+    agents_dir = tmp_path / "agents"
+    assert _run(_prompter(name="scribe"), tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
+    capsys.readouterr()  # drop the first run's output
+
+    assert _run(_prompter(name="scribe"), tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "Welcome back" in out
+    # The old wording wrongly implied the agent step was settled; soften it.
+    assert "are done; let's finish setup" not in out
 
 
 def test_resume_reverifies_agent_artifact_not_just_flag(
