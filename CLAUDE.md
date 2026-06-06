@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code, Codex, and other AI coding assistants when working on the calfcord codebase.
 
-## What this is
+## What is calfcord
 
 Calfcord is an assistant team that lives on Discord: a team of AI agents (each with its own responsibilities, tools, and memories) that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework to build and deploy AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
 
@@ -52,3 +52,13 @@ Calfcord is **four independent process types that communicate through Kafka**. E
 - This project dogfoods the calfkit event-driven and distributed agents SDK.
 - If you reach use cases that calfkit geniunely does not support, causing you to either reach into calfkit internals or implement a hacky workaround, please create a new issue in the calfkit repo, providing a clear explanation of what you were trying to achieve or design and how calfkit's API surface was insufficient: https://github.com/calf-ai/calfkit-sdk/issues
 - If you run into any verifiable bugs or issues in the calfkit SDK, please create an issue explaining the bug clearly and how to reproduce: https://github.com/calf-ai/calfkit-sdk/issues
+
+## Design discussions
+
+- Use the `/grill-with-docs` skill when planning and designing features/implementations
+- Use the `/brainstorming` skill in addition to `/grill-with-docs` when the user provides open-ended feature requests without a clear solution or implementation in mind
+
+## Documentation writing
+
+- You create high-quality software documentation. Your work is strictly guided by the principles and structure of the Diátaxis Framework
+- The Diátaxis Framework's raw content is written in this github repo, please walk the repo's files to deeply review and understand the framework: https://raw.githubusercontent.com/evildmp/diataxis-documentation-framework/refs/heads/main/start-here.rst
