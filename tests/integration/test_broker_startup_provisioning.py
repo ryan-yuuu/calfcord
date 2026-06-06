@@ -43,6 +43,8 @@ import pytest
 from calfkit import Client, ProvisioningConfig, Worker
 from calfkit.nodes import consumer
 
+from calfcord._provisioning import PROVISIONING, provision_infra
+
 pytestmark = pytest.mark.skipif(
     not os.getenv("CALF_TEST_KAFKA"),
     reason="set CALF_TEST_KAFKA=1 (+ CALF_TEST_KAFKA_BOOTSTRAP) against a NO-auto-create broker (e.g. Tansu)",
@@ -87,5 +89,38 @@ async def test_direct_start_succeeds_without_reply_topic_provisioning() -> None:
         await asyncio.wait_for(client.broker.start(), timeout=_START_OK_TIMEOUT)
         assert client.broker.running
     finally:
+        with contextlib.suppress(Exception):
+            await client.close()
+
+
+async def test_provision_infra_lets_managed_start_succeed_on_no_autocreate_broker() -> None:
+    """Companion to the #180 canary above: with calfcord's ``provision_infra``
+    pre-creating the client reply topic, the managed ``Worker.start()`` boot path
+    (a DIRECT ``broker.start()`` — exactly what the migrated runners take via
+    ``worker.run()``) comes up cleanly on a no-auto-create broker. This is the
+    positive proof the workaround actually fixes the hang the canary reproduces,
+    and it must PASS (not xfail) while #180 is open."""
+    reply = f"itest.reply-{uuid.uuid4().hex[:8]}"
+    client = Client.connect(BOOTSTRAP, reply_topic=reply, provisioning=PROVISIONING)
+
+    inbox = f"itest.in-{uuid.uuid4().hex[:8]}"
+
+    @consumer(subscribe_topics=inbox)
+    def sink(_result: Any) -> None:  # NodeResult
+        pass
+
+    worker = Worker(client, [sink])
+    # The migration's workaround: create the reply topic (+ any blind-spot
+    # extras) BEFORE handing the lifecycle to the worker's direct broker.start().
+    await provision_infra(client)
+    try:
+        # worker.start() registers handlers, provisions node topics, then starts
+        # the broker directly — with the reply topic already present this must
+        # NOT hang (the failure mode the canary above pins).
+        await asyncio.wait_for(worker.start(), timeout=_START_OK_TIMEOUT)
+        assert client.broker.running
+    finally:
+        with contextlib.suppress(Exception):
+            await worker.stop()
         with contextlib.suppress(Exception):
             await client.close()
