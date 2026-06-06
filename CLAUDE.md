@@ -1,72 +1,22 @@
-# CLAUDE.md
+# calfcord development guide for dummies
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code, Codex, and other AI coding assistants when working on the calfcord codebase.
 
 ## What this is
 
-Calfcord is a multi-agent "organization" that lives on Discord: a team of AI agents, each with its own
-responsibilities, tools, and memory, that talk to humans and to each other. It is built on the **calfkit** SDK
-(a Kafka-backed event-driven microservices framework). The defining architectural property is that everything is
-**distributed and independently deployable** — agents and tools are microservices that can run on different
-hosts and still collaborate over a shared broker.
+Calfcord is a multi-agent team that lives on Discord: a team of AI agents, each with its own responsibilities, tools, and memory, that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework for AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
 
-## `uv` dependency management
+## Dependency management and development environment
 
-Project dependencies managed with **`uv`**. 
+Project dependencies are managed with **`uv`**. 
 - Do not hand-edit `pyproject.toml` — use `uv add <pkg>` so `uv.lock` stays canonical.
 - Use `uv run` to execute project files and tests.
 
 ## Architecture
 
-Calfcord is **four independent process types that communicate through Kafka**. Each is safe to deploy
-on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative
-source.
+Calfcord is **four independent process types that communicate through Kafka**. Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
 
-- **`calfkit-bridge`** (`src/calfcord/bridge/`) — the single Discord gateway and the source of truth for "what
-  agents exist." Loads the agents registry from runtime pings from each agent, normalizes inbound Discord events to a wire format,
-  publishes to per-channel Kafka topics, and posts agent replies back as persona webhooks. 
-- **`calfkit-agent`** (`src/calfcord/agents/`) — runs one or more agents as calfkit `Agent` nodes. Each agent
-  subscribes to its channel topics plus a private `agent.{agent_id}.in` inbox used for agent-to-agent (A2A) RPC.
-- **`calfkit-router`** (`src/calfcord/router/`) — decides which agent (if any) should answer a non-`@`-mentioned
-  ambient message in a watched channel. See `docs/ambient-routing.md`.
-- **`calfkit-tools`** (`src/calfcord/tools/`) — runs the `private_chat` A2A tool plus the built-in fs / shell /
-  search / web / todos tools.
-
-```
-Discord ⇄ bridge ⇄ Kafka ⇄ { agents, router, tools } ; tools ⇄ Discord (A2A thread projection)
-```
-
-### Decoupling invariants (do not violate)
-
-- **The tools process is registry-free by design.** It has no read access to `agents/*.md`. Agent identities
-  reach tools via a `phonebook` field the bridge places in every invocation's `deps`, which calfkit propagates
-  agent → tool. Keep it this way so tools can run on a host with no shared filesystem.
-- **The agent deployment path imports only MCP *schemas*, never calls `calfcord.mcp.config.load_mcp_servers`**
-  (which reads `mcp.json` — transport and `$VAR` secrets). MCP server config is bridge-only.
-- Cross-process Kafka topic literals live in `src/calfcord/topics.py` and `src/calfcord/control_plane/topics.py`
-  so producer and consumer can't drift. Per-agent / per-channel parameterized topics stay where they're consumed.
-- The Discord bridge has no shared filesystem access with agents, so it has no access to `agents/*.md` files. `agents/*.md`
-  files are coupled on the agent-side and information is relayed to the bridge via a ping on startup.
-
-### Calfcord agents are Markdown files
-
-An agent's configuration and responsibilities are in Markdown files. Frontmatter is identity + runtime hints (`name`, `display_name`, `provider`,
-`model`, `tools:`, `thinking_effort`); the body is the LLM instructions prompt. The filename must match `name`. 
-The bridge auto-discovers every file at boot. Full field reference: `docs/authoring-agents.md`.
-
-### Tools auto-discover
-
-A tool is an `async def name(ctx: ToolContext, **kwargs) -> str` decorated with `@agent_tool`, dropped into
-`src/calfcord/tools/builtin/`. Discovery is automatic on the next `calfkit-tools` boot — no registry edits, no
-entry points. Agents opt in by listing the tool name in their `.md` `tools:` array. Full reference:
-`docs/authoring-tools.md`.
-
-**Error-handling convention (hard rule, applies beyond tools):** LLM-recoverable problems (bad input, 404,
-network failure) `return` an `"error: ..."` string the calling LLM can adapt to; genuine infrastructure bugs
-`raise RuntimeError` with caller/target/correlation context. Prefer a loud raise over a swallowed exception or a
-logged-and-continued warning.
-
-## Conventions
+## Git conventions
 
 - **Commits/PRs landing on `main` use conventional-commit prefixes**: `feat:`, `fix:`, `chore:`, `docs:`,
   `refactor:`, `test:`, `perf:`, `style:`. Pick the narrowest accurate one. PR titles follow the same style
@@ -79,18 +29,26 @@ logged-and-continued warning.
 
 - When planned work is large, you may spawn sub-agents to split up or parallelize the work where possible
 - Always spawn sub-agents with the opus model and xhigh thinking effort
+- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering
 
 ## Test driven development
 
-- When in the final stages of an implementation plan and during any implementation work, please follow test driven development principles using the skill `/test-driven-development`
+- When implementing any code, please follow test driven development principles using the skill `/test-driven-development`
 - Use the skill `/pytest-coverage` to check your test completeness.
 
-## Thorough implementation review
+## Deep implementation reviews
 
-- When review implementations, use `/pr-review-toolkit:review-pr` to deeply review the code changes for:
+- Use `/pr-review-toolkit:review-pr` to deeply review the code changes for:
     - functional bugs and issues, 
     - anti-patterns,
     - test coverage,
-    - documentation correctness/coverage
-- Review your implementations using the `/simplify` skill to surface any potential design or implementation simplifications using more elegant, well-engineered solutions or designs.
-- In certain cases, when prompted, you may have to go through multiple rounds of deep reviews for code changes. In these events, the review is not considered done until the findings from consecutive review rounds converge towards no critical issues. 
+    - documentation correctness & coverage
+- Review implementations using the `/simplify` skill to surface any potential design or implementation simplifications using more elegant, well-engineered solutions or designs.
+- In certain cases, when prompted, you may have to go through multiple rounds of deep reviews for code changes. In these events, the review is not considered done until the findings from consecutive review rounds converge towards no critical or must-fix issues.
+- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering
+
+## Development: calfkit agents SDK
+
+- This project dogfoods the calfkit event-driven and distributed agents SDK.
+- If you reach use cases that calfkit geniunely does not support, causing you to either reach into calfkit internals or implement a hacky workaround, please create a new issue in the calfkit repo, providing a clear explanation of what you were trying to achieve or design and how calfkit's API surface was insufficient: https://github.com/calf-ai/calfkit-sdk/issues
+- If you run into any verifiable bugs or issues in the calfkit SDK, please create an issue explaining the bug clearly and how to reproduce: https://github.com/calf-ai/calfkit-sdk/issues
