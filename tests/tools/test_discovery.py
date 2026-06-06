@@ -595,13 +595,13 @@ class TestCloneCarriesLifecycle:
     def test_clone_preserves_resource_brackets(self) -> None:
         from calfkit.nodes import agent_tool
 
-        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+        async def _impl(ctx) -> str:
             return "ok"
 
         node = agent_tool(_impl)
 
         @node.resource("conn")
-        async def _conn(ctx):  # noqa: ANN001 - ResourceSetupContext
+        async def _conn(ctx):
             yield object()
 
         clone = _clone_with_name(node, "impl_eu")
@@ -611,13 +611,13 @@ class TestCloneCarriesLifecycle:
     def test_clone_preserves_lifecycle_hooks(self) -> None:
         from calfkit.nodes import agent_tool
 
-        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+        async def _impl(ctx) -> str:
             return "ok"
 
         node = agent_tool(_impl)
 
         @node.on_startup
-        async def _warm(ctx) -> None:  # noqa: ANN001 - LifecycleContext
+        async def _warm(ctx) -> None:
             return None
 
         clone = _clone_with_name(node, "impl_eu")
@@ -629,19 +629,19 @@ class TestCloneCarriesLifecycle:
         a new bracket on the clone must not mutate the original's registry."""
         from calfkit.nodes import agent_tool
 
-        async def _impl(ctx) -> str:  # noqa: ANN001 - ToolContext
+        async def _impl(ctx) -> str:
             return "ok"
 
         node = agent_tool(_impl)
 
         @node.resource("conn")
-        async def _conn(ctx):  # noqa: ANN001 - ResourceSetupContext
+        async def _conn(ctx):
             yield object()
 
         clone = _clone_with_name(node, "impl_eu")
 
         @clone.resource("extra")
-        async def _extra(ctx):  # noqa: ANN001 - ResourceSetupContext
+        async def _extra(ctx):
             yield object()
 
         assert "extra" not in dict(node._resource_cms())
