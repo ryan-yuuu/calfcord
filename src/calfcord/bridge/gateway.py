@@ -796,10 +796,11 @@ async def _run(settings: DiscordSettings, registry: AgentRegistry, server_urls: 
                 # agent.state (a raw subscriber) and bridge.discovery (the
                 # discovery ping is published at boot, before any agent may be
                 # up). The worker provisions its own node topics inside start().
-                # No-ops on an auto-creating broker; required on Tansu. (The
-                # client reply topic provision_infra also covers is, for the
-                # bridge, discord.outbox — already the outbox node's inbox, so
-                # redundant-by-construction here; see _provisioning.)
+                # Idempotent where the topics already exist; required on a
+                # no-auto-create broker (Tansu). The client reply topic that
+                # provision_infra also covers is, for the bridge, discord.outbox —
+                # already the outbox node's inbox, so redundant-by-construction
+                # here; see _provisioning.
                 await provision_infra(calfkit_client, extra_topics=bridge_infra_topics())
 
                 # The outer ``try/finally`` guarantees the typing notifier is
@@ -820,10 +821,20 @@ async def _run(settings: DiscordSettings, registry: AgentRegistry, server_urls: 
                         gateway_task = asyncio.create_task(gateway.start())
                         stop_task = asyncio.create_task(stop.wait())
                         try:
-                            await asyncio.wait(
+                            done, _pending = await asyncio.wait(
                                 {gateway_task, stop_task},
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                            # A FATAL gateway failure (vs. a shutdown signal) must
+                            # surface as a non-zero exit, not a silent clean stop:
+                            # asyncio.wait does not propagate a task's exception, so
+                            # re-raise it. On the signal path stop_task wins the race
+                            # and gateway_task is still running (not in ``done``), so
+                            # it is cancelled in the finally instead.
+                            if gateway_task in done and not gateway_task.cancelled():
+                                exc = gateway_task.exception()
+                                if exc is not None:
+                                    raise exc
                         finally:
                             # Stop the DISCORD ingress first so no new events
                             # arrive while the broker drains. The synthesized
@@ -836,15 +847,16 @@ async def _run(settings: DiscordSettings, registry: AgentRegistry, server_urls: 
                                     t.cancel()
                             await gateway.close()
                 finally:
-                    # worker.stop() drained the broker at the ``async with
-                    # worker`` exit above (which runs even on the exceptional
-                    # path). Closing the typing notifier HERE is both
-                    # ordering-correct — TypingNotifier.aclose() cancels in-flight
-                    # tasks, so closing it before the drain could fire a draining
-                    # steps hop into a cancelled notifier — AND unconditional: the
-                    # pre-0.5.4 code closed it in a finally, and the 0.5.4 rewrite
-                    # must not lose that guarantee. persona/client/store still
-                    # close after this (outermost).
+                    # The broker drains at the ``async with worker`` exit on a
+                    # normal OR cancelled exit of the block (a failed worker
+                    # start() is instead torn down by the worker's own
+                    # failed-start cleanup). Closing the typing notifier HERE is
+                    # both ordering-correct — TypingNotifier.aclose() cancels
+                    # in-flight tasks, so closing it before the drain could fire a
+                    # draining steps hop into a cancelled notifier — AND
+                    # unconditional: the pre-0.5.4 code closed it in a finally, and
+                    # the 0.5.4 rewrite must not lose that guarantee.
+                    # persona/client/store still close after this (outermost).
                     await typing_notifier.aclose()
 
 

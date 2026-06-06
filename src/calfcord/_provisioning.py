@@ -114,7 +114,22 @@ async def provision_extra_topics(client: Client, topics: Iterable[str]) -> None:
         config=PROVISIONING,
         security_kwargs=client.security_kwargs,
     )
-    await provisioner.provision(topic_list, framework_topics=set())
+    report = await provisioner.provision(topic_list, framework_topics=set())
+    # calfkit's provisioner does NOT raise when the broker AUTHORIZES the connection
+    # but denies CREATE (ACL code 29): it records the topic in ``report.unauthorized``
+    # and logs a single low-visibility warning. Swallowing that here is the worst
+    # failure mode for the managed lifecycle — the runner would proceed to
+    # ``worker.run()``'s direct ``broker.start()``, which then HANGS FOREVER waiting
+    # on the un-created reply topic (the calfkit#180 hang). Raise loudly instead
+    # (calfcord's infra-failure-raises rule): an operator must pre-create these
+    # out-of-band rather than watch a process "start" but never serve.
+    if report.unauthorized:
+        raise RuntimeError(
+            f"topic provisioning unauthorized for {sorted(report.unauthorized)} on "
+            f"broker {client.server_urls}: the broker denies CREATE (ACLs), so these "
+            f"must be pre-created out-of-band. A managed worker.start() would otherwise "
+            f"hang on the missing topic — see calfkit#180."
+        )
 
 
 async def provision_infra(client: Client, *, extra_topics: Iterable[str] = ()) -> None:

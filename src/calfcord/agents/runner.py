@@ -534,8 +534,11 @@ async def _amain(args: argparse.Namespace) -> None:
             # reconciliation (the bridge's discovery ping is one-shot at on_ready;
             # no periodic ping, no TTL). So fail the boot loudly; 0.5.4 unwinds an
             # after_startup exception cleanly. Recovery is process restart -> fresh
-            # boot -> fresh announce. after_startup fires once per single-use Worker
-            # boot, so there is no steady-state re-fire to handle.
+            # boot -> fresh announce. (calfkit 0.5.4 invokes after_startup once per
+            # boot; its docstring reserves the right to re-fire on a rebalance under
+            # at-least-once delivery. We rely on the once-per-boot behavior and treat
+            # a failed announce as restart -> re-announce; if calfkit ever re-fires,
+            # revisit — calfcord would need presence reconciliation first.)
             for ref in definition_refs:
                 event = build_state_event(ref.current, cause="startup")
                 await publish_state_event(calfkit_client, event)

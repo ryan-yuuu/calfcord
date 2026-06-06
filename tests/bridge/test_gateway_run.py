@@ -298,6 +298,41 @@ class TestRunSignalRace:
         assert "notifier.aclose" in order
         assert order.index("drain") < order.index("notifier.aclose")
 
+    async def test_gateway_crash_propagates_and_still_tears_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FATAL gateway failure (not a shutdown signal) must propagate out of
+        ``_run`` so the process exits non-zero and the supervisor restarts it —
+        ``asyncio.wait`` does not surface a task's exception on its own. Teardown
+        (ingress close, broker drain, notifier close) must still run."""
+        order: list[str] = []
+        gateway = MagicMock()
+        gateway._slash = MagicMock()
+        gateway.close = AsyncMock(side_effect=lambda: order.append("gateway.close"))
+        gateway.start = AsyncMock(side_effect=RuntimeError("gateway websocket died"))
+
+        notifier = MagicMock()
+        notifier.aclose = AsyncMock(side_effect=lambda: order.append("notifier.aclose"))
+
+        worker = _RecordingWorker(order)
+        _patch_boot(
+            monkeypatch,
+            order=order,
+            client=MagicMock(),
+            worker=worker,
+            gateway=gateway,
+            typing_notifier=notifier,
+        )
+
+        with pytest.raises(RuntimeError, match="gateway websocket died"):
+            await gateway_mod._run(_settings(), AgentRegistry([]), "localhost")
+
+        # The crash still unwound cleanly: ingress stopped, broker drained,
+        # typing notifier closed.
+        assert "gateway.close" in order
+        assert "drain" in order
+        assert "notifier.aclose" in order
+
 
 class TestMainDelegatesToRun:
     """``main`` stays the thin CLI seam: it builds settings + registry and

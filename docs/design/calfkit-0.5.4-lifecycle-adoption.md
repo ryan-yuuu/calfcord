@@ -87,7 +87,7 @@ forever**. `Worker.provision_topics()` walks only node
 remove the reply-topic workaround. It must survive — relocated, not deleted (see
 [§3](#3-the-provisioning-seam-provision_infra)). The canary that flips when #180
 finally lands is
-`tests/integration/test_broker_startup_provisioning.py::test_direct_start_hangs_without_reply_topic_provisioning`.
+`tests/integration/test_broker_startup_provisioning.py::test_direct_start_succeeds_without_reply_topic_provisioning`.
 
 ---
 
@@ -280,9 +280,9 @@ turn a normal operator `docker stop`/SIGTERM into a non-zero exit and a spurious
 restart under `Restart=on-failure`/systemd. And there is no spurious-clean-exit
 case left to cover. This keeps the guarantee self-contained in the runtime
 contract rather than coupling it to a `docker-compose.yml` key (which would also
-not cover the `calfkit-mcp` runner — it has no compose service; MCP rides inside
-the tools service — nor any non-Docker host). Net: the deleted module guarded an
-unreachable case; native `run()`'s own semantics are the guarantee.
+not cover the `calfkit-mcp` runner — a standalone runner with no compose service
+in the default stack — nor any non-Docker host). Net: the deleted module guarded
+an unreachable case; native `run()`'s own semantics are the guarantee.
 
 ---
 
@@ -309,27 +309,33 @@ async with DiscordPersonaSender(settings) as persona_sender:
                                 on_departed=gateway._slash.schedule_resync)   # raw sub, before start
         await provision_infra(calfkit_client, extra_topics=bridge_infra_topics())
 
-        async with worker:                  # start(): register → provision node topics → broker.start (all subs join)
-            # consumers are joined BEFORE we accept Discord events — the Gap-2
-            # join-before-serve correctness is now a guarantee of start(), not hand-built.
-            stop = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, stop.set)   # bridge still owns signals (start/stop install none)
-            gateway_task = asyncio.create_task(gateway.start())
-            stop_task = asyncio.create_task(stop.wait())
-            try:
-                await asyncio.wait({gateway_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                for t in (gateway_task, stop_task):
-                    if not t.done():
-                        t.cancel()
-                await gateway.close()        # stop the DISCORD ingress (the synthesized consumer is a 2nd
+        try:                                # outer try → typing_notifier.aclose() in its finally
+            async with worker:              # start(): register → provision node topics → broker.start (all subs join)
+                # consumers are joined BEFORE we accept Discord events — the Gap-2
+                # join-before-serve correctness is now a guarantee of start(), not hand-built.
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, stop.set)   # bridge still owns signals (start/stop install none)
+                gateway_task = asyncio.create_task(gateway.start())
+                stop_task = asyncio.create_task(stop.wait())
+                try:
+                    done, _ = await asyncio.wait({gateway_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                    # A fatal gateway crash (not a signal) must propagate → non-zero exit;
+                    # asyncio.wait won't surface it. On the signal path gateway_task is still running.
+                    if gateway_task in done and not gateway_task.cancelled() and gateway_task.exception():
+                        raise gateway_task.exception()
+                finally:
+                    for t in (gateway_task, stop_task):
+                        if not t.done():
+                            t.cancel()
+                    await gateway.close()    # stop the DISCORD ingress (the synthesized consumer is a 2nd
                                              # ingress; it drains with the broker — safe, transcript_store closes last)
-        # worker.stop() drains the broker HERE — the steps/outbox consumers finish their
-        # in-flight hops, still using persona_sender + typing_notifier (both still open).
-        await typing_notifier.aclose()       # only AFTER the drain, so an in-flight steps hop
-                                             # never calls a cancelled TypingNotifier (it cancels tasks)
+            # worker.stop() drains the broker at the `async with worker` exit — the steps/outbox
+            # consumers finish their in-flight hops, still using persona_sender + typing_notifier.
+        finally:
+            await typing_notifier.aclose()   # AFTER the drain (so an in-flight steps hop never calls a
+                                             # cancelled notifier) AND unconditional (runs on crash/cancel too)
     # transcript_store / client / persona close here, after the drain — outermost-last
 ```
 
@@ -431,7 +437,7 @@ The separation of concerns this lands on:
 ## 10. Risks & verification
 
 1. **#180 canary, made self-enforcing** — the existing canary
-   `test_broker_startup_provisioning.py::test_direct_start_hangs_without_reply_topic_provisioning`
+   `test_broker_startup_provisioning.py::test_direct_start_succeeds_without_reply_topic_provisioning`
    asserts the *broken* behavior still reproduces, so when #180 is fixed it goes
    **red**, not green — a red test after a calfkit bump is the kind of noise that
    gets `xfail`'d and forgotten, leaving the workaround as permanent cruft.

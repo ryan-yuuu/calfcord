@@ -377,7 +377,7 @@ operator responsibilities the bridge cannot verify on its own.
    the router deployment's secret store, NOT just the bridge's — the
    router runs as an independent process with no shared filesystem.
 
-5. **calfkit version pin.** `pyproject.toml` pins `calfkit~=0.4.0`.
+5. **calfkit version pin.** `pyproject.toml` pins `calfkit[mcp-codegen]~=0.5.4`.
    The ambient-routing pipeline depends on `NodeResult.deps` exposing
    the inbound producer deps to `@consumer` functions — the public API
    that landed in calfkit 0.4.0 (calfkit-sdk#144). Do NOT drop below

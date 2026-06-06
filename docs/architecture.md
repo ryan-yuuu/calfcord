@@ -123,8 +123,9 @@ then point the native processes at `localhost:9092`.)
 
 ### Worker lifecycle (calfkit-managed)
 
-All five worker-bearing processes (the four above plus the in-tools `calfkit-mcp`
-bridge) now run on calfkit's managed `Worker` lifecycle. Until calfkit 0.5.2 the
+All five worker-bearing processes (the four above plus the standalone
+`calfkit-mcp` runner — a separate entry point, not wired into the default
+compose) now run on calfkit's managed `Worker` lifecycle. Until calfkit 0.5.2 the
 managed `Worker.run()` path couldn't publish lifecycle events at precise points
 (agent presence / departure announcements), co-run a second foreground service
 (the bridge's Discord gateway), or cede OS-signal ownership to the application —

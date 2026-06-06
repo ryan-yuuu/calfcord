@@ -144,6 +144,32 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
         await provision_extra_topics(_fake_client(), ["some.topic"])
 
 
+async def test_provision_extra_topics_raises_on_unauthorized_report(monkeypatch) -> None:
+    """A broker that authorizes the connection but DENIES create (ACL code 29)
+    comes back in ``report.unauthorized`` — calfkit logs a warning but does NOT
+    raise. Swallowing that would let a runner proceed to ``worker.run()``'s direct
+    ``broker.start()`` and hang forever on the un-created reply topic (calfkit#180),
+    so ``provision_extra_topics`` must raise loudly rather than return cleanly.
+    """
+    from types import SimpleNamespace
+
+    import calfcord._provisioning as mod
+
+    class UnauthorizedProvisioner:
+        @classmethod
+        def from_connection(cls, *, server_urls, config, security_kwargs):
+            return cls()
+
+        async def provision(self, topics, *, framework_topics):
+            # Mirrors calfkit's ProvisionReport: the denied topic lands in
+            # ``unauthorized`` and provision() returns normally (does not raise).
+            return SimpleNamespace(created=[], existing=[], unauthorized=["calf.reply"])
+
+    monkeypatch.setattr(mod, "TopicProvisioner", UnauthorizedProvisioner)
+    with pytest.raises(RuntimeError, match=r"unauthorized.*calf\.reply"):
+        await provision_extra_topics(_fake_client(), ["calf.reply"])
+
+
 # --- provision_infra: provision-only seam for the 0.5.4 worker.run() path ---
 # Under the managed worker.run()/start() lifecycle the Worker owns broker.start(),
 # so provision_infra ONLY fills the calfkit blind spots (the client reply topic for
