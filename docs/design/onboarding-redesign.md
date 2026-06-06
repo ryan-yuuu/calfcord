@@ -172,12 +172,18 @@ host-local) — flagging the "process up but never joined" case, while keeping t
 (§12.5).
 
 ### 3.5 Idempotency & duplicate prevention (free from the model)
-- `agent start X` when X is running → no double-start; print `✓ X already running` and exit 0. (Process
-  Compose won't start an already-running process; our veneer checks `/process/X/state` first to make it a
-  clean idempotent success rather than an error.)
-- Same-host duplicates are impossible (one declared process per name).
-- **Cross-host** duplicates (same agent name on two boxes) are an Altitude-3 concern, naturally enforced
-  later at the bridge (reject a second registration for an existing `agent_id`). Out of scope here, noted.
+- `agent start X` first queries the **global live roster via the control-plane probe**
+  (:func:`control_plane.probe.probe_live_roster`, which reads `agent.state` over the broker org-wide). If
+  `X` is already live **anywhere — including another host** — it does NOT start a duplicate and prints a
+  clear message ("agent 'X' is already running in the organization"). Otherwise it proceeds to
+  `POST /process/start/{X}` against the local supervisor.
+- **The guard is CLI-side only — no bridge-side changes.** Because it uses the broker-wide probe (not the
+  local Process Compose process list), it is **distributed-correct**: a duplicate on a second host is caught
+  without the bridge rejecting anything. The bridge keeps treating a re-registration as a benign re-announce.
+- **Accepted limitation:** the probe is point-in-time, so two *simultaneous* `agent start X` on different
+  hosts could both see nothing and both start (a TOCTOU race). Catching that would need bridge-side
+  enforcement, which is deferred out of scope. The guard covers the common case (X already running, you try
+  to start another).
 
 ---
 
@@ -571,8 +577,11 @@ strict correlation (else accept any in-window response); the exact first-reply t
   `CALFKIT_AGENTS_DIR` seam). `agent ps`'s PC half is host-local; the Kafka-collector half is global.
 - **Cross-host duplicate agents are NOT prevented today** — the bridge treats a second same-`agent_id`
   registration as a benign re-announce (`registry.py:221`), so both reply (double-reply / split-brain A2A).
-  The redesign makes this one command away. Add a bridge-side duplicate-registration warning; do not market
-  multi-host as frictionless.
+  The redesign makes this one command away. **Decision: the duplicate-name guard is CLI-side only — NO
+  bridge-side changes.** But it IS distributed-correct: `agent start X` calls `probe_live_roster` (broker-wide
+  control-plane probe) first and refuses to start if `X` is already live on *any* host, with a user message.
+  The only gap left to the bridge (deferred) is the simultaneous-start TOCTOU race; the common
+  already-running case is fully covered CLI-side.
 
 ### 12.6 Onboarding UX failure paths (CRITICAL/MAJOR)
 - **Discord detour:** visible heartbeat every ~10s with the invite link; soft timeout (~3–5 min) surfacing
