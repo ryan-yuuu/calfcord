@@ -209,6 +209,19 @@ def test_k8s_multi_broker_bootstrap_passes_through_verbatim(server_urls: str) ->
     assert _k8s_configmap_host_url(server_urls) == server_urls
 
 
+@pytest.mark.parametrize(
+    "server_urls",
+    # A loopback host with an UNPARSEABLE port — `urlsplit(...).port` raises
+    # ValueError on a non-integer or out-of-range port. The resolver must fall
+    # back to a verbatim passthrough, never let that ValueError crash
+    # `calfcord deploy`. (The plain non-loopback `host:9092` case is covered by
+    # the external-broker test; these pin the loopback ValueError branch.)
+    ["localhost:abc", "localhost:65536", "localhost:-1"],
+)
+def test_k8s_unparseable_broker_port_passes_through_verbatim(server_urls: str) -> None:
+    assert _k8s_configmap_host_url(server_urls) == server_urls
+
+
 def test_k8s_renders_one_deployment_per_process_type() -> None:
     deployments = _by_name(_k8s_docs(), "Deployment")
     for name in ("bridge", "router", "tools", "mcp"):

@@ -330,6 +330,34 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
     assert "port" in out
 
 
+# --- home-ownership match (Fix #11 + the round-2 anchoring) -----------------
+
+
+async def test_supervisor_belongs_to_home_rejects_a_suffix_home_collision() -> None:
+    # The crux the quote-anchored match exists for: a bare-substring scan would
+    # find "/calf/state" INSIDE "/data/calf/state/logs/bridge.log" and wrongly
+    # claim install A's colliding supervisor is ours. The anchored match requires
+    # the marker to OPEN the quoted path value, so a suffix home is rejected
+    # (False) — while the genuine same-home supervisor is still recognised (True).
+    # A revert to the bare-substring scan flips the first assertion, so this pins
+    # the fix (the prior different-home test used non-suffix sibling paths, which
+    # both the old and new code reject identically).
+    other = _StubClient(process_info={"log_location": "/data/calf/state/logs/bridge.log"})
+    assert await lifecycle._supervisor_belongs_to_home(other, "/calf") is False
+    same = _StubClient(process_info={"log_location": "/calf/state/logs/bridge.log"})
+    assert await lifecycle._supervisor_belongs_to_home(same, "/calf") is True
+
+
+async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -> None:
+    # Best-effort: when the info route is unreachable or empty the verdict is
+    # "cannot determine" (None), so the caller keeps the prior idempotent
+    # "already open" behaviour rather than failing a legitimate restart loudly.
+    raising = _StubClient(process_info_raises=RuntimeError("info route unavailable"))
+    assert await lifecycle._supervisor_belongs_to_home(raising, "/h") is None
+    empty = _StubClient(process_info=None)
+    assert await lifecycle._supervisor_belongs_to_home(empty, "/h") is None
+
+
 # --- start: happy path ------------------------------------------------------
 
 
