@@ -4,7 +4,7 @@ This file provides guidance to Claude Code, Codex, and other AI coding assistant
 
 ## What this is
 
-Calfcord is a multi-agent team that lives on Discord: a team of AI agents, each with its own responsibilities, tools, and memory, that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework for AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
+Calfcord is an assistant team that lives on Discord: a team of AI agents (each with its own responsibilities, tools, and memories) that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework to build and deploy AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
 
 ## Dependency management and development environment
 
