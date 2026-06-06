@@ -10,33 +10,11 @@ responsibilities, tools, and memory, that talk to humans and to each other. It i
 **distributed and independently deployable** — agents and tools are microservices that can run on different
 hosts and still collaborate over a shared broker.
 
-## Commands
+## `uv` dependency management
 
-Python 3.12+, dependencies managed with **`uv`**. 
-- Do not hand-edit `[project.dependencies]` in `pyproject.toml` —
-  use `uv add <pkg>` so `uv.lock` stays canonical.
+Project dependencies managed with **`uv`**. 
+- Do not hand-edit `pyproject.toml` — use `uv add <pkg>` so `uv.lock` stays canonical.
 - Use `uv run` to execute project files and tests.
-
-Native / mixed mode (same `.env` and `agents/*.md` — no code changes to switch):
-
-```bash
-docker compose up -d redpanda                 # or bring your own Kafka
-echo 'CALF_HOST_URL=localhost:19092' >> .env  # so every `uv run` terminal finds the broker
-uv run calfkit-bridge      # Discord gateway
-uv run calfkit-agent       # all agents on one Worker — or `uv run calfkit-agent <name>` for one
-uv run calfkit-router      # ambient-message router using LLM
-uv run calfkit-tools       # deploy all tools on one Worker
-```
-
-When iterating on a single agent, run that agent natively and leave the other three processes in compose —
-the wire protocol is Kafka, so split mode just works.
-
-### Console-script entry points (`pyproject.toml` → `[project.scripts]`)
-
-- `calfkit-bridge` / `calfkit-agent` / `calfkit-router` / `calfkit-tools` / `calfkit-mcp` — the process runners.
-- `calfkit-auth` — Codex (ChatGPT subscription) OAuth login.
-- `calfcord-package-tools` / `calfcord-package-agents` — build slim per-tool / per-agent deployment images.
-- `calfcord-mcp-codegen` — generate an MCP tool-schema module into `src/calfcord/mcp/schemas/` (see MCP below).
 
 ## Architecture
 
@@ -70,7 +48,7 @@ Discord ⇄ bridge ⇄ Kafka ⇄ { agents, router, tools } ; tools ⇄ Discord (
 - The Discord bridge has no shared filesystem access with agents, so it has no access to `agents/*.md` files. `agents/*.md`
   files are coupled on the agent-side and information is relayed to the bridge via a ping on startup.
 
-### Agents are Markdown files
+### Calfcord agents are Markdown files
 
 An agent's configuration and responsibilities are in Markdown files. Frontmatter is identity + runtime hints (`name`, `display_name`, `provider`,
 `model`, `tools:`, `thinking_effort`); the body is the LLM instructions prompt. The filename must match `name`. 
@@ -88,34 +66,31 @@ network failure) `return` an `"error: ..."` string the calling LLM can adapt to;
 `raise RuntimeError` with caller/target/correlation context. Prefer a loud raise over a swallowed exception or a
 logged-and-continued warning.
 
-### Other subsystems
-
-- `src/calfcord/providers/codex/` — bring-your-own-model via a ChatGPT Plus/Pro subscription (Codex OAuth, JWT,
-  prompt caching). Other providers (Anthropic, OpenAI, OpenAI-compatible) are selected per agent in frontmatter.
-- `src/calfcord/mcp/` — MCP tool support. `calfcord-mcp-codegen <server>` is a convention wrapper over
-  `calfkit mcp codegen` that owns the server name (validated) and output path so generated schemas always land in
-  `src/calfcord/mcp/schemas/` where `discovery.discover_mcp_catalog` will find them.
-- `src/calfcord/packaging/` — builds slim per-tool / per-agent images for splitting across hosts
-  (`docs/distributed-deployment.md`).
-
-### Known calfkit lifecycle limitation
-
-The bridge and `calfkit-agent` deliberately do **not** use calfkit's managed `Worker.run()` — they hand-roll
-start/serve/drain because that path can't yet emit lifecycle events at precise points, co-run a second foreground
-service, or cede OS-signal ownership. Don't "fix" this by switching to `Worker.run()`. Context and upstream
-issues: `docs/design/calfkit-worker-lifecycle-gaps.md`.
-
 ## Conventions
 
 - **Commits/PRs landing on `main` use conventional-commit prefixes**: `feat:`, `fix:`, `chore:`, `docs:`,
   `refactor:`, `test:`, `perf:`, `style:`. Pick the narrowest accurate one. PR titles follow the same style
   (squash-merge inherits them).
-- **New behavior ships with a test.** A branch should not regress the test count vs. the latest `main` CI run.
 - **Ruff clean for new/changed files.** CI's lint job is `continue-on-error` only while a small pre-existing
   baseline of errors is cleared — don't add to it and don't fix unrelated baseline errors in the same PR.
 - Comments and docstrings explain *why*, not *what*.
 
-# Sub-agents
+## Sub-agents
 
 - When planned work is large, you may spawn sub-agents to split up or parallelize the work where possible
 - Always spawn sub-agents with the opus model and xhigh thinking effort
+
+## Test driven development
+
+- When in the final stages of an implementation plan and during any implementation work, please follow test driven development principles using the skill `/test-driven-development`
+- Use the skill `/pytest-coverage` to check your test completeness.
+
+## Thorough implementation review
+
+- When review implementations, use `/pr-review-toolkit:review-pr` to deeply review the code changes for:
+    - functional bugs and issues, 
+    - anti-patterns,
+    - test coverage,
+    - documentation correctness/coverage
+- Review your implementations using the `/simplify` skill to surface any potential design or implementation simplifications using more elegant, well-engineered solutions or designs.
+- In certain cases, when prompted, you may have to go through multiple rounds of deep reviews for code changes. In these events, the review is not considered done until the findings from consecutive review rounds converge towards no critical issues. 
