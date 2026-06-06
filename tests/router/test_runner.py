@@ -66,27 +66,22 @@ class TestBuildRouterNodes:
 
 
 class TestRunWorkerShutdownContract:
-    """The supervisor-restart invariant mirrors agents/runner.py and
-    tools/runner.py: any non-signal exit raises out of ``_run_worker``
-    so the process exits non-zero."""
+    """The router runner delegates its shutdown contract to the shared
+    :func:`run_worker_until_signal`, which drives the worker via the embedded
+    ``Worker.start()``/``stop()`` surface (not ``run()``) so it keeps SIGINT/
+    SIGTERM ownership. The full contract — a real commanded SIGTERM draining
+    cleanly, and a signal-less exit being surfaced so a supervisor restarts — is
+    exercised in ``tests/test_worker_runtime.py``. Here we only pin, per runner,
+    that a managed-boot crash propagates out of ``_run_worker`` (so this passes
+    only if the runner really wires into the shared helper)."""
 
-    async def test_worker_crash_propagates(self) -> None:
+    async def test_worker_boot_crash_propagates(self) -> None:
+        """A crash during the managed boot (``Worker.start()``) must escape
+        ``_run_worker`` so the surrounding ``asyncio.run`` exits non-zero."""
         crash = ValueError("simulated kafka drop")
         worker = MagicMock(spec=Worker)
-        worker.run = AsyncMock(side_effect=crash)
+        worker.start = AsyncMock(side_effect=crash)
         with pytest.raises(ValueError, match="simulated kafka drop"):
-            await runner._run_worker(worker)
-
-    async def test_worker_unexpected_clean_return_raises(self) -> None:
-        """A clean ``worker.run()`` return without a shutdown signal is
-        unexpected — synthesize a RuntimeError so supervisors restart."""
-        worker = MagicMock(spec=Worker)
-
-        async def returns_immediately() -> None:
-            return None
-
-        worker.run = AsyncMock(side_effect=returns_immediately)
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
             await runner._run_worker(worker)
 
 

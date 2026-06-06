@@ -67,13 +67,27 @@ class _StubClient:
         project_state_results: list | None = None,
         bridge_states: list | None = None,
         list_processes_result: list | None = None,
+        update_project_raises: Exception | None = None,
+        process_info: object = None,
+        process_info_raises: Exception | None = None,
     ) -> None:
         self._project_state_results = list(project_state_results or [])
         self._bridge_states = list(bridge_states or [])
         self._list_processes_result = list_processes_result or []
+        # When set, the priming reconcile (the buggy first project-update) fails the
+        # way the real client signals a PC reconcile / transport error: a raise.
+        self._update_project_raises = update_project_raises
+        # The declared config the idempotency home-ownership check reads back. A
+        # real `get_process_info` returns a process config that embeds the
+        # home-specific log path; the check confirms the answering supervisor is
+        # THIS home's. `process_info_raises` models the info route being
+        # unavailable (the verdict is then "cannot determine").
+        self._process_info = process_info
+        self._process_info_raises = process_info_raises
         self.update_project_calls: list[str] = []
         self.project_state_call_count = 0
         self.get_process_calls: list[str] = []
+        self.get_process_info_calls: list[str] = []
 
     async def project_state(self):
         self.project_state_call_count += 1
@@ -86,6 +100,8 @@ class _StubClient:
 
     async def update_project(self, yaml_text: str):
         self.update_project_calls.append(yaml_text)
+        if self._update_project_raises is not None:
+            raise self._update_project_raises
         return {}
 
     async def get_process(self, name: str):
@@ -96,6 +112,12 @@ class _StubClient:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def get_process_info(self, name: str):
+        self.get_process_info_calls.append(name)
+        if self._process_info_raises is not None:
+            raise self._process_info_raises
+        return self._process_info
 
     async def list_processes(self):
         return self._list_processes_result
@@ -242,8 +264,13 @@ def test_lock_guard_releases_after_exit(tmp_path) -> None:
 async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
-    # project_state succeeds on the first probe => supervisor already up.
-    client = _StubClient(project_state_results=[{"running": True}])
+    # project_state succeeds on the first probe => supervisor already up, and the
+    # declared config embeds THIS home's marker path, so the home-ownership check
+    # (Fix #11) confirms the answering supervisor is ours and short-circuits.
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+    )
 
     code = await lifecycle.start(
         home,
@@ -259,6 +286,76 @@ async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
     assert spawn.calls == []  # no second `up`
     assert client.update_project_calls == []  # no reconcile when already open
     assert "already open" in capsys.readouterr().out.lower()
+
+
+async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
+    tmp_path, capsys
+) -> None:
+    # Fix #11: two homes can hash to the same REST port. The idempotency probe
+    # verifies only that SOMETHING answers the port, not WHICH home's supervisor —
+    # so install B would see install A's supervisor and skip its own launch. Before
+    # trusting an "already up" verdict, confirm the answering supervisor is THIS
+    # home's via its declared home-specific paths; a DIFFERENT home must fail
+    # loudly, never return a false "already open".
+    home = _home(tmp_path / "B")
+    other_home = str(tmp_path / "A")
+    spawn = _RecordingSpawn()
+    # The supervisor answers (port collision), but its declared config embeds
+    # ANOTHER home's path — it belongs to install A, not B.
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={
+            "log_location": os.path.join(other_home, "state", "logs", "bridge.log")
+        },
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/calfcord",
+        agent_ids=["assistant"],
+        client=client,
+        spawn=spawn,
+        clock=_FakeClock(),
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    # It must NOT have launched a second supervisor and must NOT claim "already open".
+    assert spawn.calls == []
+    out = capsys.readouterr().out.lower()
+    assert "already open" not in out
+    assert "error" in out
+    # Actionable: it names the port collision so the operator can re-home / repick.
+    assert "port" in out
+
+
+# --- home-ownership match (Fix #11 + the round-2 anchoring) -----------------
+
+
+async def test_supervisor_belongs_to_home_rejects_a_suffix_home_collision() -> None:
+    # The crux the quote-anchored match exists for: a bare-substring scan would
+    # find "/calf/state" INSIDE "/data/calf/state/logs/bridge.log" and wrongly
+    # claim install A's colliding supervisor is ours. The anchored match requires
+    # the marker to OPEN the quoted path value, so a suffix home is rejected
+    # (False) — while the genuine same-home supervisor is still recognised (True).
+    # A revert to the bare-substring scan flips the first assertion, so this pins
+    # the fix (the prior different-home test used non-suffix sibling paths, which
+    # both the old and new code reject identically).
+    other = _StubClient(process_info={"log_location": "/data/calf/state/logs/bridge.log"})
+    assert await lifecycle._supervisor_belongs_to_home(other, "/calf") is False
+    same = _StubClient(process_info={"log_location": "/calf/state/logs/bridge.log"})
+    assert await lifecycle._supervisor_belongs_to_home(same, "/calf") is True
+
+
+async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -> None:
+    # Best-effort: when the info route is unreachable or empty the verdict is
+    # "cannot determine" (None), so the caller keeps the prior idempotent
+    # "already open" behaviour rather than failing a legitimate restart loudly.
+    raising = _StubClient(process_info_raises=RuntimeError("info route unavailable"))
+    assert await lifecycle._supervisor_belongs_to_home(raising, "/h") is None
+    empty = _StubClient(process_info=None)
+    assert await lifecycle._supervisor_belongs_to_home(empty, "/h") is None
 
 
 # --- start: happy path ------------------------------------------------------
@@ -502,6 +599,59 @@ async def test_start_running_but_not_ready_bridge_times_out_and_tears_down(
     assert client.get_process_calls, "the readiness gate must actually poll the bridge"
     out = capsys.readouterr().out.lower()
     assert "bridge" in out
+
+
+async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    # Fix #5: the priming reconcile (`update_project`) runs AFTER the detached
+    # supervisor is already up. If it raises (a PC reconcile error / transport
+    # failure), an unhandled exception would orphan the supervisor and dump a
+    # traceback — crashing `calfcord init`, since `start` is the wizard's start_fn.
+    # It must fail like the readiness-gate path right below it: tear the substrate
+    # back down via the BLOCKING seam, print an actionable error, and return 1.
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    spawn_blocking = _RecordingSpawn()
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        # The bridge would be Ready, but the priming reconcile blows up first, so
+        # the readiness gate must never be reached.
+        bridge_states=[{"is_ready": "Ready"}],
+        update_project_raises=RuntimeError("process-compose POST /project failed"),
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/calfcord",
+        agent_ids=[],
+        client=client,
+        spawn=spawn,
+        spawn_blocking=spawn_blocking,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    # The reconcile was attempted exactly once (the buggy first update).
+    assert len(client.update_project_calls) == 1
+    # No orphan: the supervisor is torn down via the BLOCKING seam (a racy detached
+    # `down` could let a retried `start` collide with a supervisor still stopping).
+    assert all("down" not in c for c in spawn.calls)
+    down_calls = [c for c in spawn_blocking.calls if "down" in c]
+    assert len(down_calls) == 1
+    down = down_calls[0]
+    assert "-p" in down
+    assert int(down[down.index("-p") + 1]) == lifecycle.pc_port_for(home)
+    # The readiness gate must NOT have been reached (we bailed at the reconcile).
+    assert client.get_process_calls == []
+    # An actionable, non-traceback error that points at the supervisor log.
+    out = capsys.readouterr().out.lower()
+    assert "error" in out
+    assert "process-compose.log" in out
 
 
 async def test_start_server_up_timeout_returns_nonzero_without_priming(

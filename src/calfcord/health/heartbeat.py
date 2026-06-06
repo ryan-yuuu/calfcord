@@ -7,9 +7,9 @@ agent/tools hosts) reads it to gate readiness. The contract (design §4.2 / §12
 * the beat carries ``{component, pid, started_at, last_beat, status, identity}``;
   ``identity`` is a *display* string (a bot name / numeric id) — never a token
   (§12.3), and never required;
-* :func:`write_beat` is **atomic** (temp file + :func:`os.replace`, mirroring
-  ``cli/_envfile.py``) so a probe never observes a half-written beat, and creates
-  ``state/health/`` on demand;
+* :func:`write_beat` is **atomic** (the shared :func:`calfcord._atomic.atomic_write_text`
+  — same-dir temp file + :func:`os.replace`) so a probe never observes a
+  half-written beat, and creates ``state/health/`` on demand;
 * :func:`read_beat` **never raises** on a missing or corrupt file — a stale or
   partial beat must read as "no fresh beat", not crash the readiness probe;
 * the clock is **injected** (``now``) everywhere, so freshness boundaries are
@@ -22,13 +22,13 @@ secrets loader (see the package docstring).
 
 from __future__ import annotations
 
-import contextlib
 import os
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
+
+from calfcord._atomic import atomic_write_text
 
 # TTL pinned relative to the runner's ~2s refresh interval (§12.1): a few missed
 # beats tolerate a slow GC pause / scheduler hiccup without flapping the probe,
@@ -97,20 +97,11 @@ def write_beat(
         identity=identity,
     )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = beat.model_dump_json()
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{component}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-        os.replace(tmp_name, path)
-    except BaseException:
-        # Never leave a half-written temp beat behind (incl. KeyboardInterrupt mid-write);
-        # a missing temp file (already replaced) must not mask the real exception.
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    # Atomic same-dir tmp + os.replace (see calfcord._atomic): a concurrent probe
+    # never observes a half-written beat. No mode is passed — a beat holds no
+    # secret, so it keeps the writer's default (mkstemp 0o600), matching the
+    # pre-extraction behaviour.
+    atomic_write_text(path, beat.model_dump_json())
 
     return beat
 

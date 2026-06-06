@@ -46,6 +46,7 @@ points at nothing.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -61,10 +62,59 @@ _DEFAULT_IMAGE = "calfcord:latest"
 # --from-env-file=.env`); we reference it, never inline the values (§12.3).
 _K8S_SECRET_NAME = "calfcord-secrets"
 
-# In-cluster broker Service name the ConfigMap could point roster pods at. We keep
-# the *configured* CALF_HOST_URL in the ConfigMap (honouring an external broker),
-# and expose the in-cluster broker under this name for the bundled-broker case.
+# In-cluster broker Service name the ConfigMap points roster pods at when the
+# bundled broker is used. An external/managed broker flows through verbatim; a
+# localhost-ish server_urls (the default `CALF_HOST_URL or "localhost"` _run_deploy
+# hands down) is rewritten to this Service so pods dial the bundled broker, not
+# their own loopback.
 _K8S_BROKER_SERVICE = "broker"
+
+# The bundled broker's listener port (the Service/Deployment expose it). A
+# localhost-ish server_urls with no explicit port resolves to this default.
+_K8S_BROKER_PORT = 9092
+
+# Hostnames that mean "this pod's own loopback" — useless across pods. server_urls
+# resolving to one of these is rewritten to the in-cluster broker Service.
+_LOOPBACK_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+def _resolve_config_host_url(server_urls: str) -> str:
+    """Resolve the ConfigMap ``CALF_HOST_URL`` for the bundled-broker manifest.
+
+    The default deploy path passes ``CALF_HOST_URL or "localhost"`` (single host),
+    but the k8s reference ships a Service named ``broker`` and one pod per process
+    type: a verbatim ``localhost`` would make every pod dial its own loopback and
+    the manifest fails on apply. So a loopback host (``localhost`` / ``127.0.0.1`` /
+    ``::1`` / empty, with or without ``:PORT``) resolves to the in-cluster Service
+    name, preserving an explicit port (a custom loopback port is the broker's
+    listener port). A real external/non-loopback broker passes through verbatim.
+    """
+    candidate = server_urls.strip()
+    # A multi-broker bootstrap list (e.g. "h1:9092,h2:9092") is the operator's
+    # explicit cross-host target — not a single loopback to rewrite — and is not a
+    # single URL ``urlsplit`` can parse, so pass it through verbatim.
+    if "," in candidate:
+        return server_urls
+    # The bare (unbracketed) IPv6 loopback does not survive ``urlsplit`` as a
+    # ``.hostname`` (only the bracketed "[::1]" form does), so normalise it here;
+    # a bare "::1" carries no port, so it resolves to the broker's default.
+    if candidate.lower() == "::1":
+        return f"{_K8S_BROKER_SERVICE}:{_K8S_BROKER_PORT}"
+    # urlsplit needs a scheme to populate .hostname/.port; the wire form is bare
+    # host:port (e.g. "localhost:9092"), so prepend a dummy scheme to parse it.
+    # ``.port`` raises ValueError on a non-integer/out-of-range port; an
+    # unparseable value is not a loopback we can confidently rewrite, so fall back
+    # to the verbatim passthrough rather than crash ``calfcord deploy``.
+    try:
+        parsed = urlsplit(f"//{candidate}")
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or _K8S_BROKER_PORT
+    except ValueError:
+        return server_urls
+    if host not in _LOOPBACK_HOSTS:
+        return server_urls
+    return f"{_K8S_BROKER_SERVICE}:{port}"
+
 
 # The console script each non-agent process type runs (design §6: the raw
 # calfkit-* entry points are the Altitude-3 multi-host primitives). Agents use
@@ -92,23 +142,34 @@ def render_systemd(*, home: str, launcher: str) -> str:
     the single seam that knows the ``up`` flags, the home-derived REST port, the
     priming reconcile and the readiness gate; reconstructing the ``up`` argv here
     would duplicate the §13.2 contract and drift. ``CALFCORD_HOME`` is exported so
-    the shim and ``pc_port_for`` resolve the same home, and ``Restart=on-failure``
-    recovers a crashed supervisor while leaving an operator-commanded ``stop``
-    alone.
+    the shim and ``pc_port_for`` resolve the same home. ``Restart=on-failure`` only
+    reacts to the *fork* (the ``calfcord start`` ExecStart) exiting non-zero — with
+    ``Type=forking`` and no ``PIDFile=`` systemd cannot track the detached
+    process-compose, so a crash *inside* the supervised tree is not auto-recovered
+    here (process-compose's own per-process restarts cover that); an
+    operator-commanded ``stop`` is left alone.
 
-    Headed as a *reference* unit (§11.6): the shape is correct, but the runtime
-    ``User=`` / paths vary per host, so the operator validates before enabling.
+    Emitted as a *user* unit (``WantedBy=default.target``, ``systemctl --user``):
+    the supervisor runs under the install owner's session, so the unit carries no
+    system-only ``User=`` / ``Group=`` directives (a ``--user`` unit rejects them).
+    Headed as a *reference* unit (§11.6): the shape is correct, but per-host paths
+    vary, so the operator validates before enabling.
     """
     # Plain text (not configparser.write, which lowercases nothing but emits its
     # own quirks): a systemd unit is hand-readable and the operator edits it.
     return (
-        "# calfcord substrate — systemd unit (REFERENCE: validate User=/paths for your host).\n"
+        "# calfcord substrate — systemd USER unit (REFERENCE: validate paths for your host).\n"
         "#\n"
         "# Models `calfcord start`: it forks a detached process-compose supervisor and\n"
         "# returns 0 once the bridge is healthy, so Type=forking is the faithful type.\n"
         "# ExecStart/ExecStop run the install shim — the single seam that owns the\n"
         "# process-compose `up` flags, the home-derived REST port, and the readiness gate.\n"
-        "# Set User=/Group= to the install owner, then: systemctl --user enable --now calfcord\n"
+        "# Install for the current login session: systemctl --user enable --now calfcord\n"
+        "# (a --user unit already runs as that login user — system-only owner directives\n"
+        "# do not apply and are intentionally omitted).\n"
+        "# Restart=on-failure only catches the `start` fork exiting non-zero; with\n"
+        "# Type=forking and no PIDFile= systemd can't track the detached supervisor, so a\n"
+        "# crash inside the tree is handled by process-compose's per-process restarts.\n"
         "[Unit]\n"
         "Description=calfcord substrate (broker + bridge)\n"
         "After=network-online.target\n"
@@ -173,8 +234,9 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
     """Render *reference* Kubernetes manifests for a distributed calfcord.
 
     A multi-document YAML stream: a comment header, a ConfigMap holding the shared
-    ``CALF_HOST_URL`` (honouring the configured ``server_urls`` so an external
-    broker flows through), a broker Service + Deployment, and one Deployment per
+    ``CALF_HOST_URL`` (an external ``server_urls`` flows through verbatim; a
+    localhost-ish one is rewritten to the bundled broker Service so pods don't dial
+    their own loopback), a broker Service + Deployment, and one Deployment per
     process type (bridge / router / tools / mcp) plus one per *defined* agent —
     each running a ``calfkit-*`` console script on the shipped image, dialing the
     shared broker. This is the Altitude-3 distributed shape, NOT ``calfcord start``
@@ -204,23 +266,37 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
         "# survive a pod restart.\n"
     )
 
+    # Resolve the shared CALF_HOST_URL once: an external/managed broker flows
+    # through verbatim; a localhost-ish server_urls (the default _run_deploy hands
+    # down) is rewritten to the bundled broker Service below — otherwise every pod
+    # would dial its own loopback and the manifest would fail on apply.
+    config_host_url = _resolve_config_host_url(server_urls)
+    # The port the in-cluster roster dials for the bundled broker. When the resolved
+    # URL targets our Service (localhost-ish input), the bundled broker Service +
+    # advertised listener follow that port so the reference manifest is internally
+    # consistent (a custom loopback port survives end-to-end). For an external
+    # broker the bundled workload is moot (the header tells operators to drop it).
+    cluster_broker_port = _K8S_BROKER_PORT
+    if config_host_url.startswith(f"{_K8S_BROKER_SERVICE}:"):
+        cluster_broker_port = int(config_host_url.rsplit(":", 1)[1])
+
     docs: list[dict] = []
 
-    # Shared, non-secret config. CALF_HOST_URL honours the configured broker so an
-    # external/managed Kafka flows through; the bundled broker Service below is the
-    # default in-cluster target when server_urls points at it.
+    # Shared, non-secret config.
     docs.append(
         {
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {"name": "calfcord-config", "labels": {"app": "calfcord"}},
-            "data": {"CALF_HOST_URL": server_urls},
+            "data": {"CALF_HOST_URL": config_host_url},
         }
     )
 
     # Broker: a single-instance workload + a ClusterIP Service the roster dials.
     # Memory storage (matching the shipped compose) — annotate durable storage as
-    # an operator choice in the header.
+    # an operator choice in the header. The container always listens on the broker's
+    # native 9092; the Service maps the dialed port to it and the advertised listener
+    # matches what clients dial (the resolved CALF_HOST_URL above).
     docs.append(
         {
             "apiVersion": "apps/v1",
@@ -242,10 +318,11 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
                                 "args": [
                                     "broker",
                                     "--storage-engine=memory://tansu/",
-                                    "--listener-url=tcp://0.0.0.0:9092",
-                                    f"--advertised-listener-url=tcp://{_K8S_BROKER_SERVICE}:9092",
+                                    f"--listener-url=tcp://0.0.0.0:{_K8S_BROKER_PORT}",
+                                    "--advertised-listener-url="
+                                    f"tcp://{_K8S_BROKER_SERVICE}:{cluster_broker_port}",
                                 ],
-                                "ports": [{"containerPort": 9092}],
+                                "ports": [{"containerPort": _K8S_BROKER_PORT}],
                             }
                         ]
                     },
@@ -263,7 +340,7 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
             },
             "spec": {
                 "selector": {"app": "calfcord", "component": "broker"},
-                "ports": [{"port": 9092, "targetPort": 9092}],
+                "ports": [{"port": cluster_broker_port, "targetPort": _K8S_BROKER_PORT}],
             },
         }
     )

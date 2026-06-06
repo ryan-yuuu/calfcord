@@ -47,9 +47,14 @@ from collections.abc import Awaitable, Callable
 
 from calfcord.agents.definition import AgentDefinition
 from calfcord.control_plane.probe import probe_live_roster
-from calfcord.supervisor.client import ProcessComposeClient
+from calfcord.supervisor._workspace import (
+    WORKSPACE_NOT_RUNNING_HINT,
+    iter_process_dicts,
+    resolve_client,
+    workspace_is_up,
+)
+from calfcord.supervisor.client import ProcessComposeClient, ProcessComposeError
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
-from calfcord.supervisor.lifecycle import pc_port_for
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
 # AgentDefinitions of every agent answering across the org. Injected so tests
@@ -61,9 +66,10 @@ Probe = Callable[[str], Awaitable[list[AgentDefinition]]]
 # the roster ops when they grow a time dimension.
 Clock = Callable[[], float]
 
-# The single hint shown when an op needs a running workspace and there isn't one.
-# Centralized so every roster op (and ``lifecycle.status``) speak with one voice.
-_NOT_RUNNING_HINT = "workspace not running (start it with: calfcord start)"
+# The single hint shown when an op needs a running workspace and there isn't one;
+# the one shared :data:`_workspace.WORKSPACE_NOT_RUNNING_HINT` (Fix #14), aliased
+# for the call sites below so every roster op speaks with one voice.
+_NOT_RUNNING_HINT = WORKSPACE_NOT_RUNNING_HINT
 
 # Process Compose's "this process is up" status string (v1.110.0). Only a Running
 # roster process counts as *physically* up for the ps union; a Stopped/Pending
@@ -71,14 +77,10 @@ _NOT_RUNNING_HINT = "workspace not running (start it with: calfcord start)"
 _PC_RUNNING = "Running"
 
 
-def _resolve_client(client: ProcessComposeClient | None, home: str) -> ProcessComposeClient:
-    """Resolve the REST client, defaulting to a per-home supervisor client.
-
-    Mirrors :func:`calfcord.supervisor.lifecycle._resolve_client`: the port is
-    derived from ``$CALFCORD_HOME`` so a second install on the same host talks to
-    its own supervisor, and the same port the ``up -p`` flag pinned.
-    """
-    return client if client is not None else ProcessComposeClient(port=pc_port_for(home))
+# A per-home client resolver alias kept for the call sites + the test that pins
+# the default wiring (``test_roster._resolve_client``); the body is the one shared
+# :func:`_workspace.resolve_client` (Fix #14 consolidation).
+_resolve_client = resolve_client
 
 
 def _resolve_probe(probe: Probe | None) -> Probe:
@@ -97,18 +99,9 @@ def _resolve_probe(probe: Probe | None) -> Probe:
     return _default_probe
 
 
-async def _workspace_is_up(client: ProcessComposeClient) -> bool:
-    """Whether the supervisor REST server answers — a successful ``project_state``.
-
-    The client raises ``RuntimeError`` on a transport failure (server not up /
-    wrong port), which is exactly "the workspace isn't open" here; any other error
-    is a real bug and is left to propagate (it is not swallowed into "down").
-    """
-    try:
-        await client.project_state()
-    except RuntimeError:
-        return False
-    return True
+# A workspace-readiness alias kept for the call sites below; the body is the one
+# shared :func:`_workspace.workspace_is_up` (Fix #14 consolidation).
+_workspace_is_up = workspace_is_up
 
 
 async def agent_start(
@@ -134,11 +127,16 @@ async def agent_start(
        start is a benign no-op, not a failure.
     3. **Start** — otherwise ``POST /process/start/{name}`` against the local
        supervisor; on success print ``agent <name> online`` and return ``0``.
-    4. **Not-declared (§13.1)** — if the start raises (a brand-new agent authored
-       after ``calfcord start`` is not a declared slot, so the PC server errors),
-       catch it and steer the operator to a workspace reload (``calfcord stop &&
-       calfcord start``) rather than an in-place ``update_project`` (which would
-       bounce broker+bridge on v1.110.0). Return ``1``.
+    4. **Not-declared vs. genuine fault (§13.1 / Fix #9)** — if the start raises,
+       branch on the STRUCTURAL HTTP status the client carries: a **4xx** is the
+       not-declared case (a brand-new agent authored after ``calfcord start`` is
+       not a declared slot, so the PC server rejects it), so steer the operator to
+       a workspace reload (``calfcord stop && calfcord start``) rather than an
+       in-place ``update_project`` (which would bounce broker+bridge on v1.110.0)
+       and return ``1``. Anything else — a **5xx**, or a transport failure with no
+       status — is a genuine infra fault, NOT a brand-new agent; per the error
+       convention it is re-raised loudly with caller/target/correlation rather than
+       mistranslated into the benign reload hint that would mask it.
 
     ``client`` / ``probe`` are injected for testing; ``now`` is accepted for
     symmetry with the rest of the lifecycle surface and is unused today.
@@ -169,17 +167,26 @@ async def agent_start(
 
     try:
         await client.start_process(name)
-    except RuntimeError:
-        # The workspace check above already proved the REST server is up, so a
-        # failure here is almost certainly "no such declared process" — a
-        # brand-new agent authored after `calfcord start`. §13.1: do NOT recover
-        # with `update_project` (it bounces the substrate); reload cleanly.
-        print(
-            f"agent {name} is not in the running workspace. Bringing a brand-new "
-            "agent online needs a workspace reload: run `calfcord stop` then "
-            "`calfcord start` (an in-place update would bounce the broker and bridge)."
-        )
-        return 1
+    except ProcessComposeError as exc:
+        # The workspace check above already proved the REST server is up, so branch
+        # on the structural status (Fix #9): a 4xx is "no such declared process" —
+        # a brand-new agent authored after `calfcord start`. §13.1: do NOT recover
+        # with `update_project` (it bounces the substrate); reload cleanly. A 5xx
+        # (or no status — a transport fault) is a genuine infra failure, not a
+        # brand-new agent, so it is re-raised loudly below rather than mistranslated
+        # into the reload hint that would mask it.
+        status = exc.status_code
+        if status is not None and 400 <= status < 500:
+            print(
+                f"agent {name} is not in the running workspace. Bringing a brand-new "
+                "agent online needs a workspace reload: run `calfcord stop` then "
+                "`calfcord start` (an in-place update would bounce the broker and bridge)."
+            )
+            return 1
+        raise RuntimeError(
+            f"agent_start: starting agent {name!r} failed against the local "
+            f"supervisor (not a not-declared 4xx): {exc}"
+        ) from exc
 
     print(f"agent {name} online")
     return 0
@@ -294,16 +301,13 @@ def _running_roster_names(payload: object) -> set[str]:
     """The names of this host's *roster* processes that are ``Running`` (§3.4).
 
     Filters Process Compose's process list to non-substrate (roster) entries in
-    the ``Running`` state — the physical half of the ps union. Accepts both the
-    bare-list and ``{"data": [...]}`` wire shapes (the shape wobbles across PC
-    versions) so a shape change does not silently blank the physical view, and
-    skips non-dict / unnamed entries defensively.
+    the ``Running`` state — the physical half of the ps union. The wire-shape
+    tolerance (bare list vs ``{"data": [...]}``, skip non-dicts) is the one shared
+    :func:`_workspace.iter_process_dicts` (Fix #14); this only applies the
+    roster/Running filter, skipping unnamed entries defensively.
     """
-    items = payload.get("data", []) if isinstance(payload, dict) else payload
     names: set[str] = set()
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
+    for item in iter_process_dicts(payload):
         name = item.get("name")
         if not name or name in _NON_AGENT_PROCESSES:
             continue

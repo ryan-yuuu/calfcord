@@ -327,7 +327,22 @@ async def _gather_runtime(
     # wire-shape tolerance and reserved-name filtering ``agent ps`` uses.
     from calfcord.supervisor.roster import _running_roster_names
 
-    running_local = _running_roster_names(await pc_client.list_processes())
+    # The supervisor (Process Compose) is a SEPARATE failure domain from the
+    # (already-proven-alive) bridge: its REST surface can miss (down / wrong port)
+    # while the bridge beats. That read must degrade like the deep probe above —
+    # never crash a read-only doctor on a drift read it cannot complete.
+    try:
+        running_local = _running_roster_names(await pc_client.list_processes())
+    except Exception:
+        results.append(
+            Result(
+                "drift",
+                "warn",
+                "couldn't reach the supervisor to read the local roster; try again shortly",
+            )
+        )
+        return results
+
     registered = {defn.agent_id for defn in roster}
     results.append(_check_drift(running_local=running_local, registered=registered))
     return results

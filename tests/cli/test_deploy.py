@@ -94,6 +94,24 @@ def test_systemd_is_annotated_as_reference() -> None:
     assert "reference" in rendered.lower()
 
 
+def test_systemd_is_a_coherent_user_unit() -> None:
+    # The unit is a USER unit (WantedBy=default.target + `systemctl --user`).
+    # User=/Group= are SYSTEM-unit directives a --user unit rejects, so the header
+    # must NOT tell the operator to set them alongside `systemctl --user enable`.
+    rendered = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)
+    assert "systemctl --user" in rendered
+    assert _systemd_ini()["Install"]["WantedBy"] == "default.target"
+    assert "User=" not in rendered, "a --user unit rejects User=; don't advise it"
+    assert "Group=" not in rendered, "a --user unit rejects Group=; don't advise it"
+
+
+def test_systemd_header_does_not_overclaim_crash_recovery() -> None:
+    # Type=forking with no PIDFile cannot reliably track the detached supervisor, so
+    # the header must not claim Restart=on-failure "recovers a crashed supervisor".
+    rendered = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER).lower()
+    assert "recovers a crashed supervisor" not in rendered
+
+
 def test_systemd_is_deterministic() -> None:
     a = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)
     b = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)
@@ -142,6 +160,66 @@ def test_k8s_configmap_carries_the_configured_broker_url() -> None:
     # config must reference what the operator configured.
     values = " ".join(str(v) for cm in configmaps.values() for v in cm["data"].values())
     assert _BROKER in values
+
+
+def _k8s_configmap_host_url(server_urls: str) -> str:
+    """Render with the given ``server_urls`` and return the ConfigMap CALF_HOST_URL."""
+    rendered = deploy.render_k8s(agent_ids=_AGENTS, server_urls=server_urls, image="calfcord:latest")
+    configmaps = _by_name(
+        [doc for doc in yaml.safe_load_all(rendered) if doc is not None], "ConfigMap"
+    )
+    return configmaps["calfcord-config"]["data"]["CALF_HOST_URL"]
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    # Includes the IPv6 loopback in both the bare ("::1") and bracketed
+    # ("[::1]:9092") wire forms — the unbracketed form does not survive urlsplit
+    # as a hostname, so it is normalised explicitly.
+    ["localhost", "localhost:9092", "127.0.0.1", "127.0.0.1:9092", "", "::1", "[::1]:9092"],
+)
+def test_k8s_localhost_broker_resolves_to_in_cluster_service(server_urls: str) -> None:
+    # The bundled-broker manifest ships a Service named `broker` at broker:9092, so a
+    # localhost-ish server_urls (the default _run_deploy hands down `CALF_HOST_URL or
+    # "localhost"`) must become the in-cluster Service name — otherwise every pod
+    # dials its own loopback and the manifest fails on apply.
+    assert _k8s_configmap_host_url(server_urls) == "broker:9092"
+
+
+def test_k8s_localhost_broker_preserves_a_custom_port() -> None:
+    # A non-default loopback port is the broker's listener port, so resolving to the
+    # Service must keep it (the Service/Deployment port follow the same default).
+    assert _k8s_configmap_host_url("localhost:1234") == "broker:1234"
+
+
+def test_k8s_external_broker_passes_through_verbatim() -> None:
+    # A real external/managed Kafka must flow through unchanged — only loopback is
+    # rewritten to the in-cluster Service.
+    assert _k8s_configmap_host_url(_BROKER) == _BROKER
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    # A multi-broker bootstrap list is the operator's explicit cross-host target,
+    # not a single loopback to rewrite — and is not a single URL `urlsplit` can
+    # parse, so it must flow through verbatim (never crash `calfcord deploy k8s`).
+    ["127.0.0.1:9092,host2:9092", "broker-a:9092,broker-b:9092"],
+)
+def test_k8s_multi_broker_bootstrap_passes_through_verbatim(server_urls: str) -> None:
+    assert _k8s_configmap_host_url(server_urls) == server_urls
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    # A loopback host with an UNPARSEABLE port — `urlsplit(...).port` raises
+    # ValueError on a non-integer or out-of-range port. The resolver must fall
+    # back to a verbatim passthrough, never let that ValueError crash
+    # `calfcord deploy`. (The plain non-loopback `host:9092` case is covered by
+    # the external-broker test; these pin the loopback ValueError branch.)
+    ["localhost:abc", "localhost:65536", "localhost:-1"],
+)
+def test_k8s_unparseable_broker_port_passes_through_verbatim(server_urls: str) -> None:
+    assert _k8s_configmap_host_url(server_urls) == server_urls
 
 
 def test_k8s_renders_one_deployment_per_process_type() -> None:

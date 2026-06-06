@@ -293,6 +293,53 @@ def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["doctor"]) == "calfcord-cli doctor"
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Lifecycle verbs have no console script of their own — they MUST land on
+        # the calfcord-cli argparse entry point, with their sub-args forwarded
+        # verbatim. If the dispatch ever lets one fall through to the bare uv-run
+        # passthrough, the shim would try to exec a nonexistent `logs`/`explain`/
+        # `deploy` console script and `calfcord logs`/`explain`/`deploy` would
+        # break — which this guards against.
+        (["logs"], "calfcord-cli logs"),
+        (["logs", "broker", "-f"], "calfcord-cli logs broker -f"),
+        (["explain", "topology"], "calfcord-cli explain topology"),
+        (["deploy", "systemd"], "calfcord-cli deploy systemd"),
+    ],
+)
+def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
+    tmp_path: Path, argv: list[str], expected: str
+) -> None:
+    """The new lifecycle verbs (logs/explain/deploy) route to calfcord-cli, args intact."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, argv) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Regression: adding the lifecycle verbs above must not perturb how the
+        # pre-existing verbs route. `run <svc>` still maps to the calfkit-* runner
+        # console scripts; the management verbs still land on calfcord-cli; and the
+        # MCP config verbs still reach their own console scripts (not calfcord-cli).
+        (["run", "bridge"], "calfkit-bridge"),
+        (["run", "agent", "scribe"], "calfkit-agent scribe"),
+        (["init"], "calfcord-cli init"),
+        (["doctor"], "calfcord-cli doctor"),
+        (["mcp", "add", "gmail"], "calfcord-mcp-add gmail"),
+    ],
+)
+def test_shim_existing_verbs_still_route_after_lifecycle_verbs(
+    tmp_path: Path, argv: list[str], expected: str
+) -> None:
+    """Existing verbs keep their routing once the lifecycle verbs are in the dispatch."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, argv) == expected
+
+
 def _run_shim_proc(home: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Invoke the shim and return the CompletedProcess (for help/error paths that exit before uv)."""
     (home / "bin").mkdir(parents=True, exist_ok=True)

@@ -28,38 +28,26 @@ from __future__ import annotations
 
 import os
 
+from calfcord.supervisor._workspace import (
+    WORKSPACE_NOT_RUNNING_HINT,
+    resolve_client,
+    workspace_is_up,
+)
 from calfcord.supervisor.client import ProcessComposeClient
-from calfcord.supervisor.lifecycle import pc_port_for
 
-# The single hint shown when an op needs a running workspace and there isn't one.
-# Mirrors :data:`calfcord.supervisor.roster._NOT_RUNNING_HINT` so every lifecycle
-# surface (substrate, agent roster, components) speaks the same one voice.
-_NOT_RUNNING_HINT = "workspace not running (start it with: calfcord start)"
+# The single hint shown when an op needs a running workspace and there isn't one;
+# the one shared :data:`_workspace.WORKSPACE_NOT_RUNNING_HINT` (Fix #14), aliased
+# for the call sites below so every lifecycle surface speaks the same one voice.
+_NOT_RUNNING_HINT = WORKSPACE_NOT_RUNNING_HINT
 
+# A per-home client resolver alias kept for the call sites + the test that pins the
+# default wiring (``test_component._resolve_client``); the body is the one shared
+# :func:`_workspace.resolve_client` (Fix #14 consolidation).
+_resolve_client = resolve_client
 
-def _resolve_client(client: ProcessComposeClient | None, home: str) -> ProcessComposeClient:
-    """Resolve the REST client, defaulting to a per-home supervisor client.
-
-    Mirrors :func:`calfcord.supervisor.lifecycle._resolve_client` /
-    :func:`calfcord.supervisor.roster._resolve_client`: the port is derived from
-    ``$CALFCORD_HOME`` so a second install on one host talks to its own supervisor
-    on the same port the ``up -p`` flag pinned.
-    """
-    return client if client is not None else ProcessComposeClient(port=pc_port_for(home))
-
-
-async def _workspace_is_up(client: ProcessComposeClient) -> bool:
-    """Whether the supervisor REST server answers — a successful ``project_state``.
-
-    The client raises ``RuntimeError`` on a transport failure (server not up /
-    wrong port), which is exactly "the workspace isn't open" here; any other error
-    is a real bug and is left to propagate (it is not swallowed into "down").
-    """
-    try:
-        await client.project_state()
-    except RuntimeError:
-        return False
-    return True
+# A workspace-readiness alias kept for the call sites below; the body is the one
+# shared :func:`_workspace.workspace_is_up` (Fix #14 consolidation).
+_workspace_is_up = workspace_is_up
 
 
 async def component_start(

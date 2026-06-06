@@ -197,6 +197,33 @@ def _resolve_home() -> Path | None:
     return Path(home) if home else None
 
 
+_SUPERVISOR_HOME_DETAIL = "the supervisor has a stable home."
+
+
+def _require_home(command: str, *, detail: str = _SUPERVISOR_HOME_DETAIL) -> Path | None:
+    """Resolve the install home, or print the native-install error and return ``None``.
+
+    Every supervisor-scoped verb (substrate/agent/router/component lifecycle,
+    ``logs``, ``deploy``) is install-scoped: its lock, REST port, logs, shim, and
+    manifests all live under ``$CALFCORD_HOME``. A dev run (no ``CALFCORD_HOME``)
+    has no stable home, so each refuses with the SAME actionable message rather
+    than crashing in ``os.fspath(None)`` downstream. Centralizing the guard keeps
+    that message — and the "what to do" steer — from drifting across the six
+    call sites; ``command`` is the backticked verb the operator typed (e.g.
+    ``"agent stop"``, ``"deploy"``) and ``detail`` the trailing rationale clause
+    (most want the default; ``start``/``logs``/``deploy`` add shim/logs/manifest
+    specifics). Returns the resolved :class:`~pathlib.Path` on a native install,
+    or ``None`` (after printing) so the caller can ``return 1`` immediately.
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME "
+            f"(or run the installer) so {detail}"
+        )
+    return home
+
+
 def _resolve_state_dir(home: Path | None) -> Path:
     """Per-agent state dir (channel-subscription JSON), needed by rename/delete.
 
@@ -273,12 +300,8 @@ def _run_agent_roster(command: str, name: str | None) -> int:
     (``ps``). ``stop``/``restart`` need no probe. Each roster coroutine's POSIX
     exit code is propagated unchanged.
     """
-    home = _resolve_home()
+    home = _require_home(f"agent {command}")
     if home is None:
-        print(
-            f"error: `calfcord agent {command}` needs a native install — set "
-            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
-        )
         return 1
 
     if command == "stop":
@@ -335,11 +358,14 @@ def _run_healthcheck(component: str) -> int:
     """Run the readiness probe for ``component`` and return its exit code.
 
     The Process Compose exec probe shells out to ``calfcord _healthcheck
-    <component>`` on the agent/tools hosts (design §4.2 / §13.2). The broker probe
-    is metadata reachability built from ``CALF_HOST_URL`` (same default the runners
-    use); every other component is judged by heartbeat freshness under the resolved
-    home's ``state/health/``. ``now`` is the real clock — freshness is wall-time
-    here, injectable only in the unit-tested :func:`~calfcord.health.check.healthcheck`.
+    <component>`` on the substrate hosts (design §4.2 / §13.2). Only the two
+    components that emit a real signal are probeable: the ``broker`` (metadata
+    reachability built from ``CALF_HOST_URL``, the same default the runners use)
+    and the ``bridge`` (heartbeat freshness + Discord-connected, under the resolved
+    home's ``state/health/``). Any other component raises — the roster runners
+    declare no readiness probe and write no heartbeat. ``now`` is the real clock —
+    freshness is wall-time here, injectable only in the unit-tested
+    :func:`~calfcord.health.check.healthcheck`.
     """
     home = _resolve_home() or Path()
     # Only the broker path needs (and awaits) a broker probe; a heartbeat check
@@ -373,12 +399,8 @@ def _run_lifecycle(command: str) -> int:
     consumes) so the generated project declares one disabled slot per ``.md``.
     The lifecycle coroutine's POSIX exit code is propagated unchanged.
     """
-    home = _resolve_home()
+    home = _require_home(command, detail="the supervisor has a stable home and shim.")
     if home is None:
-        print(
-            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME "
-            "(or run the installer) so the supervisor has a stable home and shim."
-        )
         return 1
 
     if command == "stop":
@@ -440,12 +462,8 @@ def _run_router(args: argparse.Namespace) -> int:
     # dev run (no CALFCORD_HOME) has no stable home for the supervisor, so these
     # verbs refuse with the same actionable native-install message every other
     # lifecycle surface uses — rather than crashing in os.fspath(None) downstream.
-    home = _resolve_home()
+    home = _require_home(f"router {args.router_command}")
     if home is None:
-        print(
-            f"error: `calfcord router {args.router_command}` needs a native install — set "
-            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
-        )
         return 1
     if args.router_command == "start":
         return asyncio.run(router_config.router_start(home, env_path=env_path))
@@ -481,12 +499,8 @@ def _run_component(name: str, verb: str) -> int:
     in the whole add machinery), so a light, clean reuse is not available — per
     design §12.4 the veneer is just ``component_start``.
     """
-    home = _resolve_home()
+    home = _require_home(f"{name} {verb}")
     if home is None:
-        print(
-            f"error: `calfcord {name} {verb}` needs a native install — set "
-            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
-        )
         return 1
 
     if verb == "start":
@@ -507,12 +521,8 @@ def _run_logs(component: str | None, *, follow: bool) -> int:
     :func:`logs.tail` reads files straight off disk, and its ``-f`` follow loop exits
     cleanly on Ctrl-C (``main`` maps the interrupt to 130).
     """
-    home = _resolve_home()
+    home = _require_home("logs", detail="the supervisor has a stable home and logs dir.")
     if home is None:
-        print(
-            "error: `calfcord logs` needs a native install — set CALFCORD_HOME "
-            "(or run the installer) so the supervisor has a stable home and logs dir."
-        )
         return 1
     _, agents_dir = init.resolve_paths(home)
     return logs.tail(home, agents_dir=agents_dir, component=component, follow=follow)
@@ -530,12 +540,8 @@ def _run_deploy(target: str, *, output: str | None) -> int:
     ``server_urls`` defaults to ``localhost`` — the same default the runners and
     ``start`` use. Synchronous (pure text rendering, no broker, no REST).
     """
-    home = _resolve_home()
+    home = _require_home("deploy", detail="the manifest can reference a stable home and shim.")
     if home is None:
-        print(
-            "error: `calfcord deploy` needs a native install — set CALFCORD_HOME "
-            "(or run the installer) so the manifest can reference a stable home and shim."
-        )
         return 1
     env_path, agents_dir = init.resolve_paths(home)
     return deploy.run(

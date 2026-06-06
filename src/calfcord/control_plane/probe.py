@@ -31,6 +31,18 @@ from calfcord.control_plane.topics import AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TO
 
 _DEFAULT_PROBE_WINDOW_S = 2.0
 
+_PING_REPUBLISH_INTERVAL_S = 0.5
+"""How often the probe re-broadcasts its discovery ping across the window.
+
+aiokafka resolves a consumer group's partition assignment *asynchronously* after
+``broker.start()``, so a single ping fired at t=0 races the join: any replies that
+land in that join gap are dropped at ``auto_offset_reset="latest"``, under-counting
+live agents (worst for remote agents — the distributed case — whose round-trip is
+longest). Re-broadcasting every ~0.5s until the window elapses guarantees at least
+one ping lands AFTER the group has joined, so every running agent re-announces into
+a listening collector. :func:`reduce_live_roster` dedupes by ``agent_id``, so the
+extra rounds are idempotent and total latency stays bounded by ``timeout_s``."""
+
 
 def reduce_live_roster(messages: Iterable[AgentStateMessage]) -> list[AgentStateEvent]:
     """Replay control-plane messages into the current live roster.
@@ -66,11 +78,15 @@ async def probe_live_roster(
 
     Host-agnostic and bridge-independent: connects a transient client to
     ``server_urls``, subscribes to ``agent.state`` at ``auto_offset_reset="latest"``
-    (so only responses to *this* probe are seen, not retained history), broadcasts
-    a discovery ping — exactly what the bridge does at ``on_ready`` — and collects
-    the state events running agents publish in reply for ``timeout_s`` seconds.
-    Only currently-running agents answer, so the result is true liveness with no
-    stale entries (unlike replaying the log or reading the bridge's registry).
+    (so only responses to *this* probe are seen, not retained history), then
+    RE-BROADCASTS a discovery ping every :data:`_PING_REPUBLISH_INTERVAL_S` across
+    the ``timeout_s`` window — exactly the ping the bridge sends at ``on_ready``,
+    but repeated to defeat the consumer-group join race (a lone t=0 ping can land
+    before partitions are assigned and its replies be dropped at ``latest``). It
+    collects the state events running agents publish in reply throughout the
+    window. Only currently-running agents answer, so the result is true liveness
+    with no stale entries (unlike replaying the log or reading the bridge's
+    registry). Total latency stays bounded by ``timeout_s``.
 
     The subscriber is registered before the broker starts and uses a unique
     consumer group so it never disturbs the bridge's own ``agent.state`` group.
@@ -99,7 +115,20 @@ async def probe_live_roster(
         await provision_and_start_broker(
             client, server_urls, [AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC]
         )
-        await publish_discovery_ping(client)
-        await asyncio.sleep(timeout_s)
+        # Re-broadcast the discovery ping across the whole window rather than once
+        # at t=0: the group's partition assignment lands asynchronously after the
+        # bare start, so a lone t=0 ping races the join and replies in that gap are
+        # dropped at latest offset (see ``_PING_REPUBLISH_INTERVAL_S``). The
+        # collector runs concurrently throughout, so each round's re-announcements
+        # accumulate; reduce_live_roster dedupes by agent_id, making re-rounds
+        # idempotent. The window is bounded by ``timeout_s``: the loop never sleeps
+        # past the deadline and stops the instant it is reached.
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            await publish_discovery_ping(client)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_PING_REPUBLISH_INTERVAL_S, remaining))
 
     return [state_event_to_definition(event) for event in reduce_live_roster(collected)]

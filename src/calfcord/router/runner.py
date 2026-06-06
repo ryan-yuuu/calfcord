@@ -162,14 +162,14 @@ async def _amain() -> None:
     await _prewarm_codex_if_needed(definition)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
-        # This runner uses the managed Worker.run() (via _run_worker below),
+        # This runner uses the managed Worker (started via _run_worker below),
         # whose _on_startup hook + the connect-time pre-start hook auto-provision
         # the router/fan-out node topics AND the client reply topic at broker
         # start. The only gap is the ambient discard topic: it is a publish-only
         # terminal-callback target with no subscriber, so topics_for_nodes() can
         # never see it. Provision it explicitly now (the standalone provisioner
         # opens its own admin connection, so this is fine before the broker
-        # start that Worker.run() owns); on a no-auto-create broker the router's
+        # start that Worker.start() owns); on a no-auto-create broker the router's
         # ambient ReturnCall publish would otherwise fail.
         await provision_extra_topics(server_urls, router_infra_topics())
 

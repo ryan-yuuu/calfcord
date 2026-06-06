@@ -25,10 +25,10 @@ Two properties are deliberate and load-bearing:
   ``extra="ignore"`` policy used for long-lived runtime state — a setup
   checkpoint is short-lived and cheap to rebuild, so safety beats compatibility.
 
-The write is **atomic** (temp file in the same directory + :func:`os.replace`,
-mirroring :mod:`calfcord.cli._envfile` and :mod:`calfcord.agents.state`) so a
-concurrent reader never sees a half-written file, and ``chmod 0600`` to match the
-sibling state writers — the file holds no secrets (only step markers and the
+The write is **atomic** (the shared :func:`calfcord._atomic.atomic_write_text`
+— same-dir temp file + :func:`os.replace`) so a concurrent reader never sees a
+half-written file, and ``chmod 0600`` to match the sibling state writers — the
+file holds no secrets (only step markers and the
 non-secret guild/channel IDs the operator already picked from a menu), but the
 install's ``state/`` dir is uniformly owner-only and a stray temp file or
 world-readable artifact in there is needless surface.
@@ -40,15 +40,14 @@ a real ``$CALFCORD_HOME``, or the wall clock.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
+
+from calfcord._atomic import atomic_write_text
 
 _CHECKPOINT_FILENAME = "setup.json"
 _STATE_DIRNAME = "state"
@@ -154,18 +153,8 @@ def save(path: Path, checkpoint: SetupCheckpoint, *, now: Callable[[], datetime]
     payload["updated_at"] = clock().isoformat()
     body = json.dumps(payload, indent=2)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(body)
-        os.chmod(tmp_name, _SECRET_FILE_MODE)
-        os.replace(tmp_name, path)
-    except BaseException:
-        # Don't leave a half-written temp file behind on any failure (including
-        # KeyboardInterrupt during the write). A missing temp file (already
-        # replaced) must not mask the original exception being re-raised.
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    # Atomic same-dir tmp + os.replace, chmod 0600 (the shared
+    # calfcord._atomic.atomic_write_text): a concurrent reader never sees a
+    # half-written file, the parent dir is created on demand, and a crashed write
+    # leaves no ``.tmp`` orphan in the install's owner-only ``state/`` dir.
+    atomic_write_text(path, body, mode=_SECRET_FILE_MODE)

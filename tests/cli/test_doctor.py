@@ -311,12 +311,20 @@ def _agent(agent_id: str) -> AgentDefinition:
 
 
 class _StubPCClient:
-    """A minimal ProcessComposeClient stand-in exposing only ``list_processes``."""
+    """A minimal ProcessComposeClient stand-in exposing only ``list_processes``.
 
-    def __init__(self, processes):
+    ``raises`` models the supervisor being unreachable for the drift read — a REST
+    miss that is a SEPARATE failure domain from the (alive) bridge, so doctor must
+    degrade to a warn rather than crash on it.
+    """
+
+    def __init__(self, processes, *, raises: Exception | None = None):
         self._processes = processes
+        self._raises = raises
 
     async def list_processes(self):
+        if self._raises is not None:
+            raise self._raises
         return self._processes
 
 
@@ -501,6 +509,35 @@ def test_no_drift_when_running_matches_registered(monkeypatch, tmp_path, capsys)
     assert rc == 0
     assert "drift" in out.lower()  # the drift check renders, and is ok
     assert "✗" not in out
+
+
+def test_drift_supervisor_unreachable_warns_not_crashes(monkeypatch, tmp_path, capsys):
+    # Fix #6: the bridge is alive (fresh beat) and the deep probe answers, but the
+    # supervisor (Process Compose) is a SEPARATE failure domain — its
+    # `list_processes` can miss (REST down / wrong port). That read is NOT wrapped
+    # like the deep-probe above it, so an unhandled raise would crash a READ-ONLY
+    # doctor. doctor must degrade the drift check to a warn instead.
+    async def probe(server_urls):
+        return [_agent("scribe")]
+
+    env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
+    rc = doctor.run(
+        env_path=env_path,
+        agents_dir=agents_dir,
+        client_factory=_factory(_resp_ok),
+        home=home,
+        server_urls="localhost:9092",
+        now=_NOW,
+        read_beat_fn=_reader({"bridge": _beat()}),
+        probe_fn=probe,
+        pc_client=_StubPCClient([], raises=RuntimeError("supervisor REST down")),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0  # a warn never fails a read-only doctor
+    assert "⚠" in out
+    assert "drift" in out.lower()
+    # The deep probe still rendered its result (the supervisor miss is isolated).
+    assert "scribe" in out
 
 
 def test_runtime_section_keeps_static_checks(monkeypatch, tmp_path, capsys):

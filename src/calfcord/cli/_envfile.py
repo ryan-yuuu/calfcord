@@ -7,10 +7,11 @@ operator. A general-purpose dotenv library would happily rewrite that file
 the trivial ``KEY=VALUE`` format here and guarantee an in-place upsert that
 leaves every comment, blank line, and unrelated key exactly where it was.
 
-Writes are atomic (temp file + :func:`os.replace`) and ``chmod 0600`` because
-the file holds API keys and the Discord bot token — a partial write or a
-world-readable secrets file is a real hazard, so both are handled here in the
-one place that touches the file.
+Writes are atomic (the shared :func:`calfcord._atomic.atomic_write_text` —
+temp file + :func:`os.replace`) and ``chmod 0600`` because the file holds API
+keys and the Discord bot token — a partial write or a world-readable secrets
+file is a real hazard, so both are handled by the one writer the upsert routes
+through.
 
 Scope: values are single-line ``KEY=VALUE`` pairs (tokens, keys, ids, urls). A
 value containing a newline is rejected (it would split into a second, malformed
@@ -23,11 +24,10 @@ processes actually load.
 
 from __future__ import annotations
 
-import contextlib
-import os
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+
+from calfcord._atomic import atomic_write_text
 
 _SECRET_FILE_MODE = 0o600
 
@@ -140,16 +140,7 @@ def upsert(path: Path, updates: Mapping[str, str]) -> None:
     else:
         body = "\n" if original.endswith("\n") else ""
 
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(body)
-        os.chmod(tmp_name, _SECRET_FILE_MODE)
-        os.replace(tmp_name, path)
-    except BaseException:
-        # Don't leave a half-written temp file behind on any failure (including
-        # KeyboardInterrupt during a long write). A missing temp file (already
-        # replaced) must not mask the original exception being re-raised.
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    # Atomic same-dir tmp + os.replace, chmod 0600 (the shared
+    # calfcord._atomic.atomic_write_text): a process loading ``.env`` never reads
+    # a half-written secrets file, and a crashed write leaves no ``.tmp`` orphan.
+    atomic_write_text(path, body, mode=_SECRET_FILE_MODE)

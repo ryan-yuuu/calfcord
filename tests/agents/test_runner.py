@@ -860,30 +860,23 @@ class TestPublishDeparturesBestEffort:
 
 
 class TestRunWorkerShutdownContract:
-    """After the Tier-3 migration the agents runner joins the managed
-    ``Worker.run()`` path: ``_run_worker(worker)`` delegates to the shared
-    :func:`run_worker_until_signal`, so the supervisor-restart invariant
-    mirrors tools/runner.py and router/runner.py — any non-signal exit
-    raises so the process exits non-zero.
+    """The agents runner delegates its shutdown contract to the shared
+    :func:`run_worker_until_signal`, which drives the worker via the embedded
+    ``Worker.start()``/``stop()`` surface (not ``run()``) so it keeps SIGINT/
+    SIGTERM ownership. The full contract — a real commanded SIGTERM draining
+    cleanly, and a signal-less exit being surfaced so a supervisor restarts — is
+    exercised in ``tests/test_worker_runtime.py``. Here we only pin, per runner,
+    that a managed-boot crash propagates out of ``_run_worker`` (so this passes
+    only if the runner really wires into the shared helper).
     """
 
-    async def test_worker_crash_propagates(self) -> None:
+    async def test_worker_boot_crash_propagates(self) -> None:
+        """A crash during the managed boot (``Worker.start()``) must escape
+        ``_run_worker`` so the surrounding ``asyncio.run`` exits non-zero."""
         crash = ValueError("simulated kafka drop")
         worker = MagicMock(spec=Worker)
-        worker.run = AsyncMock(side_effect=crash)
+        worker.start = AsyncMock(side_effect=crash)
         with pytest.raises(ValueError, match="simulated kafka drop"):
-            await _run_worker(worker)
-
-    async def test_worker_unexpected_clean_return_raises(self) -> None:
-        """A clean ``worker.run()`` return without a shutdown signal is
-        unexpected — synthesize a RuntimeError so supervisors restart."""
-        worker = MagicMock(spec=Worker)
-
-        async def returns_immediately() -> None:
-            return None
-
-        worker.run = AsyncMock(side_effect=returns_immediately)
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
             await _run_worker(worker)
 
 

@@ -316,6 +316,66 @@ def test_tail_follow_unknown_component_errors_without_polling(tmp_path: Path) ->
     assert code == 1
 
 
+# --- non-UTF-8 bytes (one-shot dump must not crash) ------------------------
+
+
+def test_tail_named_component_with_non_utf8_bytes_does_not_crash(tmp_path: Path) -> None:
+    # "Always show what the broker said before it died" must hold even when a log
+    # line contains non-UTF-8 bytes (a partial multibyte write, a binary splat, a
+    # mis-encoded child). The one-shot dump must decode tolerantly — exit 0 with a
+    # Unicode replacement char — rather than raising an uncaught UnicodeDecodeError
+    # (a ValueError main() does not catch) and crashing with a traceback.
+    log_dir = tmp_path / "state" / "logs"
+    log_dir.mkdir(parents=True)
+    # 0xFF is never a valid standalone UTF-8 byte; strict decoding raises on it.
+    (log_dir / "broker.log").write_bytes(b"good line\nbad \xff byte\n")
+    lines, out = _sink()
+
+    code = logs_mod.tail(tmp_path, agents_dir=tmp_path / "agents", component="broker", out=out)
+
+    assert code == 0
+    joined = "\n".join(lines)
+    assert "good line" in joined
+    assert "�" in joined  # the offending byte became the replacement char
+
+
+def test_tail_all_with_non_utf8_bytes_does_not_crash(tmp_path: Path) -> None:
+    # The merged (labeled) one-shot view must be just as tolerant: a single
+    # non-UTF-8 component log cannot take down the whole "logs" command.
+    log_dir = tmp_path / "state" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "broker.log").write_bytes(b"broker \xff splat\n")
+    lines, out = _sink()
+
+    code = logs_mod.tail(tmp_path, agents_dir=tmp_path / "agents", component=None, out=out)
+
+    assert code == 0
+    assert any("�" in line for line in lines)
+
+
+# --- shared supervisor-log stem (no cross-module literal drift) -------------
+
+
+def test_supervisor_log_stem_agrees_with_lifecycle_filename() -> None:
+    # logs.py and lifecycle.py must name the supervisor's own log identically; a
+    # drift between the stem logs reads and the filename lifecycle writes would
+    # make `calfcord logs process-compose` silently miss the file. Both must
+    # derive from the single shared stem compose.py owns, so the stem + ".log"
+    # reconstructs lifecycle's filename exactly.
+    from calfcord.supervisor import compose, lifecycle
+
+    assert f"{compose.SUPERVISOR_LOG_STEM}.log" == lifecycle._SUPERVISOR_LOG_FILENAME
+
+
+def test_logs_uses_the_shared_supervisor_log_stem() -> None:
+    # The logs module must not carry its own hardcoded "process-compose" literal;
+    # the supervisor-log name it tails must be the shared compose.py constant so
+    # the two cannot drift.
+    from calfcord.supervisor import compose
+
+    assert logs_mod._SUPERVISOR_LOG_NAME == compose.SUPERVISOR_LOG_STEM
+
+
 # --- decoupling invariant --------------------------------------------------
 
 

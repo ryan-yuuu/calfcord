@@ -7,17 +7,27 @@ readiness probe carries no secrets and no heavy broker deps at import time. The
 broker-reachability default lazy-imports its admin client *inside* the function
 that needs it, keeping ``import calfcord.health.check`` pure-filesystem.
 
-The contract (§12.1):
+Only **two** components carry a readiness signal, so only two are probeable
+(§12.1):
 
-* ``component == "broker"`` → reachability is **metadata/admin** reachability,
-  not bare TCP: Tansu is no-auto-create, so a bound port does not mean the broker
-  can serve. The probe is an injected async callable (a stub in unit tests, a real
-  metadata fetch in production) returning ``True`` when the broker answers.
-* any other component → a **fresh heartbeat** must exist (the runner refreshes it
-  every few seconds; a stale or missing beat means "not ready").
+* ``"broker"`` → reachability is **metadata/admin** reachability, not bare TCP:
+  Tansu is no-auto-create, so a bound port does not mean the broker can serve. The
+  probe is an injected async callable (a stub in unit tests, a real metadata fetch
+  in production) returning ``True`` when the broker answers.
+* ``"bridge"`` → a **fresh heartbeat** must exist. The bridge refreshes its beat
+  every few seconds and writes the first one only once Discord is connected (see
+  ``bridge/gateway.py``'s ``_on_ready``), so a fresh bridge beat means
+  "Discord-connected"; a stale or missing beat means "not ready".
 
-Both paths return a POSIX exit code — ``0`` healthy, ``1`` not — so the caller can
-``sys.exit`` it directly.
+The roster runners (agents, ``tools``, ``router``, ``mcp``) deliberately have NO
+readiness signal: they run via ``run_worker_until_signal`` and never beat, and
+Process Compose attaches a readiness probe only to the broker and the bridge (see
+``supervisor/compose.py``). Probing any other component is therefore a
+programming/config bug, so it RAISES rather than fabricating a "not ready" verdict
+for a signal that does not exist (a fabricated verdict would lie about readiness).
+
+The two probeable paths return a POSIX exit code — ``0`` healthy, ``1`` not — so
+the caller can ``sys.exit`` it directly.
 """
 
 from __future__ import annotations
@@ -52,19 +62,32 @@ async def healthcheck(
 ) -> int:
     """Return ``0`` if ``component`` is healthy, ``1`` if not (a POSIX exit code).
 
-    For ``"broker"`` the verdict is metadata reachability via the injected
-    ``broker_probe`` (see the module docstring on why not bare TCP). For any other
-    component the verdict is a fresh heartbeat under ``<home>/state/health/`` —
-    ``now`` and ``ttl_seconds`` are injected so freshness is deterministic and
-    pinned to the runner's refresh interval (§12.1).
+    Only ``"broker"`` and ``"bridge"`` are probeable — they are the sole components
+    that carry a readiness signal (see the module docstring). For ``"broker"`` the
+    verdict is metadata reachability via the injected ``broker_probe`` (why not bare
+    TCP: module docstring). For ``"bridge"`` the verdict is a fresh heartbeat under
+    ``<home>/state/health/`` — ``now`` and ``ttl_seconds`` are injected so freshness
+    is deterministic and pinned to the bridge's refresh interval (§12.1).
+
+    Any other component raises :class:`RuntimeError`: the roster runners never beat,
+    so there is nothing to read, and a readiness probe must not invent a verdict for
+    a signal that does not exist (it must not lie). The raise names the offending
+    component so the misconfiguration is obvious in the exec probe's output.
     """
     if component == "broker":
         return 0 if await broker_probe() else 1
 
-    beat = read_beat(home, component)
-    if beat is not None and is_fresh(beat, now=now, ttl_seconds=ttl_seconds):
-        return 0
-    return 1
+    if component == "bridge":
+        beat = read_beat(home, component)
+        if beat is not None and is_fresh(beat, now=now, ttl_seconds=ttl_seconds):
+            return 0
+        return 1
+
+    raise RuntimeError(
+        f"no readiness signal for component {component!r}: only 'broker' and 'bridge' "
+        "are probeable (the roster runners run via run_worker_until_signal and never "
+        "write a heartbeat)"
+    )
 
 
 def default_broker_probe(

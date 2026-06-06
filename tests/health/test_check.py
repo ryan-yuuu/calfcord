@@ -3,14 +3,22 @@
 :func:`calfcord.health.check.healthcheck` is the logic behind the
 ``calfcord _healthcheck <component>`` exec probe Process Compose runs on the
 agent/tools hosts. It returns a POSIX exit code — ``0`` healthy, ``1`` not — so
-every test asserts the int code, not an exception. The two readiness sources are
+the readiness tests assert the int code, not an exception.
+
+Only **two** components carry a readiness signal, so only two are probeable
+(design §12.1): the broker (metadata reachability) and the bridge (heartbeat
+freshness, which the bridge only beats once Discord is connected). Each source is
 isolated and injected so the tests stay offline and deterministic:
 
 * the broker is judged by an injected ``broker_probe`` coroutine (the production
   default does a real metadata fetch; here a stub stands in), so "broker
   reachable" never needs a live Kafka;
-* every other component is judged by heartbeat freshness against an injected
-  ``now`` and a tmp home, so freshness boundaries are exact.
+* the bridge is judged by heartbeat freshness against an injected ``now`` and a
+  tmp home, so freshness boundaries are exact.
+
+Any other component (an agent id, ``tools``, ``router``, ``mcp``) has no
+readiness signal — those roster runners never beat — so probing one is a
+programming/config bug, and the probe raises rather than fabricating a verdict.
 """
 
 from __future__ import annotations
@@ -19,6 +27,8 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from calfcord.health.check import default_broker_probe, healthcheck
 from calfcord.health.heartbeat import write_beat
@@ -44,10 +54,10 @@ async def test_broker_component_unhealthy_when_probe_reports_unreachable(tmp_pat
     assert code == 1
 
 
-async def test_non_broker_component_healthy_with_fresh_beat(tmp_path: Path) -> None:
-    # A heartbeat written ttl/2 ago is fresh -> the component is ready. The broker
-    # probe must NOT be consulted for a non-broker component, so a stub that would
-    # flip the verdict (reachable) proves the heartbeat path is what decides.
+async def test_bridge_component_healthy_with_fresh_beat(tmp_path: Path) -> None:
+    # A heartbeat written ttl/2 ago is fresh -> the bridge is ready. The broker
+    # probe must NOT be consulted for the bridge, so a stub that would flip the
+    # verdict (reachable) proves the heartbeat path is what decides.
     write_beat(tmp_path, "bridge", status="healthy", now=_NOW)
     code = await healthcheck(
         tmp_path,
@@ -59,8 +69,8 @@ async def test_non_broker_component_healthy_with_fresh_beat(tmp_path: Path) -> N
     assert code == 0
 
 
-async def test_non_broker_component_unhealthy_with_stale_beat(tmp_path: Path) -> None:
-    # A beat older than ttl is stale (a wedged/killed runner stops refreshing) ->
+async def test_bridge_component_unhealthy_with_stale_beat(tmp_path: Path) -> None:
+    # A beat older than ttl is stale (a wedged/killed bridge stops refreshing) ->
     # not ready, even though the file exists.
     write_beat(tmp_path, "bridge", status="healthy", now=_NOW)
     code = await healthcheck(
@@ -73,11 +83,23 @@ async def test_non_broker_component_unhealthy_with_stale_beat(tmp_path: Path) ->
     assert code == 1
 
 
-async def test_non_broker_component_unhealthy_when_beat_missing(tmp_path: Path) -> None:
-    # No heartbeat ever written (runner not up, or another host) -> not ready,
+async def test_bridge_component_unhealthy_when_beat_missing(tmp_path: Path) -> None:
+    # No heartbeat ever written (bridge not up, or another host) -> not ready,
     # without crashing the probe.
     code = await healthcheck(tmp_path, "bridge", now=_NOW, broker_probe=_unreachable)
     assert code == 1
+
+
+async def test_unrecognized_component_raises_with_context(tmp_path: Path) -> None:
+    # Only the broker and the bridge carry a readiness signal; the roster runners
+    # (agents, tools, router, mcp) go through run_worker_until_signal and never
+    # beat, so they have no heartbeat to read. Probing one is a programming/config
+    # bug — Process Compose only ever generates broker/bridge probes — so the
+    # function must RAISE with the offending component (the error convention's
+    # loud-raise-for-an-infra/programming-bug, not a fabricated "not ready" verdict
+    # that would lie about a readiness signal that does not exist).
+    with pytest.raises(RuntimeError, match="some-agent"):
+        await healthcheck(tmp_path, "some-agent", now=_NOW, broker_probe=_unreachable)
 
 
 class _FakeAdmin:

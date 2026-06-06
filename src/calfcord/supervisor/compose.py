@@ -55,8 +55,9 @@ _PROBE_TIMEOUT_SECONDS = 5
 _PROBE_SUCCESS_THRESHOLD = 1
 _PROBE_FAILURE_THRESHOLD = 3
 
-# Autorestart backoff shared by both restart policies; unlimited retries for the
-# always-restart substrate/agents (max_restarts 0 == unlimited in Process Compose).
+# Autorestart backoff shared by both restart policies (always for the substrate,
+# on_failure for the roster); max_restarts 0 == unlimited retries in Process
+# Compose, applied uniformly.
 _RESTART_BACKOFF_SECONDS = 2
 _RESTART_MAX_RESTARTS = 0
 
@@ -74,6 +75,17 @@ _SHUTDOWN_TIMEOUT_SECONDS = 10
 _SHUTDOWN_PARENT_ONLY = False
 
 _HEALTHY = "process_healthy"
+
+# The filename stem of the supervisor's *own* log (``process-compose up -L
+# <stem>.log``). It is not a process the generator declares, but it sits beside
+# the per-process logs and is a legitimate tail target, so its name must agree
+# across the modules that write it (``lifecycle._SUPERVISOR_LOG_FILENAME``) and
+# read it (``cli.logs``). Both derive from this one stem so the literal can never
+# drift: lifecycle reconstructs the filename as ``SUPERVISOR_LOG_STEM + ".log"``,
+# and ``cli.logs`` passes the stem to ``_log_location`` (which appends ``.log``).
+# Homed here because both consumers already import ``compose`` and ``compose`` is
+# import-light (no MCP secrets loader), keeping the logs CLI's decoupling intact.
+SUPERVISOR_LOG_STEM = "process-compose"
 
 # Process names owned by the substrate + non-agent components. An agent id equal
 # to one of these would silently overwrite that process's entry in the shared

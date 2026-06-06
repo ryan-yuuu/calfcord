@@ -110,6 +110,52 @@ def test_resolve_paths_agents_dir_override_wins(monkeypatch: pytest.MonkeyPatch,
     assert dev_agents == Path(os.environ["CALFKIT_AGENTS_DIR"])
 
 
+# --- _require_home: the shared native-install guard ------------------------
+
+
+def test_require_home_returns_resolved_home_silently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # On a native install the guard returns the resolved home and prints nothing,
+    # so the caller proceeds to drive the supervisor.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    assert main_mod._require_home("deploy") == home
+    assert capsys.readouterr().out == ""
+
+
+def test_require_home_dev_run_prints_message_and_returns_none(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A dev run (no CALFCORD_HOME) returns None after printing the actionable
+    # native-install steer, so the caller can `return 1` without crashing
+    # downstream in os.fspath(None). The default detail is the supervisor home.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    assert main_mod._require_home("agent stop") is None
+    out = capsys.readouterr().out
+    assert out == (
+        "error: `calfcord agent stop` needs a native install — set CALFCORD_HOME "
+        "(or run the installer) so the supervisor has a stable home.\n"
+    )
+
+
+def test_require_home_detail_customizes_trailing_clause(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `deploy`/`logs`/`start` pass a verb-specific rationale (manifest / logs dir
+    # / shim) that the guard substitutes after "so ".
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    assert (
+        main_mod._require_home("deploy", detail="the manifest can reference a stable home and shim.")
+        is None
+    )
+    out = capsys.readouterr().out
+    assert out == (
+        "error: `calfcord deploy` needs a native install — set CALFCORD_HOME "
+        "(or run the installer) so the manifest can reference a stable home and shim.\n"
+    )
+
+
 # --- agent verb group: help + dispatch -------------------------------------
 
 
