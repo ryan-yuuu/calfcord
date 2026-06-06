@@ -548,6 +548,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "python-frontmatter" },
+    { name = "pyyaml" },
     { name = "smolagents", extra = ["toolkit"] },
     { name = "uuid-utils" },
 ]
@@ -572,6 +573,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-frontmatter", specifier = ">=1.1.0,<2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "smolagents", extras = ["toolkit"], specifier = ">=1.25.0" },
     { name = "uuid-utils", specifier = ">=0.15.0" },
 ]
