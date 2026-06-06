@@ -562,7 +562,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.5.1" },
+    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.5.4" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
@@ -584,7 +584,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.5.1"
+version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -603,14 +603,15 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/b0/aaaa6d84b81ff06b4b4ff1765fd06d5586c7d10d1f76ef6a5b8d1bbba1d1/calfkit-0.5.1.tar.gz", hash = "sha256:c27de4d549d01acc6ccce84254b0ca59e0f1845c92e663a7b22249818facda28", size = 773980, upload-time = "2026-06-05T21:27:58.574Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/eb/4eaae5465fb0dfa721106312b40246f6e2c28da93270e09b57375960988c/calfkit-0.5.4.tar.gz", hash = "sha256:da0e4a0d68d880b62799cd5e81d8e27372fe806078fba681219af68a92168f4e", size = 849753, upload-time = "2026-06-06T03:40:55.041Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/f7/e31f9313209aed127fc1dc885167548f2e4cdc74d548739ab9539ee88121/calfkit-0.5.1-py3-none-any.whl", hash = "sha256:fc142dee3d5e1fe94d740d26c3bbd4635ec2292500e061607bdf75beea84bc1c", size = 653789, upload-time = "2026-06-05T21:27:56.762Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/30/8ff062acc36aed9659a190e05f38773dd34161e997dd33eb38b8df3e631f/calfkit-0.5.4-py3-none-any.whl", hash = "sha256:06501cf08e938d1bb048dcc0daf3dbcfb4efb5cbcb9f5f53e2feb4abd08195c9", size = 677464, upload-time = "2026-06-06T03:40:53.374Z" },
 ]
 
 [package.optional-dependencies]
 mcp-codegen = [
     { name = "typer" },
+    { name = "watchfiles" },
 ]
 
 [[package]]
