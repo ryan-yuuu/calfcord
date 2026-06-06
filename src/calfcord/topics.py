@@ -15,6 +15,29 @@ contracts.
 
 from __future__ import annotations
 
+DISCORD_OUTBOX_TOPIC = "discord.outbox"
+"""Topic every agent reply lands on; the bridge posts each one to Discord.
+
+An agent reply is the agent node's ``ReturnCall`` envelope: assistant agents
+have ``publish_topic=None`` and emit to the inbound frame's ``callback_topic``,
+which the bridge sets to this topic. The replying agent's identity is NOT in the
+JSON body — it rides the Kafka headers (``x-calf-emitter`` /
+``x-calf-emitter-kind``) and is recoverable only through a calfkit consumer
+handler's ``_stamp_transport``.
+
+Producer: every assistant :class:`~calfkit.nodes.Agent` (via the bridge-set
+``callback_topic``); the bridge's :class:`~calfkit.Client` also names it as its
+``reply_topic`` (see :mod:`calfcord.bridge.gateway`), so calfkit's connect-time
+pre-start hook auto-provisions it on broker start.
+
+Consumers:
+* the bridge's outbox consumer
+  (:func:`calfcord.bridge.outbox.build_outbox_consumer`), which posts each reply
+  to Discord under the agent's persona;
+* the init wizard's first-reply detector
+  (:func:`calfcord.control_plane.first_reply.wait_for_first_reply`), a transient
+  CLI-side consumer in its own group that confirms the org is live."""
+
 AMBIENT_INGRESS_TOPIC = "discord.ambient.in"
 """Topic the router agent subscribes to. The bridge publishes ambient
 (``kind="message"``) wires here for the router to classify.

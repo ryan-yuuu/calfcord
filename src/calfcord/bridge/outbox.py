@@ -77,10 +77,11 @@ from calfcord.discord.retry_feedback import (
     chunk_split,
     classify_error,
 )
+from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OUTBOX_TOPIC: Final[str] = "discord.outbox"
+DEFAULT_OUTBOX_TOPIC: Final[str] = DISCORD_OUTBOX_TOPIC
 DEFAULT_CONSUMER_NODE_ID: Final[str] = "discord-outbox-sink"
 
 # Backoff between our one extra retry attempt. discord.py already does 5

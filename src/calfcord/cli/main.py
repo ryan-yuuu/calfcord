@@ -482,8 +482,19 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _run_lifecycle(args.command)
 
     if args.command == "init":
-        env_path, agents_dir = init.resolve_paths(_resolve_home())
-        return init.run(make_prompter(), env_path=env_path, agents_dir=agents_dir)
+        # Pass the install ``home`` and broker URL so the wizard's live finish can
+        # orchestrate the install-scoped supervisor (it degrades to manual
+        # next-steps when ``home`` is None / a dev run). ``server_urls`` mirrors
+        # the same ``CALF_HOST_URL`` default the runners and ``start`` use.
+        home = _resolve_home()
+        env_path, agents_dir = init.resolve_paths(home)
+        return init.run(
+            make_prompter(),
+            env_path=env_path,
+            agents_dir=agents_dir,
+            home=home,
+            server_urls=os.getenv("CALF_HOST_URL") or "localhost",
+        )
 
     if args.command == "doctor":
         # Preflight the same config/.env + agents/ the runners load. Passing the

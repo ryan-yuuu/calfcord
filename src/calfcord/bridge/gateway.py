@@ -89,10 +89,11 @@ from calfcord.discord.typing import TypingNotifier
 from calfcord.health.heartbeat import write_beat
 from calfcord.health.refresher import run_refresher
 from calfcord.router.definition import build_router_definition
+from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 logger = logging.getLogger(__name__)
 
-_REPLY_TOPIC = "discord.outbox"
+_REPLY_TOPIC = DISCORD_OUTBOX_TOPIC
 
 # The component name the bridge writes its heartbeat under and that
 # ``calfcord _healthcheck bridge`` reads back (design §4.2 / §12.1).

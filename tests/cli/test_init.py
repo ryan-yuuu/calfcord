@@ -1,14 +1,20 @@
-"""Tests for the ``calfcord init`` setup wizard, driven by a scripted fake Prompter.
+"""Tests for ``calfcord init``'s **agent-creation** phase + ``write_agent`` branches.
 
-The flow is pure logic over an injected :class:`Prompter`, so these tests never
-touch a TTY or InquirerPy (they must run headless in CI). A :class:`FakePrompter`
-dequeues scripted answers per prompt kind; each test supplies only the answers
-its path consumes. The provider sub-flow is delegated to
-:func:`calfcord.cli._providers.configure_provider`, which reaches a real SDK /
-model catalog; every test monkeypatches it to a fixed ``(provider, model)`` so
-no network, key, or OAuth ever fires. We assert on the resulting ``.env`` (via
-``read_env``), the written ``agents/<name>.md`` (via ``parse_agent_md``), and
-printed guidance (via ``capsys``).
+The reworked ``init`` is a *composer*: its Discord sub-flow, broker step, and
+ends-live finish are exercised end to end in ``test_init_wizard.py`` (which
+injects the Discord / supervisor / first-reply seams). This module stays focused
+on the one phase that survived the rework unchanged — the shared
+``agent_create.create_agent`` flow ``init`` runs first (name → describe →
+provider/model → tools → write) — plus the ``_agents.write_agent`` pruning /
+in-place-update branches.
+
+These drive ``init.run`` in **dev mode** (``home=None``) with **no Discord token**
+(an empty token skips discovery), so the run reaches the agent write and the
+honest dev-mode degrade without touching Discord, a broker, or the supervisor.
+The provider sub-flow is delegated to ``configure_provider`` (real SDK / catalog);
+every test monkeypatches it to a fixed ``(provider, model)`` so no network, key,
+or OAuth fires. Assertions target the written ``agents/<name>.md`` (via
+``parse_agent_md``) and the install default provider in ``.env``.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import pytest
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import _agents, agent_create, init
-from calfcord.cli._envfile import read_env, upsert
+from calfcord.cli._envfile import read_env
 from calfcord.cli._prompts import Choice, Prompter
 
 _FIXED_PROVIDER = ("anthropic", "claude-haiku-4-5")
@@ -117,28 +123,22 @@ def _fresh_run_prompter(
     *,
     name: str = "assistant",
     description: str = "",
-    discord_token: str = "",
-    app_id: str = "",
-    guild: str = "",
-    channel: str = "",
-    broker: str = "url",
-    broker_url: str = "broker:9092",
+    broker: str = "native",
     checkboxes: list[list[str]] | None = None,
 ) -> FakePrompter:
-    """Build a prompter scripting one full wizard pass (provider sub-flow stubbed).
+    """Script the prompts the agent-creation path consumes, then degrade in dev mode.
 
-    Order of consumed prompts after the autouse stub removes the provider
-    sub-flow: text(name), text(description), checkbox(tools), secret(discord
-    token), text(app_id), text(guild), text(channel), select(broker)
-    [+ text(broker_url) on the ``url`` branch].
+    With no Discord token (the secret prompt answered empty) the Discord step is
+    skipped entirely — no invite/app-id/guild/channel prompts fire. So after the
+    provider sub-flow is stubbed away, the only prompts are: text(name),
+    text(description), checkbox(tools), secret(token="" → skip Discord),
+    select(broker). Dev mode (``home=None`` in :func:`_run`) then degrades the
+    finish to printed next-steps, consuming no further prompts.
     """
-    texts = [name, description, app_id, guild, channel]
-    if broker == "url":
-        texts.append(broker_url)
     return FakePrompter(
         selects=[broker],
-        texts=texts,
-        secrets=[discord_token],
+        texts=[name, description],
+        secrets=[""],  # empty token → Discord discovery skipped
         checkboxes=checkboxes,
     )
 
@@ -267,135 +267,17 @@ def test_default_provider_persisted_from_configure_provider(tmp_path: Path) -> N
     assert read_env(tmp_path / ".env")["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
 
 
-# --- discord + broker .env writes ------------------------------------------
+# --- broker step (agent-creation-adjacent; full broker/discord flow lives in
+#     test_init_wizard.py) ------------------------------------------------------
 
 
-def test_broker_native_sets_local_url_and_prints_command(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_broker_native_sets_local_url(tmp_path: Path) -> None:
+    """The native broker choice still seeds ``CALF_HOST_URL`` (the live finish
+    starts the broker, so — unlike the old flow — no command is printed here)."""
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(name="scribe", description="d", broker="native")
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-
     assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "localhost:9092"
-    out = capsys.readouterr().out
-    assert "calfcord broker" in out
-    # The Docker alternative is surfaced too, but the native binary is the default.
-    assert "docker compose up -d tansu" in out
-
-
-def test_broker_url_sets_given_url(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe", description="d", broker="url", broker_url="my-broker.example.com:9092"
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "my-broker.example.com:9092"
-
-
-def test_broker_url_empty_on_fresh_install_warns(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The ``url`` branch with an empty URL and no prior ``CALF_HOST_URL`` warns.
-
-    A fresh install that ends with no broker won't start, so ``init`` flags it
-    now rather than letting it surface as a connection failure at first boot.
-    (On a re-run with a value already on disk the keep-existing contract means
-    there's nothing to warn about — exercised separately.)
-    """
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe", description="d", broker="url", broker_url=""
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-
-    out = capsys.readouterr().out
-    assert f"warning: no {init._BROKER_VAR} is set" in out
-    # And nothing was written for the broker key on the empty fresh path.
-    assert init._BROKER_VAR not in read_env(tmp_path / ".env")
-
-
-def test_non_numeric_application_id_warns_without_blocking(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A non-numeric DISCORD_APPLICATION_ID prints a numeric warning but still
-    completes (the field is accepted, the typo merely flagged)."""
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe", description="d", app_id="not-a-number"
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-
-    out = capsys.readouterr().out
-    assert "DISCORD_APPLICATION_ID should be numeric" in out
-    # Not blocked: the value the operator typed is still written.
-    assert read_env(tmp_path / ".env")["DISCORD_APPLICATION_ID"] == "not-a-number"
-
-
-def test_discord_fields_written_when_provided(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe",
-        description="d",
-        discord_token="bot-token-abc",
-        app_id="12345",
-        guild="67890",
-        channel="11111",
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-
-    env = read_env(tmp_path / ".env")
-    assert env["DISCORD_BOT_TOKEN"] == "bot-token-abc"
-    assert env["DISCORD_APPLICATION_ID"] == "12345"
-    assert env["DISCORD_GUILD_ID"] == "67890"
-    assert env["DISCORD_DEFAULT_CHANNEL_ID"] == "11111"
-
-
-def test_empty_answers_keep_prior_env_values(tmp_path: Path) -> None:
-    """A re-run with empty secret/text answers must not clobber existing .env values."""
-    env_path = tmp_path / ".env"
-    agents_dir = tmp_path / "agents"
-    upsert(
-        env_path,
-        {
-            "DISCORD_BOT_TOKEN": "tok-original",
-            "DISCORD_APPLICATION_ID": "app-original",
-            "CALF_HOST_URL": "orig-broker:9092",
-        },
-    )
-
-    prompter = _fresh_run_prompter(
-        name="scribe",
-        description="d",
-        discord_token="",  # keep token
-        app_id="",  # keep app id
-        guild="",
-        channel="",
-        broker="url",
-        broker_url="",  # keep broker url
-    )
-    assert init.run(prompter, env_path=env_path, agents_dir=agents_dir) == 0
-
-    env = read_env(env_path)
-    assert env["DISCORD_BOT_TOKEN"] == "tok-original"
-    assert env["DISCORD_APPLICATION_ID"] == "app-original"
-    assert env["CALF_HOST_URL"] == "orig-broker:9092"
-    assert env["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
-
-
-# --- next-steps guidance ----------------------------------------------------
-
-
-def test_next_steps_name_agent_and_mention_router_setup(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(name="scribe", description="d")
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    out = capsys.readouterr().out
-    assert f"Set up agent 'scribe' in {agents_dir}." in out
-    assert "@scribe hello" in out
-    assert "calfcord router setup" in out
 
 
 # --- write_agent: branch-level unit tests -----------------------------------
