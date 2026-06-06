@@ -22,10 +22,11 @@ The bridge process does both halves of the Discord I/O:
   reply dispatcher dedupes by ``correlation_id``, so the request/reply
   shape we used before was inherently single-agent).
 
-The consumer's handler is registered on the same calfkit
-:class:`~calfkit.Client` connection that the ingress publishes through.
-We deliberately register handlers without calling
-:meth:`Worker.run` — see the rationale at the call site in :func:`main`.
+The consumer's handlers ride a calfkit :class:`~calfkit.Worker` driven as
+``async with worker:`` (not :meth:`Worker.run`): the bridge embeds a
+foreground (the Discord gateway WebSocket owns the loop), so it keeps its
+own signal handling and gateway/stop race while the worker owns
+register/provision/broker start/stop. See :func:`_run`.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ import discord
 from calfkit.client import Client
 from calfkit.worker import Worker
 
-from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_extra_topics
+from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_infra
 from calfcord.bridge.history import ChannelHistoryFetcher
 from calfcord.bridge.ingress import (
     AmbientRosterEmptyError,
@@ -650,8 +651,196 @@ class _GatewayClient(discord.Client):
         await self._gateway._on_message(message)
 
 
+async def _run(settings: DiscordSettings, registry: AgentRegistry, server_urls: str) -> None:
+    """Boot the bridge and serve until SIGINT/SIGTERM.
+
+    Resource nesting is load-bearing: the persona sender, calfkit client, and
+    transcript store wrap the :class:`~calfkit.Worker` so they stay open while
+    the broker drains consumers (the outbox + steps consumers) that still use
+    them. Unlike the four standalone runners, the bridge does NOT hand the whole
+    lifecycle to :meth:`Worker.run` — it embeds a foreground (the Discord
+    gateway WebSocket owns the loop), so it drives ``async with worker:`` (which
+    owns register → provision node topics → broker.start on enter, drain on
+    exit) while keeping its OWN signal handling and the gateway/stop race inside
+    that block. ``start()``/``stop()`` install no signal handlers by design, so
+    the bridge stays the owner of shutdown ordering.
+    """
+    # The bridge owns its own persona sender (separate from agent processes')
+    # because it posts replies on behalf of every agent. The calfkit client
+    # connects with a named reply topic so calfkit's reply dispatcher hears
+    # every agent ReturnCall — even though we no longer await its futures
+    # (the outbox consumer below handles every reply), the dispatcher's
+    # subscriber is still registered as a side-effect of Client.connect.
+    # Its "no pending future" WARNINGs on every reply are expected; see
+    # calfcord.bridge.outbox.
+    # Kept as nested ``async with`` (not combined) so each context's
+    # rationale comment stays attached to it and the degrade/lifecycle reads
+    # top-to-bottom; the noqa silences SIM117's "combine them" hint.
+    async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
+        async with Client.connect(
+            server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
+        ) as calfkit_client:
+            pending_wires = PendingWires()
+            ingress = BridgeIngress(
+                calfkit_client=calfkit_client,
+                registry=registry,
+                pending_wires=pending_wires,
+            )
+            # The transcript store is the bridge's persistence layer for
+            # per-turn agent step transcripts: the outbox consumer writes
+            # a row on each tool-using terminal hop, and the
+            # StepsToggleView reads it back when a user clicks a reply's
+            # expand toggle. Opened/closed as an async context so the
+            # single long-lived aiosqlite connection's lifetime brackets
+            # the consumer setup and the gateway run loop — and, crucially,
+            # outlives the broker drain so a draining consumer can still
+            # write its final transcript row.
+            async with _open_transcript_store(settings) as transcript_store:
+                # Inject the now-open store into the ingress so the
+                # slash-history builder can splice each agent's prior
+                # tool calls/returns into its reconstructed
+                # ``message_history`` (tool-call replay, plan §7.6).
+                # Mirrors ``set_fetcher`` — both are post-construction
+                # injections that degrade gracefully while unset. Done
+                # right after the connection opens and before the
+                # gateway/consumers are built.
+                ingress.set_transcript_store(transcript_store)
+                # Retention: drop transcript rows older than the
+                # configured window on startup. The bridge is the sole
+                # writer and restarts on every deploy, so a startup sweep
+                # bounds growth without a background task. Best-effort and
+                # disabled when the setting is <= 0 — see
+                # :func:`_prune_on_startup`.
+                await _prune_on_startup(transcript_store, settings)
+                # Construct the gateway early so its SlashCommandManager
+                # exists before we register the state consumer — the
+                # state consumer's callbacks must point at
+                # slash.schedule_resync so first-seen / departure events
+                # trigger debounced slash re-registration.
+                # Typing-indicator firer for the steps consumer's per-hop
+                # fire. Built from the persona sender's started REST client;
+                # fire-and-forget so it never blocks the serial steps
+                # consumer. The gateway deliberately does NOT fire typing —
+                # only genuine, non-terminal agent work (a steps hop) raises
+                # the indicator, so it never lingers past the final reply.
+                # See discord/typing.py.
+                typing_notifier = TypingNotifier(persona_sender.client)
+                gateway = DiscordIngressGateway(
+                    settings, ingress, registry, calfkit_client, transcript_store
+                )
+                consumer_node = build_outbox_consumer(
+                    persona_sender=persona_sender,
+                    registry=registry,
+                    pending_wires=pending_wires,
+                    calfkit_client=calfkit_client,
+                    transcript_store=transcript_store,
+                )
+                # The synthesized-in consumer subscribes to
+                # ``bridge.synthesized.in`` and re-feeds router fan-out
+                # wires through the same ingress handler real Discord
+                # events use. Co-tenants on the same Worker so it
+                # shares the bridge's calfkit Client + broker (and the
+                # same consumer-group-per-node-id contract).
+                synthesized_node = build_synthesized_consumer(ingress)
+                # The steps consumer subscribes to ``agent.steps`` (which
+                # every assistant agent's ``publish_topic`` mirrors every
+                # hop to) and projects intermediate text / tool calls /
+                # tool results live. It posts/edits ONE transient
+                # in-channel progress message (``⚙ running… N steps``)
+                # under the agent persona and deletes it on the terminal
+                # hop — no DB access here. The durable transcript + expand
+                # toggle ride the outbox's final reply instead.
+                steps_state = StepsState()
+                steps_node = build_steps_consumer(
+                    persona_sender=persona_sender,
+                    registry=registry,
+                    pending_wires=pending_wires,
+                    steps_state=steps_state,
+                    typing_notifier=typing_notifier,
+                )
+
+                # The Worker owns the broker lifecycle: ``async with worker``
+                # registers handlers, provisions the nodes' own topics, and
+                # starts the broker on enter (consumer groups join BEFORE we
+                # accept Discord events — the Gap-2 join-before-serve
+                # correctness is now a guarantee of start(), not hand-built),
+                # then drains the broker on exit.
+                worker = Worker(calfkit_client, [consumer_node, synthesized_node, steps_node])
+
+                # Register the state-event projection subscriber on the broker
+                # BEFORE the worker starts. It is a RAW subscriber (not a worker
+                # node), so register_handlers() leaves it intact and the single
+                # broker.start() inside the worker's start() joins its consumer
+                # group together with the worker's own node subscribers. State
+                # events from already-running agents arrive after on_ready
+                # publishes the discovery ping; the subscriber must be live by
+                # then. ``schedule_resync`` is a bound method whose signature
+                # matches the consumer callback shape (``(agent_id: str) ->
+                # None``), so pass it directly.
+                #
+                # Imported here (not at module top) to avoid a circular import:
+                # ``state_consumer`` imports ``AgentRegistry``, which re-exports
+                # through ``bridge.__init__``, which imports this module.
+                from calfcord.control_plane.state_consumer import (
+                    register_state_consumer,
+                )
+
+                register_state_consumer(
+                    calfkit_client,
+                    registry,
+                    on_first_seen=gateway._slash.schedule_resync,
+                    on_departed=gateway._slash.schedule_resync,
+                )
+
+                # Provision the control-plane topics node-walking can't see:
+                # agent.state (a raw subscriber) and bridge.discovery (the
+                # discovery ping is published at boot, before any agent may be
+                # up). The worker provisions its own node topics inside start().
+                # No-ops on an auto-creating broker; required on Tansu. (The
+                # client reply topic provision_infra also covers is, for the
+                # bridge, discord.outbox — already the outbox node's inbox, so
+                # redundant-by-construction here; see _provisioning.)
+                await provision_infra(calfkit_client, extra_topics=bridge_infra_topics())
+
+                async with worker:
+                    # The bridge embeds a foreground (the Discord gateway), so
+                    # it owns its own signal handling + the gateway/stop race —
+                    # start()/stop() install no signals by design.
+                    stop = asyncio.Event()
+                    loop = asyncio.get_running_loop()
+                    for sig in (signal.SIGINT, signal.SIGTERM):
+                        loop.add_signal_handler(sig, stop.set)
+
+                    gateway_task = asyncio.create_task(gateway.start())
+                    stop_task = asyncio.create_task(stop.wait())
+                    try:
+                        await asyncio.wait(
+                            {gateway_task, stop_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        # Stop the DISCORD ingress first so no new events arrive
+                        # while the broker drains. The synthesized consumer is a
+                        # second ingress; it drains with the broker (safe — the
+                        # transcript store closes last, outermost). The broker
+                        # itself drains at the ``async with worker`` exit below.
+                        for t in (gateway_task, stop_task):
+                            if not t.done():
+                                t.cancel()
+                        await gateway.close()
+                # worker.stop() drained the broker HERE — the steps/outbox
+                # consumers finished their in-flight hops, still using
+                # persona_sender + typing_notifier (both still open). Only NOW
+                # is it safe to cancel typing tasks: TypingNotifier.aclose()
+                # cancels in-flight tasks, so closing it before the drain (as
+                # the pre-0.5.4 code did) could fire a draining steps hop into a
+                # cancelled notifier. Closing after the drain eliminates that
+                # race; persona/client/store still close after this (outermost).
+                await typing_notifier.aclose()
+
+
 def main() -> None:
-    """CLI entry point. Loads config, constructs the gateway, runs until SIGINT/SIGTERM."""
+    """CLI entry point. Loads config, constructs the registry, runs until SIGINT/SIGTERM."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -670,179 +859,7 @@ def main() -> None:
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    async def _run() -> None:
-        # The bridge owns its own persona sender (separate from agent processes')
-        # because it posts replies on behalf of every agent. The calfkit client
-        # connects with a named reply topic so calfkit's reply dispatcher hears
-        # every agent ReturnCall — even though we no longer await its futures
-        # (the outbox consumer below handles every reply), the dispatcher's
-        # subscriber is still registered as a side-effect of Client.connect.
-        # Its "no pending future" WARNINGs on every reply are expected; see
-        # calfcord.bridge.outbox.
-        # Kept as nested ``async with`` (not combined) so each context's
-        # rationale comment stays attached to it and the degrade/lifecycle reads
-        # top-to-bottom; the noqa silences SIM117's "combine them" hint.
-        async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
-            async with Client.connect(
-                server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
-            ) as calfkit_client:
-                pending_wires = PendingWires()
-                ingress = BridgeIngress(
-                    calfkit_client=calfkit_client,
-                    registry=registry,
-                    pending_wires=pending_wires,
-                )
-                # The transcript store is the bridge's persistence layer for
-                # per-turn agent step transcripts: the outbox consumer writes
-                # a row on each tool-using terminal hop, and the
-                # StepsToggleView reads it back when a user clicks a reply's
-                # expand toggle. Opened/closed as an async context so the
-                # single long-lived aiosqlite connection's lifetime brackets
-                # the consumer setup and the gateway run loop.
-                async with _open_transcript_store(settings) as transcript_store:
-                    # Inject the now-open store into the ingress so the
-                    # slash-history builder can splice each agent's prior
-                    # tool calls/returns into its reconstructed
-                    # ``message_history`` (tool-call replay, plan §7.6).
-                    # Mirrors ``set_fetcher`` — both are post-construction
-                    # injections that degrade gracefully while unset. Done
-                    # right after the connection opens and before the
-                    # gateway/consumers are built.
-                    ingress.set_transcript_store(transcript_store)
-                    # Retention: drop transcript rows older than the
-                    # configured window on startup. The bridge is the sole
-                    # writer and restarts on every deploy, so a startup sweep
-                    # bounds growth without a background task. Best-effort and
-                    # disabled when the setting is <= 0 — see
-                    # :func:`_prune_on_startup`.
-                    await _prune_on_startup(transcript_store, settings)
-                    # Construct the gateway early so its SlashCommandManager
-                    # exists before we register the state consumer — the
-                    # state consumer's callbacks must point at
-                    # slash.schedule_resync so first-seen / departure events
-                    # trigger debounced slash re-registration.
-                    # Typing-indicator firer for the steps consumer's per-hop
-                    # fire. Built from the persona sender's started REST client;
-                    # fire-and-forget so it never blocks the serial steps
-                    # consumer. The gateway deliberately does NOT fire typing —
-                    # only genuine, non-terminal agent work (a steps hop) raises
-                    # the indicator, so it never lingers past the final reply.
-                    # See discord/typing.py.
-                    typing_notifier = TypingNotifier(persona_sender.client)
-                    gateway = DiscordIngressGateway(
-                        settings, ingress, registry, calfkit_client, transcript_store
-                    )
-                    consumer_node = build_outbox_consumer(
-                        persona_sender=persona_sender,
-                        registry=registry,
-                        pending_wires=pending_wires,
-                        calfkit_client=calfkit_client,
-                        transcript_store=transcript_store,
-                    )
-                    # The synthesized-in consumer subscribes to
-                    # ``bridge.synthesized.in`` and re-feeds router fan-out
-                    # wires through the same ingress handler real Discord
-                    # events use. Co-tenants on the same Worker so it
-                    # shares the bridge's calfkit Client + broker (and the
-                    # same consumer-group-per-node-id contract).
-                    synthesized_node = build_synthesized_consumer(ingress)
-                    # The steps consumer subscribes to ``agent.steps`` (which
-                    # every assistant agent's ``publish_topic`` mirrors every
-                    # hop to) and projects intermediate text / tool calls /
-                    # tool results live. It posts/edits ONE transient
-                    # in-channel progress message (``⚙ running… N steps``)
-                    # under the agent persona and deletes it on the terminal
-                    # hop — no DB access here. The durable transcript + expand
-                    # toggle ride the outbox's final reply instead.
-                    steps_state = StepsState()
-                    steps_node = build_steps_consumer(
-                        persona_sender=persona_sender,
-                        registry=registry,
-                        pending_wires=pending_wires,
-                        steps_state=steps_state,
-                        typing_notifier=typing_notifier,
-                    )
-
-                    # Register the consumer's handler on the broker *before*
-                    # broker.start() so its consumer group joins ahead of the
-                    # gateway accepting Discord events. Otherwise an agent reply
-                    # arriving in the brief window after publish but before the
-                    # consumer-group has joined would be missed (subscribers
-                    # default to auto_offset_reset="latest").
-                    #
-                    # We use Worker only for handler registration — not Worker.run.
-                    # Calling Worker.run would (a) call register_handlers again
-                    # (which errors on the second call), and (b) start an inner
-                    # FastStream serve loop whose signal handling overlaps with
-                    # the loop we install below. broker.start() activates every
-                    # registered subscriber on its own, which is what we need.
-                    worker = Worker(calfkit_client, [consumer_node, synthesized_node, steps_node])
-                    worker.register_handlers()
-
-                    # Register the state-event projection subscriber on the
-                    # broker BEFORE broker.start(). State events from
-                    # already-running agents will arrive after on_ready
-                    # publishes the discovery ping; the subscriber must be
-                    # live by then. ``schedule_resync`` is a bound method
-                    # whose signature matches the consumer callback shape
-                    # (``(agent_id: str) -> None``), so pass it directly.
-                    #
-                    # Imported here (not at module top) to avoid a circular
-                    # import: ``state_consumer`` imports ``AgentRegistry``,
-                    # which re-exports through ``bridge.__init__``, which
-                    # imports this module.
-                    from calfcord.control_plane.state_consumer import (
-                        register_state_consumer,
-                    )
-
-                    register_state_consumer(
-                        calfkit_client,
-                        registry,
-                        on_first_seen=gateway._slash.schedule_resync,
-                        on_departed=gateway._slash.schedule_resync,
-                    )
-
-                    # Worker.run() would provision the registered nodes' topics in
-                    # its _on_startup hook, but the bridge hand-rolls
-                    # register_handlers + broker.start, so call it explicitly —
-                    # after every subscriber is registered and BEFORE broker.start
-                    # so the topics exist before consumption. Then create the
-                    # control-plane topics that node-walking can't see: agent.state
-                    # (a raw subscriber) and bridge.discovery (the discovery ping is
-                    # published at boot, before any agent may be up). No-ops on an
-                    # auto-creating broker; required on Tansu.
-                    await worker.provision_topics()
-                    await provision_extra_topics(calfkit_client, bridge_infra_topics())
-
-                    # ``broker.running`` is the public-ish state flag faststream
-                    # sets True at the end of start() and False in stop(). Guarding
-                    # on it (rather than calling start() unconditionally) matters
-                    # because faststream's ``KafkaSubscriber.start`` is *not*
-                    # idempotent — a second call would build a fresh aiokafka
-                    # consumer, drop the previous reference, and re-subscribe.
-                    if not calfkit_client.broker.running:
-                        await calfkit_client.broker.start()
-
-                    stop = asyncio.Event()
-                    loop = asyncio.get_running_loop()
-                    for sig in (signal.SIGINT, signal.SIGTERM):
-                        loop.add_signal_handler(sig, stop.set)
-
-                    gateway_task = asyncio.create_task(gateway.start())
-                    stop_task = asyncio.create_task(stop.wait())
-                    try:
-                        await asyncio.wait(
-                            {gateway_task, stop_task},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                    finally:
-                        for t in (gateway_task, stop_task):
-                            if not t.done():
-                                t.cancel()
-                        await typing_notifier.aclose()
-                        await gateway.close()
-
-    asyncio.run(_run())
+    asyncio.run(_run(settings, registry, server_urls))
 
 
 if __name__ == "__main__":
