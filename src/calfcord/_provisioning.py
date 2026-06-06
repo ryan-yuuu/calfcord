@@ -137,7 +137,9 @@ async def provision_and_start_broker(
     * **the client's reply topic** — calfkit registers a reply-dispatcher
       subscriber on ``client.reply_topic`` at ``connect`` but only provisions it
       lazily on the first invoke/emit, which a direct ``broker.start()`` never
-      triggers (these processes may never invoke at all); and
+      triggers (these processes may never invoke at all). This works around an
+      upstream gap: calf-ai/calfkit-sdk#180 — if calfkit provisions the reply
+      topic before a direct start, this step (and the helper) can be dropped; and
     * **calfcord's blind-spot topics** (``extra_topics``) — raw control-plane
       subscribers and no-subscriber callback targets (see the module docstring).
 

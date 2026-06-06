@@ -79,7 +79,8 @@ async def test_direct_start_hangs_without_reply_topic_provisioning() -> None:
     the client reply topic) and then a direct broker.start() blocks on the
     missing reply topic. Asserting the hang documents the failure mode and acts
     as a canary — if calfkit ever provisions reply topics eagerly, this stops
-    timing out and provision_and_start_broker's reply-topic step can be dropped."""
+    timing out and provision_and_start_broker's reply-topic step can be dropped
+    (tracked upstream: calf-ai/calfkit-sdk#180)."""
     client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
     worker = _build_worker(client)
     await worker.provision_topics()  # node topics only — reply topic left missing
