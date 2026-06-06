@@ -70,6 +70,26 @@ printf '%s' "$out" | grep -Fq \
   "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfkit-agent --foo bar" \
   && pass "passthrough args" || fail "passthrough: $out"
 
+# Lifecycle/process-supervisor verbs route to the calfcord-cli argparse entry
+# point (same family as init|agent|router|doctor), NOT the bare `uv run`
+# passthrough — otherwise `calfcord start` would try to exec a nonexistent
+# `start` console script. `_healthcheck` is the process-compose readiness probe
+# command. Each must land as `... -- calfcord-cli <verb> ...`.
+for verb in start stop status _healthcheck; do
+  out="$("$B" "$C" "$verb" 2>&1)"
+  printf '%s' "$out" | grep -Fq \
+    "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli $verb" \
+    && pass "dispatch $verb -> calfcord-cli" || fail "dispatch $verb: $out"
+done
+
+# Day-to-day lifecycle verbs are advertised in the shim's help text so returning
+# users discover them (help -> stdout, exit 0).
+help="$("$B" "$C" --help 2>&1)"
+for tok in "calfcord start" "calfcord stop" "calfcord status"; do
+  printf '%s' "$help" | grep -Fq "$tok" \
+    && pass "usage lists '$tok'" || fail "usage missing '$tok': $help"
+done
+
 # `calfcord broker` execs the bundled native tansu binary directly (NOT via uv),
 # supplying ephemeral-storage + localhost:9092 defaults via env and passing
 # extra args through. Stub the binary so this stays network-free.
@@ -95,6 +115,15 @@ out="$(PATH="$SB:$PATH" CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; ensure_tansu
 rm -f "$SB/uname"
 { [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "TANSU_OK=0"; } \
   && pass "ensure_tansu: unsupported platform degrades" || fail "ensure_tansu degrade (rc=$rc): $out"
+
+# ensure_process_compose has the same best-effort contract: an unsupported
+# platform WARNS and returns 0 (no die), leaving PROCESS_COMPOSE_OK=0 so the
+# install still completes (components can run manually or under Docker).
+printf '#!/usr/bin/env bash\n[ "$1" = -s ] && echo Plan9 || echo sparc\n' > "$SB/uname"; chmod +x "$SB/uname"
+out="$(PATH="$SB:$PATH" CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; ensure_process_compose; echo PC_OK=\$PROCESS_COMPOSE_OK" 2>&1)"; rc=$?
+rm -f "$SB/uname"
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "PC_OK=0"; } \
+  && pass "ensure_process_compose: unsupported platform degrades" || fail "ensure_process_compose degrade (rc=$rc): $out"
 
 # set-broker: single replaced line, other keys preserved, mode 600
 "$B" "$CS" set-broker kafka-b:9092 >/dev/null 2>&1

@@ -40,6 +40,10 @@ CURRENT_LINK="$CALFCORD_HOME/current"
 
 # Native broker: pinned tansu-io/tansu release, downloaded into BIN_DIR/tansu.
 TANSU_VERSION="${CALFCORD_TANSU_VERSION:-v0.6.0}"
+# Process supervisor: pinned F1bonacc1/process-compose release, downloaded into
+# BIN_DIR/process-compose. Pin matches the Phase-0 gate (docs §13.2): the REST
+# update semantics and the disabled-slot start path are version-specific.
+PROCESS_COMPOSE_VERSION="${CALFCORD_PROCESS_COMPOSE_VERSION:-v1.110.0}"
 VERSION_FILE="$CALFCORD_HOME/version"
 
 API_BASE="https://api.github.com/repos/$REPO"
@@ -50,6 +54,7 @@ INSTALLED_DEST=""   # set by install_version
 PREVIOUS_SHA=""     # set by activate_version (for GC)
 SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
 TANSU_OK=0          # set by ensure_tansu when the native broker binary is in place
+PROCESS_COMPOSE_OK=0  # set by ensure_process_compose when the supervisor binary is in place
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -199,6 +204,74 @@ ensure_tansu() {
     log "tansu broker installed at $BIN_DIR/tansu"
   else
     warn "tansu binary not executable after install; native broker unavailable"
+  fi
+  return 0
+}
+
+# Download the pinned process-compose supervisor binary into
+# $BIN_DIR/process-compose. Mirrors ensure_tansu's best-effort contract: an
+# unsupported platform or any download/extract/placement failure WARNS and
+# leaves PROCESS_COMPOSE_OK=0 rather than aborting the install — calfcord can
+# still run its processes manually (`calfcord run …`) or under Docker without the
+# native supervisor. Two deliberate divergences from ensure_tansu, both verified
+# against the real v1.110.0 release assets:
+#   * os/arch use the Go-style names process-compose ships (darwin/linux,
+#     arm64/amd64), not Tansu's Rust target triple.
+#   * the binary sits at the TARBALL ROOT (./process-compose), not under bin/.
+# Windows ships a .zip and is intentionally not bootstrapped (use WSL/Docker).
+ensure_process_compose() {
+  if [ -x "$BIN_DIR/process-compose" ]; then
+    PROCESS_COMPOSE_OK=1
+    log "using existing process-compose at $BIN_DIR/process-compose"
+    return 0
+  fi
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="darwin" ;;
+    Linux) os="linux" ;;
+    *) warn "no native process-compose for $(uname -s); run components manually (calfcord run …) or use Docker"; return 0 ;;
+  esac
+  case "$(uname -m)" in
+    arm64 | aarch64) arch="arm64" ;;
+    x86_64 | amd64) arch="amd64" ;;
+    *) warn "no native process-compose for CPU $(uname -m); run components manually (calfcord run …) or use Docker"; return 0 ;;
+  esac
+  local asset="process-compose_${os}_${arch}.tar.gz"
+  # Capital F1bonacc1 is the actual GitHub org name — not a typo.
+  local url="https://github.com/F1bonacc1/process-compose/releases/download/$PROCESS_COMPOSE_VERSION/$asset"
+  log "installing process-compose $PROCESS_COMPOSE_VERSION ($os/$arch) ..."
+  mkdir -p "$BIN_DIR"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/calfcord-pc.XXXXXX")"
+  # Extract the whole tarball to a temp dir then move just the binary — most
+  # portable across GNU/BSD tar (avoids strip-components + leading-./ quirks).
+  if ! fetch "$url" | tar -xz -C "$tmp"; then
+    rm -rf "$tmp"
+    warn "failed to download process-compose from $url; native supervisor unavailable (run components manually or use Docker)"
+    return 0
+  fi
+  if [ ! -f "$tmp/process-compose" ]; then
+    rm -rf "$tmp"
+    warn "process-compose tarball did not contain process-compose (release layout changed?); native supervisor unavailable"
+    return 0
+  fi
+  # Guard the placement like every other step: a filesystem fault moving the
+  # OPTIONAL supervisor binary must not trip the ERR trap and abort the install.
+  if ! { mv "$tmp/process-compose" "$BIN_DIR/process-compose" && chmod +x "$BIN_DIR/process-compose"; }; then
+    rm -rf "$tmp"
+    warn "failed to install process-compose into $BIN_DIR (filesystem/permissions?); native supervisor unavailable (run components manually or use Docker)"
+    return 0
+  fi
+  rm -rf "$tmp"
+  # macOS quarantines downloaded binaries; clear it so first launch isn't blocked.
+  if [ "$os" = "darwin" ] && have xattr; then
+    xattr -d com.apple.quarantine "$BIN_DIR/process-compose" 2>/dev/null || true
+  fi
+  if [ -x "$BIN_DIR/process-compose" ]; then
+    PROCESS_COMPOSE_OK=1
+    log "process-compose installed at $BIN_DIR/process-compose"
+  else
+    warn "process-compose binary not executable after install; native supervisor unavailable"
   fi
   return 0
 }
@@ -356,6 +429,9 @@ usage() {
 usage:
   calfcord init                  guided first-run config (provider, Discord, broker)
   calfcord doctor                check config, broker, Discord token/app id, and agents
+  calfcord start                 bring up the local org (broker + bridge + roster)
+  calfcord stop                  stop the local org
+  calfcord status                show what's running locally
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
   calfcord run <bridge|agent|router|tools|mcp>
                                  run a calfcord process in the pinned env
@@ -410,7 +486,15 @@ _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 # calfcord-cli argparse entry point; raw `calfcord calfkit-*` runner names aren't matched
 # here and fall through to the `uv run` passthrough below, so they keep working unchanged.
 case "${1:-}" in
-  init|agent|router|doctor) set -- calfcord-cli "$@" ;;
+  # Management + day-to-day lifecycle verbs all resolve to the calfcord-cli
+  # argparse entry point. `start|stop|status` drive the process-compose
+  # supervisor; `_healthcheck` is the readiness-probe command PC's exec probes
+  # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
+  # they don't fall through to the `uv run` passthrough (which would try to exec
+  # a nonexistent `start`/`stop`/… console script). Verbs whose calfcord-cli
+  # subcommands don't exist yet (logs, top-level tools/mcp start) are
+  # intentionally omitted until those phases land.
+  init|agent|router|doctor|_healthcheck|start|stop|status) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
@@ -616,6 +700,7 @@ main() {
   mkdir -p "$CALFCORD_HOME" "$VERSIONS_DIR"
   ensure_uv
   ensure_tansu
+  ensure_process_compose
   local sha
   sha="$(resolve_sha "$REF")"
   log "resolved $REF -> ${sha:0:12}"
@@ -633,6 +718,11 @@ main() {
     log "  broker:   calfcord broker   (native Tansu, ephemeral, localhost:9092)"
   else
     log "  broker:   native broker unavailable — use Docker (docker compose up tansu) or a remote CALF_HOST_URL"
+  fi
+  if [ "$PROCESS_COMPOSE_OK" -eq 1 ]; then
+    log "  supervisor: process-compose $PROCESS_COMPOSE_VERSION installed"
+  else
+    log "  supervisor: process-compose unavailable — run components manually (calfcord run …) or use Docker"
   fi
   if [ "$SEEDED_STARTER" -eq 1 ]; then
     log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
