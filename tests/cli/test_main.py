@@ -24,7 +24,7 @@ from calfcord.cli import (
 )
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
-from calfcord.supervisor import lifecycle, roster
+from calfcord.supervisor import component, lifecycle, roster
 
 
 def test_main_help_exits_zero() -> None:
@@ -1138,3 +1138,151 @@ def test_main_router_setup_still_dispatches_back_compat(
     out = capsys.readouterr().out.lower()
     assert "deprecated" in out
     assert "router edit" in out
+
+
+# --- tools / mcp lifecycle: start / stop (singleton-component veneers) -------
+#
+# `tools` and `mcp` are SINGLETON roster components: their start/stop are thin
+# veneers over the generic component_start/component_stop, dispatched with the
+# component's Process Compose slot name. Unlike the router, they have NO config
+# surface (tools needs none; mcp's add/codegen route to separate console scripts
+# in the shim), so the CLI wiring is the entire veneer — these tests pin that the
+# resolved install home and the slot name reach component_start/stop and that
+# their exit codes propagate, mirroring the router lifecycle tests above.
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("verb", ["start", "stop"])
+def test_main_component_lifecycle_help_exits_zero(group: str, verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([group, verb, "--help"])
+    assert exc.value.code == 0
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_requires_subcommand(group: str) -> None:
+    # `tools` / `mcp` are verb groups: a bare `calfcord tools` must error (exit 2),
+    # never a silent no-op (so the group can grow further commands later).
+    with pytest.raises(SystemExit) as exc:
+        main([group])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_start_dispatches_with_home_and_slot_name(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `<group> start` is async and drives the install-scoped supervisor: it passes
+    # the $CALFCORD_HOME dir itself (what pc_port_for keys on, identical to agent
+    # start/stop and the substrate lifecycle) and the component's slot name. It
+    # must NOT consult CALF_HOST_URL (component lifecycle does not probe the
+    # broker). Exit code is propagated unchanged.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(component, "component_start", _start)
+    assert main([group, "start"]) == 0
+    assert captured["home"] == home
+    assert captured["name"] == group
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_stop_dispatches_with_home_and_slot_name(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `<group> stop` is async and needs only the install home + the slot name; no
+    # config check, no broker probe.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _stop(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(component, "component_stop", _stop)
+    assert main([group, "stop"]) == 0
+    assert captured["home"] == home
+    assert captured["name"] == group
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_start_propagates_exit_code(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _start(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(component, "component_start", _start)
+    assert main([group, "start"]) == 1
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_stop_propagates_exit_code(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _stop(*args, **kwargs):
+        return 3
+
+    monkeypatch.setattr(component, "component_stop", _stop)
+    assert main([group, "stop"]) == 3
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_start_and_stop_pass_the_same_home(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # pc_port_for keys on the home dir, so start and stop MUST pass the identical
+    # home value (the $CALFCORD_HOME root) or they'd talk to different REST ports.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    seen: dict[str, object] = {}
+
+    async def _start(home_arg, *, name, **kwargs):
+        seen["start_home"] = home_arg
+        return 0
+
+    async def _stop(home_arg, *, name, **kwargs):
+        seen["stop_home"] = home_arg
+        return 0
+
+    monkeypatch.setattr(component, "component_start", _start)
+    monkeypatch.setattr(component, "component_stop", _stop)
+    assert main([group, "start"]) == 0
+    assert main([group, "stop"]) == 0
+    assert seen["start_home"] == seen["stop_home"] == home
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("verb", ["start", "stop"])
+def test_main_component_lifecycle_without_home_errors_native_install(
+    group: str, verb: str, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Component lifecycle drives the install-scoped supervisor (port derived from
+    # $CALFCORD_HOME), so a dev run with no home must refuse with a clear message
+    # rather than crash inside os.fspath(None) — mirroring router/agent/substrate.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"{group} lifecycle must not run without a home")
+
+    monkeypatch.setattr(component, "component_start", _boom)
+    monkeypatch.setattr(component, "component_stop", _boom)
+    assert main([group, verb]) == 1
+    assert "native install" in capsys.readouterr().out

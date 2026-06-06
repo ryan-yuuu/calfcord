@@ -438,6 +438,8 @@ usage:
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
   calfcord router setup          optional: configure the ambient-message router
+  calfcord tools <start|stop>    bring the tools host online / offline
+  calfcord mcp <start|stop>      bring the MCP host online / offline
   calfcord mcp <add|codegen> [args]
                                  add an MCP server / generate its tool schema
   calfcord auth [args]           Codex (ChatGPT subscription) login
@@ -491,10 +493,12 @@ case "${1:-}" in
   # supervisor; `_healthcheck` is the readiness-probe command PC's exec probes
   # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
   # they don't fall through to the `uv run` passthrough (which would try to exec
-  # a nonexistent `start`/`stop`/… console script). Verbs whose calfcord-cli
-  # subcommands don't exist yet (logs, top-level tools/mcp start) are
-  # intentionally omitted until those phases land.
-  init|agent|router|doctor|_healthcheck|start|stop|status) set -- calfcord-cli "$@" ;;
+  # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
+  # verb group (the singleton tools-host lifecycle: `tools start|stop`); `mcp` is
+  # SPLIT below (lifecycle -> calfcord-cli, add/codegen -> their own scripts), so
+  # it is NOT matched here. Verbs whose calfcord-cli subcommands don't exist yet
+  # (logs) are intentionally omitted until those phases land.
+  init|agent|router|tools|doctor|_healthcheck|start|stop|status) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
@@ -503,12 +507,18 @@ case "${1:-}" in
       *) usage >&2; exit 2 ;;
     esac ;;
   mcp)
-    shift
-    case "${1:-}" in
-      add)     set -- calfcord-mcp-add "${@:2}" ;;
-      codegen) set -- calfcord-mcp-codegen "${@:2}" ;;
-      -h|--help) usage; exit 0 ;;
-      *) usage >&2; exit 2 ;;
+    # `mcp` is SPLIT by subverb: the singleton MCP-host lifecycle (start|stop)
+    # routes to the calfcord-cli argparse entry point (keeping `mcp` as the leading
+    # arg so it dispatches the `mcp` verb group there), while the config subverbs
+    # (add|codegen) keep routing to their dedicated console scripts. The lifecycle
+    # path stays off the bridge-only MCP-secrets loader (it just clocks the
+    # pre-declared `mcp` process in/out via the supervisor).
+    case "${2:-}" in
+      start|stop) set -- calfcord-cli "$@" ;;
+      add)        set -- calfcord-mcp-add "${@:3}" ;;
+      codegen)    set -- calfcord-mcp-codegen "${@:3}" ;;
+      -h|--help)  usage; exit 0 ;;
+      *)          usage >&2; exit 2 ;;
     esac ;;
   auth) shift; set -- calfkit-auth "$@" ;;
 esac

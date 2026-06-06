@@ -5,8 +5,12 @@ The native ``calfcord`` shim translates user-facing management subcommands
 and execs them through the same locked venv as the runners. ``prog="calfcord"``
 so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
-(``init`` / ``doctor`` / ``agent`` / ``router``) to dispatch them here. The ``run`` /
-``mcp`` / ``auth`` verbs are translated to console scripts in the shim itself, not here.
+(``init`` / ``doctor`` / ``agent`` / ``router`` / ``tools``) to dispatch them here.
+The ``run`` / ``auth`` verbs are translated to console scripts in the shim itself,
+not here. ``mcp`` is SPLIT in the shim: its singleton-host *lifecycle*
+(``mcp start|stop``) dispatches here like the other component verbs, while its
+*config* verbs (``mcp add`` / ``mcp codegen``) stay separate console scripts —
+keeping the lifecycle path off the bridge-only MCP-secrets loader.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._prompts import make_prompter
 from calfcord.health.check import default_broker_probe, healthcheck
-from calfcord.supervisor import lifecycle, roster
+from calfcord.supervisor import component, lifecycle, roster
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -128,6 +132,21 @@ def _build_parser() -> argparse.ArgumentParser:
     # back-compat alias so existing muscle memory / docs / scripts keep working;
     # it dispatches to the same one-shot ambient-router wizard it always has.
     router_sub.add_parser("setup", help="Deprecated alias of `router edit`.")
+
+    # ``tools`` and ``mcp`` are SINGLETON roster components: one declared Process
+    # Compose slot per role, clocking in/out of the running office. Unlike the
+    # router they have NO config surface here (tools needs none; ``mcp add`` /
+    # ``mcp codegen`` are separate console scripts routed by the shim, never
+    # through this argparse entry point), so each is a ``start|stop`` group whose
+    # whole veneer is the dispatch to the generic ``component_start/stop`` with the
+    # slot name. ``required=True`` makes a bare ``calfcord tools`` / ``calfcord
+    # mcp`` print help + exit non-zero rather than silently no-op, so the groups
+    # can grow further verbs later.
+    for _component in ("tools", "mcp"):
+        component_p = sub.add_parser(_component, help=f"Manage the {_component} host.")
+        component_sub = component_p.add_subparsers(dest=f"{_component}_command", required=True)
+        component_sub.add_parser("start", help=f"Bring the {_component} host online.")
+        component_sub.add_parser("stop", help=f"Take the {_component} host offline.")
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
     # bridge) up detached, close it, and glance at the org board. These are thin
@@ -415,6 +434,48 @@ def _run_router(args: argparse.Namespace) -> int:
     return asyncio.run(router_config.router_stop(home))
 
 
+def _run_component(name: str, verb: str) -> int:
+    """Dispatch a singleton-component lifecycle verb (``tools|mcp start|stop``).
+
+    ``tools`` and ``mcp`` are SINGLETON roster components, so — unlike the router,
+    which carries an editable LLM config — their lifecycle is the *entire* surface
+    and a thin veneer over the generic
+    :func:`calfcord.supervisor.component.component_start` /
+    :func:`~calfcord.supervisor.component.component_stop`. The slot ``name`` is the
+    component's declared Process Compose process (see
+    :func:`calfcord.supervisor.compose.build_compose_project`); ``verb`` selects
+    start vs stop.
+
+    Like every other lifecycle surface (substrate, agent roster, router), this
+    drives the *install-scoped* supervisor whose REST port is derived from
+    ``$CALFCORD_HOME`` (:func:`~calfcord.supervisor.lifecycle.pc_port_for`), so it
+    passes that home dir itself — the SAME value those siblings pass. A dev run (no
+    ``CALFCORD_HOME``) has no stable home for the supervisor, so it refuses with the
+    same actionable native-install message rather than crashing in
+    ``os.fspath(None)`` downstream. No broker URL is consulted: component lifecycle
+    does not probe the broker. The component coroutine's exit code is propagated
+    unchanged.
+
+    ``mcp start`` deliberately runs NO config pre-check: the only ``mcp.json``
+    readers are the bridge-only secrets loader
+    (:func:`calfcord.mcp.config.load_mcp_servers`, forbidden on the CLI path by the
+    decoupling invariant) and the ``mcp add`` writer's private parser (which pulls
+    in the whole add machinery), so a light, clean reuse is not available — per
+    design §12.4 the veneer is just ``component_start``.
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            f"error: `calfcord {name} {verb}` needs a native install — set "
+            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
+        )
+        return 1
+
+    if verb == "start":
+        return asyncio.run(component.component_start(home, name=name))
+    return asyncio.run(component.component_stop(home, name=name))
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command in ("start", "stop", "status"):
@@ -442,6 +503,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     if args.command == "router":
         return _run_router(args)
+
+    # ``tools`` / ``mcp`` are singleton-component verb groups; the per-group dest
+    # (``tools_command`` / ``mcp_command``) carries the start/stop verb.
+    if args.command in ("tools", "mcp"):
+        return _run_component(args.command, getattr(args, f"{args.command}_command"))
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits

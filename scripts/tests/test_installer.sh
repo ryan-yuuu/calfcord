@@ -82,6 +82,43 @@ for verb in start stop status _healthcheck; do
     && pass "dispatch $verb -> calfcord-cli" || fail "dispatch $verb: $out"
 done
 
+# `tools` is a calfcord-cli verb group (the singleton tools-host lifecycle:
+# `tools start|stop`), so the whole group routes to the argparse entry point and
+# the subverb + args are forwarded verbatim.
+for sub in start stop; do
+  out="$("$B" "$C" tools "$sub" 2>&1)"
+  printf '%s' "$out" | grep -Fq \
+    "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli tools $sub" \
+    && pass "dispatch tools $sub -> calfcord-cli" || fail "dispatch tools $sub: $out"
+done
+
+# `mcp` is SPLIT: the new lifecycle subverbs (`start|stop`) route to calfcord-cli,
+# while the pre-existing config subverbs (`add|codegen`) still route to their own
+# console scripts (calfcord-mcp-add / calfcord-mcp-codegen). The split is the
+# point — adding lifecycle must not break the config verbs (regression below).
+for sub in start stop; do
+  out="$("$B" "$C" mcp "$sub" 2>&1)"
+  printf '%s' "$out" | grep -Fq \
+    "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli mcp $sub" \
+    && pass "dispatch mcp $sub -> calfcord-cli" || fail "dispatch mcp $sub: $out"
+done
+
+# Regression: `mcp add` / `mcp codegen` must STILL route to their console scripts
+# (NOT calfcord-cli), with args forwarded verbatim, after the lifecycle split.
+out="$("$B" "$C" mcp add foo --url https://x 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-mcp-add foo --url https://x" \
+  && pass "dispatch mcp add -> calfcord-mcp-add (regression)" || fail "dispatch mcp add: $out"
+out="$("$B" "$C" mcp codegen bar 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-mcp-codegen bar" \
+  && pass "dispatch mcp codegen -> calfcord-mcp-codegen (regression)" || fail "dispatch mcp codegen: $out"
+
+# An unknown `mcp` subverb is a usage error (exit 2), never silently passed
+# through to a nonexistent `mcp` console script.
+"$B" "$C" mcp bogus >/dev/null 2>&1; [ $? -eq 2 ] \
+  && pass "mcp unknown subverb -> usage exit 2" || fail "mcp unknown subverb"
+
 # Day-to-day lifecycle verbs are advertised in the shim's help text so returning
 # users discover them (help -> stdout, exit 0).
 help="$("$B" "$C" --help 2>&1)"
