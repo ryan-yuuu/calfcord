@@ -41,6 +41,28 @@ _HTTP_TIMEOUT = 10.0
 # in this header. Confined here so no other module reconstructs the scheme.
 _TOKEN_HEADER = "X-PC-Token-Key"
 
+# Cap on how much of PC's response body we append to an error: enough to carry its
+# informative reason (e.g. "process X is not defined") without an adversarially
+# large body flooding the message. The token rides a HEADER, never the body, so
+# echoing the body leaks no secret.
+_MAX_BODY_CHARS = 500
+
+
+class ProcessComposeError(RuntimeError):
+    """A failed Process Compose REST call, carrying the HTTP status structurally.
+
+    Stays a ``RuntimeError`` (the package-wide infra-failure contract) so existing
+    ``except RuntimeError`` callers and the readiness poll are unaffected, while
+    adding a ``status_code`` so callers can branch on the response class WITHOUT
+    string-parsing the message. ``status_code`` is ``None`` for a transport failure
+    (no HTTP response was received), so a 4xx/5xx branch reads "no status" as "not
+    a client error".
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class ProcessComposeClient:
     """Async wrapper over the Process Compose REST API on ``http://localhost:{port}``.
@@ -104,14 +126,22 @@ class ProcessComposeClient:
                 # Transport failure (server not up yet / wedged / wrong port) — an
                 # infra failure, so normalize to the same RuntimeError contract as
                 # a non-2xx, letting callers (e.g. the start readiness poll) handle
-                # one error type instead of leaking httpx.
-                raise RuntimeError(
+                # one error type instead of leaking httpx. No HTTP status exists, so
+                # status_code stays None.
+                raise ProcessComposeError(
                     f"{caller}: process-compose {method} {route} failed to connect: {exc}"
                 ) from exc
         if not response.is_success:
-            raise RuntimeError(
+            # Carry the status structurally (so callers branch on it without parsing
+            # the message) AND append PC's informative body, truncated — its reasons
+            # (e.g. "process X is not defined") are otherwise dropped. The body is
+            # safe to echo: the token rides a header, never the body.
+            body = (response.text or "").strip()
+            detail = f": {body[:_MAX_BODY_CHARS]}" if body else ""
+            raise ProcessComposeError(
                 f"{caller}: process-compose {method} {route} "
-                f"failed with HTTP {response.status_code}"
+                f"failed with HTTP {response.status_code}{detail}",
+                status_code=response.status_code,
             )
         return response
 

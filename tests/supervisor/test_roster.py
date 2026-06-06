@@ -18,8 +18,11 @@ physical-only "not yet registered", logical-only "running on another host").
 
 from __future__ import annotations
 
+import pytest
+
 from calfcord.agents.definition import AgentDefinition
 from calfcord.supervisor import roster
+from calfcord.supervisor.client import ProcessComposeError
 
 # --- fakes ------------------------------------------------------------------
 
@@ -299,11 +302,17 @@ async def test_agent_start_not_declared_asks_for_reload_no_update_project(
     """start_process raises (brand-new agent) → reload message, exit 1, no update.
 
     A new agent authored after ``calfcord start`` is not a declared slot, so the
-    PC server errors on start. §13.1: bringing it online needs a workspace reload
-    (stop && start) because an in-place ``update_project`` bounces the substrate —
-    so we must NOT call ``update_project``.
+    PC server errors on start with a 4xx. §13.1: bringing it online needs a
+    workspace reload (stop && start) because an in-place ``update_project`` bounces
+    the substrate — so we must NOT call ``update_project``. The reload hint is
+    reserved for this STRUCTURAL 4xx not-declared case (Fix #9).
     """
-    client = _StubClient(start_raises=RuntimeError("HTTP 400: no such process"))
+    client = _StubClient(
+        start_raises=ProcessComposeError(
+            "start_process: ... HTTP 404: process newbie is not defined",
+            status_code=404,
+        )
+    )
     probe = _StubProbe([])  # not live → guard passes → we reach start_process
 
     rc = await roster.agent_start(
@@ -322,6 +331,59 @@ async def test_agent_start_not_declared_asks_for_reload_no_update_project(
     # The message must steer to a reload, not leave the operator stranded.
     assert "calfcord stop" in out
     assert "calfcord start" in out
+
+
+async def test_agent_start_server_error_raises_loudly_not_reload_hint(tmp_path):
+    """A 5xx on start is a genuine infra fault → raise loudly (Fix #9).
+
+    §13.1's reload hint is reserved for the STRUCTURAL 4xx not-declared case. A 5xx
+    (a wedged supervisor) is not "a brand-new agent"; mistranslating it into the
+    benign reload hint would mask a real fault. Per the error convention it must
+    raise with caller/target/correlation context, carrying the PC body.
+    """
+    pc_error = ProcessComposeError(
+        "start_process: process-compose POST /process/start/assistant "
+        "failed with HTTP 500: internal supervisor error",
+        status_code=500,
+    )
+    client = _StubClient(start_raises=pc_error)
+    probe = _StubProbe([])  # not live → guard passes → we reach start_process
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await roster.agent_start(
+            _home(tmp_path),
+            name="assistant",
+            server_urls=_SERVERS,
+            client=client,
+            probe=probe,
+        )
+
+    message = str(excinfo.value)
+    # The target agent is named (correlation), and PC's body survives.
+    assert "assistant" in message
+    assert "500" in message
+    assert client.start_calls == ["assistant"]  # we did attempt the start
+    assert client.update_project_calls == []  # still never bounce the substrate
+
+
+async def test_agent_start_unknown_error_raises_loudly(tmp_path):
+    """A raise with no structural status is a genuine fault → raise loudly (Fix #9).
+
+    A bare ``RuntimeError`` (status_code absent → ``None``) is NOT the 4xx
+    not-declared case, so it must not be mistranslated into the benign reload hint;
+    it propagates as the infra fault it is.
+    """
+    client = _StubClient(start_raises=RuntimeError("unexpected transport blowup"))
+    probe = _StubProbe([])
+
+    with pytest.raises(RuntimeError):
+        await roster.agent_start(
+            _home(tmp_path),
+            name="assistant",
+            server_urls=_SERVERS,
+            client=client,
+            probe=probe,
+        )
 
 
 # --- agent_stop -------------------------------------------------------------

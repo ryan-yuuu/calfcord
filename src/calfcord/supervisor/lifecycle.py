@@ -42,8 +42,13 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from pathlib import Path
 
 from calfcord.health.check import BrokerProbe, default_broker_probe
+from calfcord.supervisor._workspace import (
+    iter_process_dicts,
+    resolve_client,
+    workspace_is_up,
+)
 from calfcord.supervisor.client import ProcessComposeClient
-from calfcord.supervisor.compose import render_compose
+from calfcord.supervisor.compose import SUPERVISOR_LOG_STEM, render_compose
 
 # A process launcher: hand it an argv and it starts the process. Production wires
 # this to a detached ``subprocess.Popen`` (the ``up`` must outlive ``start``); a
@@ -85,7 +90,9 @@ _DOWN_TIMEOUT_SECONDS = 20
 
 _LOCK_FILENAME = "calfcord-lifecycle.lock"
 _COMPOSE_FILENAME = "process-compose.yaml"
-_SUPERVISOR_LOG_FILENAME = "process-compose.log"
+# Derive from the single shared stem so the writer (this module's ``up -L``) and
+# the reader (``calfcord logs``) can never drift apart (review #19).
+_SUPERVISOR_LOG_FILENAME = f"{SUPERVISOR_LOG_STEM}.log"
 
 # Substrate processes, for the status board's substrate-vs-roster split.
 _SUBSTRATE = frozenset({"broker", "bridge"})
@@ -177,18 +184,50 @@ def lifecycle_lock(home: str | os.PathLike[str]):
         os.close(fd)
 
 
-async def _supervisor_is_up(client: ProcessComposeClient) -> bool:
-    """Whether the REST server answers — a successful ``project_state`` probe.
+# A workspace-readiness alias kept for the internal call sites here; the body is
+# the one shared :func:`_workspace.workspace_is_up` (Fix #14 consolidation).
+_supervisor_is_up = workspace_is_up
 
-    The client raises ``RuntimeError`` on a transport failure (server not up /
-    wrong port), which is exactly "not up" here; any other error is a real bug and
-    is left to propagate.
+
+def _home_marker(home: str) -> str:
+    """The home-specific path the rendered project embeds in every process.
+
+    Each declared process's ``log_location`` is ``<home>/state/logs/<name>.log``
+    (see :func:`compose._log_location`), so ``<home>/state`` is a substring of the
+    answering supervisor's config iff that supervisor was launched for THIS home.
+    """
+    return os.path.join(home, "state")
+
+
+async def _supervisor_belongs_to_home(
+    client: ProcessComposeClient, home: str
+) -> bool | None:
+    """Whether the answering supervisor was launched for ``home`` (Fix #11).
+
+    :func:`pc_port_for` maps two homes into an 800-port band, so a collision is
+    possible: two installs can hash to one REST port. The bare ``project_state``
+    idempotency probe only proves *something* answers that port, not *whose*
+    supervisor it is — so before trusting an "already up" verdict we read back a
+    declared process's config (which embeds the home-specific log path) and check
+    for this home's marker.
+
+    Returns ``True`` (this home's), ``False`` (a DIFFERENT home colliding on the
+    port — the caller must fail loudly, never a false "already open"), or ``None``
+    when it cannot be determined (the info route is unavailable), in which case the
+    caller keeps the prior best-effort idempotent behavior.
     """
     try:
-        await client.project_state()
+        # ``bridge`` is always a declared substrate process, so its config is the
+        # stable place to read the home-specific log path back from.
+        info = await client.get_process_info("bridge")
     except RuntimeError:
-        return False
-    return True
+        return None
+    if not info:
+        return None
+    # Robust to whatever JSON key Process Compose uses for the log path (the API
+    # shape is version-fragile, §12.4 Risk #2): scan the whole serialized config
+    # for this home's marker rather than pinning a single field name.
+    return _home_marker(home) in repr(info)
 
 
 def _bridge_is_ready(state: object) -> bool:
@@ -289,8 +328,9 @@ def _default_spawn_blocking(argv: Sequence[str]) -> None:
     )
 
 
-def _resolve_client(client: ProcessComposeClient | None, home: str) -> ProcessComposeClient:
-    return client if client is not None else ProcessComposeClient(port=pc_port_for(home))
+# A per-home client resolver alias for the internal call sites; the body is the
+# one shared :func:`_workspace.resolve_client` (Fix #14 consolidation).
+_resolve_client = resolve_client
 
 
 async def start(
@@ -335,8 +375,22 @@ async def start(
 
     with lifecycle_lock(home):
         # Idempotency (§12.4): if the office is already open, do NOT launch a
-        # second supervisor — just confirm and point at the next step.
+        # second supervisor — just confirm and point at the next step. But the
+        # port can collide across homes (Fix #11): verify the answering supervisor
+        # is THIS home's before trusting "already open". A DIFFERENT home colliding
+        # on the port must fail loudly, never a false "already open" that silently
+        # skips install B's own launch.
         if await _supervisor_is_up(client):
+            belongs = await _supervisor_belongs_to_home(client, home)
+            if belongs is False:
+                print(
+                    f"error: another calfcord install is already using REST port "
+                    f"{pc_port_for(home)} on this host (a port collision between "
+                    "two $CALFCORD_HOME installs). Stop the other install, or run "
+                    "this one under a different $CALFCORD_HOME, then re-run "
+                    "`calfcord start`."
+                )
+                return 1
             print(
                 "workspace already open (broker + bridge). "
                 "Next: calfcord agent start <name>"
@@ -389,8 +443,24 @@ async def start(
 
         # Priming reconcile for upstream #494 (§13.1): exactly one no-op
         # project-update with the byte-identical YAML, so the buggy first update
-        # lands on a no-op instead of bouncing the substrate.
-        await client.update_project(yaml_text)
+        # lands on a no-op instead of bouncing the substrate. This runs AFTER the
+        # detached supervisor is already up, so a raise here (a PC reconcile error
+        # / transport failure) must NOT be left bare: an unhandled exception would
+        # orphan the supervisor and dump a traceback — and since `start` is the
+        # wizard's start_fn, it would crash `calfcord init`. Fail like the
+        # readiness-gate path below: tear the substrate back down via the BLOCKING
+        # seam (a racy detached `down` could let a retried `start` collide with a
+        # supervisor still stopping), report actionably, and return non-zero.
+        try:
+            await client.update_project(yaml_text)
+        except RuntimeError:
+            with contextlib.suppress(Exception):
+                spawn_blocking([binary, "down", "-p", str(port)])
+            print(
+                "error: workspace failed to prime; tore it down. "
+                f"See {log_path} or run: calfcord doctor"
+            )
+            return 1
 
         if not await _await_bridge_ready(
             client, timeout_s=ready_timeout_s, clock=clock, sleep=sleep
@@ -487,22 +557,18 @@ async def status(
 def _process_rows(payload: object) -> list[dict]:
     """Normalize ``list_processes()`` into row dicts (name/status/is_ready).
 
-    Process Compose returns either a bare list or ``{"data": [...]}`` depending on
-    version; accept both so a wire-shape wobble does not blank the board.
+    The wire-shape tolerance (bare list vs ``{"data": [...]}``, skip non-dicts) is
+    the one shared :func:`_workspace.iter_process_dicts` (Fix #14); this only
+    projects the board's three columns onto each entry.
     """
-    items = payload.get("data", []) if isinstance(payload, dict) else payload
-    rows: list[dict] = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            {
-                "name": item.get("name", "?"),
-                "status": item.get("status", "?"),
-                "is_ready": item.get("is_ready", "-"),
-            }
-        )
-    return rows
+    return [
+        {
+            "name": item.get("name", "?"),
+            "status": item.get("status", "?"),
+            "is_ready": item.get("is_ready", "-"),
+        }
+        for item in iter_process_dicts(payload)
+    ]
 
 
 def _format_row(row: dict) -> str:

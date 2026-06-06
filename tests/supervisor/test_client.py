@@ -217,6 +217,51 @@ async def test_non_2xx_raises_runtimeerror_with_route_and_status() -> None:
     assert "404" in message
 
 
+async def test_non_2xx_surfaces_status_code_structurally_and_appends_body() -> None:
+    # Fix #9: callers (roster.agent_start) must branch on the status WITHOUT string
+    # parsing — so the status is carried as a structural attribute. And PC's
+    # informative response body must be surfaced (truncated), not dropped: the
+    # PC_API_TOKEN rides a header, so the body leaks no secret.
+    _, client = _record(httpx.Response(404, text="process newbie is not defined"))
+    with pytest.raises(RuntimeError) as excinfo:
+        await client.start_process("newbie")
+    exc = excinfo.value
+    # Structural status: a caller can branch 4xx-vs-5xx without parsing the message.
+    assert getattr(exc, "status_code", None) == 404
+    # The body is appended so the operator/LLM sees PC's reason.
+    assert "process newbie is not defined" in str(exc)
+
+
+async def test_non_2xx_truncates_an_overlong_body() -> None:
+    # An adversarially large PC body must not flood the error; cap it at 500 chars.
+    long_body = "x" * 5000
+    _, client = _record(httpx.Response(500, text=long_body))
+    with pytest.raises(RuntimeError) as excinfo:
+        await client.stop_process("assistant")
+    message = str(excinfo.value)
+    assert getattr(excinfo.value, "status_code", None) == 500
+    # The body is present but bounded (the 5000-char body cannot appear in full).
+    assert "x" * 500 in message
+    assert long_body not in message
+
+
+async def test_connection_error_has_no_status_code() -> None:
+    # A transport failure carries no HTTP status, so the structural attribute must
+    # be None — a caller branching on 4xx/5xx treats "no status" as "not a 4xx".
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = ProcessComposeClient(
+        port=_PORT,
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await client.list_processes()
+    assert getattr(excinfo.value, "status_code", None) is None
+
+
 async def test_stop_non_2xx_raises() -> None:
     _, client = _record(httpx.Response(500, text="boom"))
     with pytest.raises(RuntimeError) as excinfo:
