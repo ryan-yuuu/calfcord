@@ -332,7 +332,13 @@ class TestOnReadyInjectsFetcher:
     Discord connection) and just asserts the injection happens.
     """
 
-    async def test_on_ready_injects_channel_history_fetcher(self) -> None:
+    async def test_on_ready_injects_channel_history_fetcher(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _on_ready now also writes the first bridge heartbeat (§12.1); point
+        # CALFCORD_HOME at a tmp dir so that beat lands there instead of
+        # littering the repo's working directory.
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
         gateway = _gateway()
         # Patch the client.user attribute (populated by Discord after
         # handshake) so _on_ready's assertion holds.
@@ -352,7 +358,12 @@ class TestOnReadyInjectsFetcher:
         injected = gateway._ingress.set_fetcher.call_args.args[0]
         assert isinstance(injected, ChannelHistoryFetcher)
 
-    async def test_on_ready_logs_history_injection(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_on_ready_logs_history_injection(
+        self, caplog: pytest.LogCaptureFixture, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _on_ready now writes the first bridge heartbeat (§12.1); contain it in
+        # a tmp CALFCORD_HOME so the test stays hermetic.
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
         gateway = _gateway()
         fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
         with (

@@ -39,6 +39,8 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 
 import discord
 from calfkit.client import Client
@@ -80,11 +82,18 @@ from calfcord.control_plane.publish import publish_discovery_ping
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.discord.settings import DiscordSettings
 from calfcord.discord.typing import TypingNotifier
+from calfcord.health.heartbeat import write_beat
+from calfcord.health.refresher import run_refresher
 from calfcord.router.definition import build_router_definition
 
 logger = logging.getLogger(__name__)
 
 _REPLY_TOPIC = "discord.outbox"
+
+# The component name the bridge writes its heartbeat under and that
+# ``calfcord _healthcheck bridge`` reads back (design §4.2 / §12.1).
+_HEALTH_COMPONENT = "bridge"
+
 _SEEN_MESSAGE_IDS_CAPACITY = 1024
 
 # Discord caps thread names at 100 characters.
@@ -98,6 +107,20 @@ _THREAD_NAME_MAX_LEN = 100
 # nothing after it, or only whitespace — matches with an empty body, which
 # :func:`_parse_task_command` reports as ``None``.
 _TASK_COMMAND_RE = re.compile(r"^/task(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+def _resolve_health_home() -> Path:
+    """Resolve the install home the heartbeat lands under, matching the reader.
+
+    The ``calfcord _healthcheck bridge`` probe resolves the beat directory as
+    ``_resolve_home() or Path()`` (``cli/main.py``): ``$CALFCORD_HOME`` when the
+    shim exported it, else the launch directory. The bridge MUST mirror that
+    exact resolution so the beat it writes lands where the probe looks for it; an
+    empty ``CALFCORD_HOME=`` counts as unset (same guard as the CLI) rather than
+    rooting state at ``/state/health``.
+    """
+    home = os.environ.get("CALFCORD_HOME")
+    return Path(home) if home else Path()
 
 
 def _thread_name_from_text(text: str, *, fallback: str = "Task", max_len: int = _THREAD_NAME_MAX_LEN) -> str:
@@ -217,6 +240,16 @@ class DiscordIngressGateway:
         # MessageNormalizer needs bot_user_id, which we don't know until on_ready.
         self._message_normalizer: MessageNormalizer | None = None
         self._bot_user_id: int | None = None
+
+        # Discord-connection liveness (design §12.1): the bridge heartbeat must
+        # mean "connected to Discord", not merely "process up". ``_connected``
+        # flips True on on_ready / on_resumed and False on on_disconnect; the
+        # timer-refresher in ``main`` gates every beat write on it, so a dropped
+        # gateway ages the beat past its TTL instead of staying falsely green.
+        # ``_bot_identity`` is the display string (name + numeric id, never a
+        # token — §12.3) the refresher stamps each beat with once we are ready.
+        self._connected: bool = False
+        self._bot_identity: str | None = None
         self._slash_normalizer = SlashNormalizer(
             registry=registry,
             human_owner_id=settings.owner_user_id,
@@ -257,6 +290,27 @@ class DiscordIngressGateway:
         # window.
         self._seen_message_ids: OrderedDict[int, None] = OrderedDict()
 
+    @property
+    def connected(self) -> bool:
+        """Whether the Discord gateway is currently connected (§12.1).
+
+        This is the predicate the heartbeat refresher gates each write on, so it
+        reflects the *live* websocket state: True between on_ready/on_resumed and
+        the next on_disconnect. Read-only by design — only the lifecycle handlers
+        mutate it.
+        """
+        return self._connected
+
+    @property
+    def bot_identity(self) -> str | None:
+        """The bot's display identity (``name (id)``), or ``None`` before ready.
+
+        Always a display string — never a token (§12.3). The refresher passes
+        this through to each beat's ``identity`` field so ``status`` / ``doctor``
+        can show *which* bot is connected.
+        """
+        return self._bot_identity
+
     async def start(self) -> None:
         """Connect to the Discord gateway. Blocks until cancelled or disconnect."""
         logger.info(
@@ -289,6 +343,32 @@ class DiscordIngressGateway:
         fetcher = ChannelHistoryFetcher(self._client, self._registry)
         self._ingress.set_fetcher(fetcher)
         logger.info("gateway ready as %s (id=%s); history fetcher injected", bot_user, bot_user.id)
+
+        # Discord is connected as of on_ready — record liveness and the display
+        # identity, then write the FIRST heartbeat BEFORE slash-sync (§12.1 /
+        # §13.3). Slash-sync can be slow or 429 on a cold tree; gating readiness
+        # on it would let a transient Discord-side hiccup fail or delay the
+        # "bridge healthy" signal even though the gateway is fully connected. The
+        # beat lands in the same ``<home>/state/health/`` the ``calfcord
+        # _healthcheck bridge`` probe reads. ``identity`` is a display string
+        # (name + numeric id), never the token (§12.3).
+        self._connected = True
+        self._bot_identity = f"{bot_user} ({bot_user.id})"
+        try:
+            write_beat(
+                _resolve_health_home(),
+                _HEALTH_COMPONENT,
+                status="healthy",
+                identity=self._bot_identity,
+                now=datetime.now(UTC),
+            )
+        except Exception:
+            # A heartbeat write failure (read-only volume / disk full / EACCES)
+            # must NOT break bridge boot: skip the beat (it ages to "not ready" at
+            # the probe, which is correct) and continue to slash-sync + discovery.
+            # The timer-refresher retries the write on its next tick.
+            logger.exception("failed to write initial bridge heartbeat; continuing boot")
+
         await self._slash.sync(self._settings.guild_id)
 
         # Register the step-transcript expand toggle as a PERSISTENT view
@@ -310,6 +390,31 @@ class DiscordIngressGateway:
             logger.info("published discovery_ping; awaiting agent state events")
         except Exception:
             logger.exception("failed to publish discovery_ping; agents may need restart for visibility")
+
+    async def _on_disconnect(self) -> None:
+        """Mark the bridge disconnected when the Discord gateway drops (§12.1).
+
+        discord.py fires ``on_disconnect`` whenever the websocket connection is
+        lost — a revoked token, a network blip, or a normal session expiry. While
+        disconnected the bot cannot post replies, so the heartbeat MUST go stale:
+        flipping the flag stops the refresher feeding the beat, which ages past
+        its TTL and turns the silent failure into a "not ready" probe verdict
+        instead of a green light that lies. discord.py auto-reconnects, so this is
+        often transient; on_resumed / on_ready restore the flag.
+        """
+        self._connected = False
+        logger.warning("discord gateway disconnected; bridge heartbeat will go stale until reconnect")
+
+    async def _on_resumed(self) -> None:
+        """Mark the bridge connected again when a dropped session resumes (§12.1).
+
+        discord.py fires ``on_resumed`` when it transparently resumes a session
+        after a disconnect (no full re-identify, so on_ready does NOT fire). The
+        bot can post again, so restore liveness here too — otherwise the beat
+        would stay stale after every routine resume.
+        """
+        self._connected = True
+        logger.info("discord gateway resumed; bridge heartbeat restored")
 
     async def _on_message(self, message: discord.Message) -> None:
         if message.guild is None:
@@ -646,6 +751,16 @@ class _GatewayClient(discord.Client):
     async def on_ready(self) -> None:
         await self._gateway._on_ready()
 
+    async def on_disconnect(self) -> None:
+        # discord.py fires this on every websocket drop (transient or terminal).
+        # Delegate so the gateway can mark the heartbeat stale (§12.1).
+        await self._gateway._on_disconnect()
+
+    async def on_resumed(self) -> None:
+        # discord.py fires this when a dropped session resumes WITHOUT a full
+        # re-identify (so on_ready won't fire); delegate to restore liveness.
+        await self._gateway._on_resumed()
+
     async def on_message(self, message: discord.Message) -> None:
         await self._gateway._on_message(message)
 
@@ -830,15 +945,39 @@ def main() -> None:
 
                     gateway_task = asyncio.create_task(gateway.start())
                     stop_task = asyncio.create_task(stop.wait())
+
+                    # Keep the bridge heartbeat fresh on a timer for the whole
+                    # run (design §12.1). ``_on_ready`` writes the first beat
+                    # synchronously (before slash-sync); this task refreshes it
+                    # every few seconds, but gated on ``gateway.connected`` — so a
+                    # dropped Discord gateway stops the writes and the beat ages
+                    # past its TTL rather than lying green. Identity is the bot
+                    # display string the getter resolves once ready (never a
+                    # token, §12.3). Started AFTER the gateway task so the loop is
+                    # only alive while the gateway is; cancelled in the finally
+                    # below (``run_refresher`` swallows CancelledError cleanly).
+                    refresher_task = asyncio.create_task(
+                        run_refresher(
+                            _resolve_health_home(),
+                            _HEALTH_COMPONENT,
+                            is_healthy=lambda: gateway.connected,
+                            identity=lambda: gateway.bot_identity,
+                        )
+                    )
                     try:
                         await asyncio.wait(
                             {gateway_task, stop_task},
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                     finally:
-                        for t in (gateway_task, stop_task):
+                        for t in (gateway_task, stop_task, refresher_task):
                             if not t.done():
                                 t.cancel()
+                        # Await the cancelled refresher so its task is retrieved
+                        # here (no "Task was destroyed but it is pending"
+                        # warning). ``run_refresher`` catches CancelledError and
+                        # returns cleanly, so this await does NOT re-raise.
+                        await refresher_task
                         await typing_notifier.aclose()
                         await gateway.close()
 
