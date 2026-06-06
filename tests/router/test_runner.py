@@ -2,19 +2,20 @@
 
 Covers the ``_build_router_nodes`` wiring (which assembles the router
 agent + fan-out consumer onto the list a :class:`Worker` will host)
-and the ``_run_worker`` shutdown contract. The full ``_amain``
-requires a Kafka broker and an LLM client — too heavy for a unit
-test. The wiring contract is what we pin here.
+and the ``_amain`` boot contract (``provision_infra`` then the managed
+``worker.run()``). The full ``_amain`` still requires a Kafka broker
+and an LLM client end-to-end — too heavy for a unit test — so the
+wiring + provision-before-run ordering is what we pin here.
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from calfkit.nodes import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
-from calfkit.worker import Worker
 
 from calfcord.agents.factory import AgentFactory
 from calfcord.router import runner
@@ -65,29 +66,93 @@ class TestBuildRouterNodes:
         assert "routing.decisions" in subscribe_topics
 
 
-class TestRunWorkerShutdownContract:
-    """The supervisor-restart invariant mirrors agents/runner.py and
-    tools/runner.py: any non-signal exit raises out of ``_run_worker``
-    so the process exits non-zero."""
+class TestAmainBootWiring:
+    """The 0.5.4 boot contract: ``_amain`` provisions calfcord's blind-spot
+    topics (``provision_infra`` — the #180 reply topic plus the router's
+    ambient-discard topic) BEFORE handing the lifecycle to the managed
+    ``worker.run()``. The Worker now owns signals + broker start/stop, so the
+    runner no longer hand-rolls a shutdown loop; what must stay pinned is the
+    provision-before-run ordering (a stray run before provisioning would hang
+    the reply dispatcher on a no-auto-create broker) and that a runtime crash
+    escapes ``_amain`` (the supervisor-restart guarantee, now native to
+    ``Worker.run()``)."""
 
-    async def test_worker_crash_propagates(self) -> None:
-        crash = ValueError("simulated kafka drop")
-        worker = MagicMock(spec=Worker)
-        worker.run = AsyncMock(side_effect=crash)
+    def _patch_common(self, monkeypatch: pytest.MonkeyPatch, *, client: object) -> None:
+        """Stub the heavy boot collaborators shared by every wiring test.
+
+        Leaves ``provision_infra`` and ``Worker`` for each test to set, since
+        those are the seam under test."""
+
+        @asynccontextmanager
+        async def _fake_connect(*_a, **_k):
+            yield client
+
+        monkeypatch.setattr(runner.Client, "connect", lambda *a, **k: _fake_connect(*a, **k))
+        monkeypatch.setattr(runner, "build_router_definition", lambda: MagicMock())
+        monkeypatch.setattr(runner, "_prewarm_codex_if_needed", AsyncMock())
+        monkeypatch.setattr(runner, "AgentFactory", lambda **_k: MagicMock())
+        monkeypatch.setattr(runner, "_build_router_nodes", lambda *_a, **_k: [MagicMock()])
+
+    async def test_provision_infra_runs_before_worker_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[str] = []
+        client = MagicMock()
+        self._patch_common(monkeypatch, client=client)
+
+        worker = MagicMock()
+
+        async def _run() -> None:
+            order.append("run")
+
+        worker.run = _run
+
+        async def _provision(_client, **_k) -> None:
+            order.append("provision")
+
+        monkeypatch.setattr(runner, "provision_infra", _provision)
+        monkeypatch.setattr(runner, "Worker", lambda *_a, **_k: worker)
+
+        await runner._amain()
+
+        assert order == ["provision", "run"]
+
+    async def test_provision_infra_receives_router_infra_topics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The router's non-node topics (the ambient-discard callback target)
+        must be passed through to ``provision_infra`` as ``extra_topics`` so
+        they exist before the broker starts."""
+        from calfcord._provisioning import router_infra_topics
+
+        client = MagicMock()
+        self._patch_common(monkeypatch, client=client)
+
+        worker = MagicMock()
+        worker.run = AsyncMock()
+        provision = AsyncMock()
+        monkeypatch.setattr(runner, "provision_infra", provision)
+        monkeypatch.setattr(runner, "Worker", lambda *_a, **_k: worker)
+
+        await runner._amain()
+
+        provision.assert_awaited_once_with(client, extra_topics=router_infra_topics())
+
+    async def test_worker_run_crash_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A crash inside the managed ``worker.run()`` must escape ``_amain`` so
+        the surrounding ``asyncio.run`` exits non-zero and the supervisor
+        restarts the process — the lifecycle guarantee is now native to
+        ``Worker.run()``, but the runner must not swallow it."""
+        client = MagicMock()
+        self._patch_common(monkeypatch, client=client)
+
+        worker = MagicMock()
+        worker.run = AsyncMock(side_effect=ValueError("simulated kafka drop"))
+        monkeypatch.setattr(runner, "provision_infra", AsyncMock())
+        monkeypatch.setattr(runner, "Worker", lambda *_a, **_k: worker)
+
         with pytest.raises(ValueError, match="simulated kafka drop"):
-            await runner._run_worker(worker)
-
-    async def test_worker_unexpected_clean_return_raises(self) -> None:
-        """A clean ``worker.run()`` return without a shutdown signal is
-        unexpected — synthesize a RuntimeError so supervisors restart."""
-        worker = MagicMock(spec=Worker)
-
-        async def returns_immediately() -> None:
-            return None
-
-        worker.run = AsyncMock(side_effect=returns_immediately)
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
-            await runner._run_worker(worker)
+            await runner._amain()
 
 
 class TestPrewarmCodexIfNeeded:

@@ -47,8 +47,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, provision_and_start_broker, router_infra_topics
-from calfcord._worker_runtime import run_worker_until_signal
+from calfcord._provisioning import PROVISIONING, provision_infra, router_infra_topics
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.router.definition import ROUTER_AGENT_ID, build_router_definition
@@ -84,19 +83,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run the calfkit built-in routing agent.",
     )
     return parser.parse_args(argv)
-
-
-async def _run_worker(worker: Worker) -> None:
-    """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
-
-    Delegates to the shared :func:`calfcord._worker_runtime.run_worker_until_signal`
-    so the shutdown contract (signal-driven drain plus the
-    "clean return without a signal is a crash" supervisor invariant) is
-    defined in exactly one place across runners — mirroring
-    :func:`calfcord.tools.runner._run_worker`. Kept as a thin local wrapper
-    because ``tests/router/test_runner.py`` references ``_run_worker`` by name.
-    """
-    await run_worker_until_signal(worker, drain_label="router worker")
 
 
 def _build_router_nodes(
@@ -162,11 +148,11 @@ async def _amain() -> None:
     await _prewarm_codex_if_needed(definition)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
-        # Provision the reply topic + the ambient discard topic, then eagerly
-        # start the broker so the reply dispatcher is live before the worker's
-        # first inbound envelope. The worker's own node topics are provisioned
-        # later by Worker.run()'s startup hook (via _run_worker below).
-        await provision_and_start_broker(client, extra_topics=router_infra_topics())
+        # Provision the client reply topic (the calfkit#180 blind spot) + the
+        # router's ambient-discard callback target before handing the lifecycle
+        # to Worker.run(), which owns broker.start() and provisions this worker's
+        # own node topics itself during startup.
+        await provision_infra(client, extra_topics=router_infra_topics())
 
         # The factory's persona_sender is unused on the router build
         # path; ``None`` is the explicit "I don't need Discord" call
@@ -181,7 +167,7 @@ async def _amain() -> None:
             _REPLY_TOPIC,
             [n.node_id for n in nodes],
         )
-        await _run_worker(worker)
+        await worker.run()
 
 
 def main() -> None:
