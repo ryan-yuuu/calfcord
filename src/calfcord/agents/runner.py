@@ -412,11 +412,12 @@ async def _run_worker(worker: Worker) -> None:
     and :func:`calfcord.router.runner._run_worker`. Kept as a thin local
     wrapper because the runner unit tests reference ``_run_worker`` by name.
 
-    The agents runner used to hand-decompose ``Worker.run()`` so it could
+    The agents runner used to hand-decompose the worker's run loop so it could
     publish presence/departure events at precise lifecycle points. Those are
     now :func:`Worker.after_startup` / :func:`Worker.on_shutdown` hooks (see
-    :func:`_register_lifecycle_hooks`), so the agents runner joins the managed
-    ``Worker.run()`` path used by tools/mcp/router.
+    :func:`_register_lifecycle_hooks`), so the agents runner joins the shared
+    managed-lifecycle path used by tools/mcp/router — the embedded
+    ``Worker.start()`` surface driven by :func:`run_worker_until_signal`.
     """
     await run_worker_until_signal(worker, drain_label="agents worker")
 
@@ -456,8 +457,9 @@ def _register_lifecycle_hooks(
     async def _declare_blind_spot_topics(ctx: LifecycleContext[Worker]) -> None:
         """Fold the agents' blind-spot topics into calfkit's pre-start pass.
 
-        ``topics_for_nodes`` (auto-declared by the managed ``Worker.run()``
-        ``_on_startup`` hook) covers the node topics + the framework return
+        ``topics_for_nodes`` (auto-declared by the managed worker's
+        ``_on_startup`` hook, run on ``Worker.start()``) covers the node topics
+        + the framework return
         inboxes, and the connect-hook auto-provisions the client reply topic.
         The control-plane topics the agent touches RAW — ``agent.state``
         (boot-time presence publish), ``bridge.discovery`` (raw control-sink
@@ -606,13 +608,13 @@ async def _amain(args: argparse.Namespace) -> None:
             # Raw control-plane subscriber: must register BEFORE the broker
             # starts (once FastStream is consuming, adding subscribers on the
             # same broker is unsupported) and BEFORE the discovery topic is
-            # consumed. ``Worker.run()`` starts the broker inside _run_worker
+            # consumed. ``Worker.start()`` starts the broker inside _run_worker
             # below, so registering here — and declaring the topics it consumes
             # via the on_startup blind-spot hook — preserves register-before-serve.
             register_control_sink(calfkit_client, ref)
 
         worker = Worker(calfkit_client, nodes)
-        # Managed lifecycle: ``Worker.run()`` (via _run_worker) auto-registers
+        # Managed lifecycle: ``Worker.start()`` (via _run_worker) auto-registers
         # handlers and auto-provisions the node topics + framework return inboxes
         # at broker start, and the connect-hook auto-provisions the client reply
         # topic — so the runner no longer hand-rolls register_handlers() /

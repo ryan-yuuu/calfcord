@@ -100,8 +100,8 @@ async def _amain() -> None:
     mcp_nodes = _resolve_mcp_nodes(servers, config_path)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
-        # No manual provisioning: this runner uses the managed Worker.run() (via
-        # run_worker_until_signal below), whose _on_startup hook + the
+        # No manual provisioning: this runner uses the managed Worker (started
+        # via run_worker_until_signal below), whose _on_startup hook + the
         # connect-time pre-start hook auto-provision the MCP-bridge node topics
         # AND the client reply topic at broker start. MCP bridges only await a
         # reply while servicing a Call — after the broker is up — so no eager

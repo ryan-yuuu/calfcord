@@ -127,9 +127,12 @@ def test_invite_url_contains_app_id_scope_and_permission_bitmask():
     url = dd.invite_url("123456789")
     assert "client_id=123456789" in url
     assert "scope=bot" in url and "applications.commands" in url
-    # The bitmask must include BOTH Send Messages and Manage Webhooks (what the bridge needs).
+    # The invited bitmask must be a superset of EVERY permission postability
+    # requires — View Channel + Send Messages + Manage Webhooks. Asserting against
+    # the production constant (not a test-local subset) guards the View bit too, so
+    # dropping any required permission from either side surfaces here.
     assert f"permissions={dd.INVITE_PERMISSIONS}" in url
-    assert dd.INVITE_PERMISSIONS & POSTABLE == POSTABLE
+    assert dd.INVITE_PERMISSIONS & dd._POST_REQUIRED == dd._POST_REQUIRED
 
 
 def test_invite_url_accepts_int_app_id():

@@ -186,9 +186,11 @@ async def run_worker_until_signal(worker: Worker, *, drain_label: str = "worker"
                 t.cancel()
         # Gather the cancelled serve/stop tasks (retrieve their results so no
         # "Task was destroyed but it is pending" warning leaks), then drain the
-        # worker. ``stop()`` is a no-op if the worker never started (boot raised
-        # before ``start()`` completed) and idempotent otherwise, so it is safe
-        # on every path — clean signal, boot crash, or unexpected serve return.
+        # worker. ``stop()`` is safe on every path — clean signal, boot crash, or
+        # unexpected serve return — because it is idempotent: even after a failed
+        # boot (where ``start()`` built the app before raising and already ran its
+        # own cleanup), this second ``stop()`` re-runs an app shutdown that no-ops
+        # against the already-disconnected broker / torn-down resource stack.
         await asyncio.gather(worker_task, stop_task, return_exceptions=True)
         await worker.stop()
 

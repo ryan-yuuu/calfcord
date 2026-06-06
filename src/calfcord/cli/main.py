@@ -358,11 +358,14 @@ def _run_healthcheck(component: str) -> int:
     """Run the readiness probe for ``component`` and return its exit code.
 
     The Process Compose exec probe shells out to ``calfcord _healthcheck
-    <component>`` on the agent/tools hosts (design §4.2 / §13.2). The broker probe
-    is metadata reachability built from ``CALF_HOST_URL`` (same default the runners
-    use); every other component is judged by heartbeat freshness under the resolved
-    home's ``state/health/``. ``now`` is the real clock — freshness is wall-time
-    here, injectable only in the unit-tested :func:`~calfcord.health.check.healthcheck`.
+    <component>`` on the substrate hosts (design §4.2 / §13.2). Only the two
+    components that emit a real signal are probeable: the ``broker`` (metadata
+    reachability built from ``CALF_HOST_URL``, the same default the runners use)
+    and the ``bridge`` (heartbeat freshness + Discord-connected, under the resolved
+    home's ``state/health/``). Any other component raises — the roster runners
+    declare no readiness probe and write no heartbeat. ``now`` is the real clock —
+    freshness is wall-time here, injectable only in the unit-tested
+    :func:`~calfcord.health.check.healthcheck`.
     """
     home = _resolve_home() or Path()
     # Only the broker path needs (and awaits) a broker probe; a heartbeat check

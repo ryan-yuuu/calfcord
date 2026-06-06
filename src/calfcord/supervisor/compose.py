@@ -55,8 +55,9 @@ _PROBE_TIMEOUT_SECONDS = 5
 _PROBE_SUCCESS_THRESHOLD = 1
 _PROBE_FAILURE_THRESHOLD = 3
 
-# Autorestart backoff shared by both restart policies; unlimited retries for the
-# always-restart substrate/agents (max_restarts 0 == unlimited in Process Compose).
+# Autorestart backoff shared by both restart policies (always for the substrate,
+# on_failure for the roster); max_restarts 0 == unlimited retries in Process
+# Compose, applied uniformly.
 _RESTART_BACKOFF_SECONDS = 2
 _RESTART_MAX_RESTARTS = 0
 

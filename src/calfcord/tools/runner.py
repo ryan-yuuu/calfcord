@@ -169,11 +169,11 @@ async def _amain() -> None:
         DiscordPersonaSender(settings) as persona_sender,
         Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
     ):
-        # No manual provisioning: this runner uses the managed Worker.run()
-        # (via _run_worker below), whose _on_startup hook + the connect-time
+        # No manual provisioning: this runner uses the managed Worker (started
+        # via _run_worker below), whose _on_startup hook + the connect-time
         # pre-start hook auto-provision the worker's tool-node topics AND the
         # client reply topic at broker start. Tools only ``execute_node`` while
-        # consuming a message — which can only happen after Worker.run() has
+        # consuming a message — which can only happen after ``Worker.start()`` has
         # started the broker — so no eager start is needed for the dispatcher.
         resolver = A2AChannelResolver(
             sender,
