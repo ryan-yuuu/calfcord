@@ -124,6 +124,38 @@ Channel subscriptions are persisted per agent in `state/agents/<name>.json`
 `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` or `DISCORD_DEFAULT_CHANNEL_ID`;
 after that, the state file wins.
 
+## Applying changes
+
+`.env` is read **once, at process boot** — each component (every agent, the
+router, the tools/MCP hosts, the bridge) loads its environment when it starts and
+holds it for its lifetime. Changing a key, URL, or override in `.env` therefore
+does **nothing** to an already-running process; you have to **restart the process
+that reads it** for the new value to take effect. (This is the same one-shot
+constraint behind the "restart to apply" note on every config-mutating command —
+`agent set`, `router set`, and the interactive editors all print the matching
+restart command on success.)
+
+Which restart depends on which process reads the value you changed:
+
+| You changed… | Restart |
+|---|---|
+| One agent's key, model, or provider (`agent set`/`edit`) | `calfcord agent restart <name>` |
+| A key several agents share (e.g. `ANTHROPIC_API_KEY`, `CALFKIT_AGENT_DEFAULT_MODEL`) | `calfcord agent restart --all` (every agent on this host) |
+| The router's provider/model (`CALFKIT_ROUTER_*`, `router set`/`edit`) | `calfcord router restart` |
+| Anything the tools host reads | `calfcord tools restart` |
+| Anything the MCP host reads | `calfcord mcp restart` |
+| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then restart the running roster: `calfcord agent restart --all` plus `calfcord tools restart` / `router restart` / `mcp restart` for any of those you run |
+
+> **Boot-time gotcha for workspace-wide values.** `calfcord start` brings up the
+> **substrate only** (broker + bridge) — it does *not* restart the roster. So
+> after changing a value the *roster* reads (like `CALF_HOST_URL`, which every
+> agent, tool, router, and MCP host dials), `calfcord stop && calfcord start`
+> reloads the substrate but leaves the roster running on the *old* value. Follow
+> it with `calfcord agent restart --all` **and** `calfcord tools restart` /
+> `router restart` / `mcp restart` for whichever roster members you run, to roll
+> the whole roster onto the new value. All of these are local — they act on this
+> host's running processes.
+
 ## See also
 
 - [`discord-setup.md`](./discord-setup.md) — getting the `DISCORD_*` values.

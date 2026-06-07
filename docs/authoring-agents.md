@@ -595,3 +595,11 @@ restart <name>`** after any edit to apply it — and for a newly created
 or renamed agent **also bounce the bridge** (`calfcord stop && calfcord
 start`), since the bridge owns the `/<name>` slash command. Each command
 prints the matching restart hint on success.
+
+The same boot-time rule covers credentials and `.env`: a changed API key,
+model, or provider in `.env` is read only at boot too, so it also needs a
+restart — not just `.md` edits. When the change touches a key several
+agents share (e.g. `ANTHROPIC_API_KEY`), restart them all at once with
+**`calfcord agent restart --all`** (this host's running agents). See
+[configuration.md](./configuration.md#applying-changes) for the full
+change → command mapping.
