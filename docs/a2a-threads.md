@@ -73,7 +73,7 @@ calfkit-tools process
 |---|---|---|---|
 | `CALFKIT_A2A_CHANNEL_NAME` | no | `private-a2a-chats` | Name of the unified audit channel. Lazy-created in the guild on first A2A call if absent. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | no | unset | If set, the unified channel is placed under this category. Category is lazy-created too. |
-| `DISCORD_GUILD_ID` | yes | — | The guild that hosts the unified channel. Already required for the tools process. |
+| `DISCORD_GUILD_ID` | yes, if `private_chat` is hosted | — | The guild that hosts the unified channel. Required only when the tools worker hosts `private_chat` — enforced by its resource bracket at startup. A worker serving only fs/shell tools does not need it. |
 
 `CALFKIT_A2A_CHANNEL_NAME` is the only new var — existing deployments
 do not need to set it to keep working (the default is fine for most

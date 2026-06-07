@@ -25,7 +25,11 @@ from unittest.mock import MagicMock
 import pytest
 from calfkit.nodes.tool import ToolNodeDef
 
-from calfcord.tools.discovery import _resolve_alias_map, discover_tools
+from calfcord.tools.discovery import (
+    _clone_with_name,
+    _resolve_alias_map,
+    discover_tools,
+)
 
 
 def _write_package(root: Path, pkg_name: str, modules: dict[str, str]) -> Path:
@@ -576,6 +580,114 @@ def test_include_filter_does_not_short_circuit_import_errors(
 # deployments of the same tool. The tests below pin the parser
 # semantics, the additive registry behavior, the wire-level isolation
 # of clone vs. original, and the failure modes operators most often hit.
+
+
+class TestCloneCarriesLifecycle:
+    """A renamed clone must carry the source node's lifecycle registrations.
+
+    ``_clone_with_name`` rebuilds the node via ``dataclasses.replace``, which
+    copies only dataclass fields — the lifecycle ``@resource`` brackets and
+    hooks live in ``__dict__`` (lazily created by ``LifecycleHookMixin``), so
+    without an explicit carry-over a clone would silently lose them and the
+    aliased tool's body would never receive its node-scoped resource at runtime.
+    """
+
+    def test_clone_preserves_resource_brackets(self) -> None:
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.resource("conn")
+        async def _conn(ctx):
+            yield object()
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        assert "conn" in dict(clone._resource_cms())
+
+    def test_clone_preserves_lifecycle_hooks(self) -> None:
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.on_startup
+        async def _warm(ctx) -> None:
+            return None
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        assert clone._hooks_for("on_startup")
+
+    def test_clone_registry_is_independent_of_source(self) -> None:
+        """The carry-over must be a copy, not a shared container — registering
+        a new bracket on the clone must not mutate the original's registry."""
+        from calfkit.nodes import agent_tool
+
+        async def _impl(ctx) -> str:
+            return "ok"
+
+        node = agent_tool(_impl)
+
+        @node.resource("conn")
+        async def _conn(ctx):
+            yield object()
+
+        clone = _clone_with_name(node, "impl_eu")
+
+        @clone.resource("extra")
+        async def _extra(ctx):
+            yield object()
+
+        assert "extra" not in dict(node._resource_cms())
+
+
+def test_aliased_resource_tool_keeps_bracket_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end guard tying the ``_clone_with_name`` fix to the real path
+    that motivates it: a ``@resource``-bearing tool aliased via
+    ``CALFCORD_TOOLS_ALIAS`` through ``discover_tools`` must keep its bracket on
+    the clone. The unit tests above and the alias-expansion tests below never
+    meet — none of the alias fixtures register a ``@resource`` — so without this
+    test a regression that dropped the carry-over in the discovery path (or a
+    calfkit rename of the lifecycle ``__dict__`` keys) would pass both suites
+    while silently breaking an aliased ``private_chat``.
+    """
+    source = """\
+from calfkit.nodes import agent_tool, ToolNodeDef
+
+
+async def alpha(ctx, payload: str) -> str:
+    \"\"\"Trivial tool for tests.\"\"\"
+    return payload
+
+
+alpha_tool: ToolNodeDef = agent_tool(alpha)
+
+
+@alpha_tool.resource("conn")
+async def _alpha_conn(ctx):
+    yield object()
+"""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    pkg_name = "fake_pkg_alias_resource"
+    _write_package(tmp_path, pkg_name, {"alpha": source})
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pkg = _import_fresh(pkg_name)
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+
+    assert "alpha_eu" in registry
+    assert "conn" in dict(registry["alpha_eu"]._resource_cms())
+    # And the original still carries it (alias is additive without an include filter).
+    assert "conn" in dict(registry["alpha"]._resource_cms())
 
 
 class TestResolveAliasMap:

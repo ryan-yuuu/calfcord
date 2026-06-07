@@ -40,25 +40,33 @@ tests can call it directly without going through calfkit's dispatch) and
 ``private_chat_tool``, the :class:`ToolNodeDef` produced by ``agent_tool``
 that the registry and ``calfkit-tools`` runner wire up.
 
-Runtime dependencies (calfkit client, persona sender, channel resolver,
-history fetcher) are injected via :func:`init` at process startup. The
-module-level singletons are populated only in the ``calfkit-tools``
-runner — agent processes import this module solely for the
-``ToolNodeDef`` schema and never call the function body, so the unset
-state is benign there.
+Runtime dependencies reach the tool body via ``ctx.resources`` (calfkit
+0.6.0 node-scoped lifecycle resources), not module globals. The Discord
+connection (persona sender, channel resolver, REST client) is built by the
+node-scoped :func:`_a2a_resource` ``@resource`` bracket — opened at worker
+startup only when this node is hosted, closed at drain — and the
+process-wide calfkit ``Client`` is exposed by the tools runner as a
+worker-scoped resource. :func:`_resources_from_ctx` assembles both into the
+per-call :class:`_A2A` working set. Agent processes import this module solely
+for the ``ToolNodeDef`` schema and never call the function body, and the
+resource bracket only runs on a worker that hosts the node, so importing the
+module constructs nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+import os
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 
 import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
+from calfkit.worker.lifecycle import ResourceSetupContext
 from pydantic import ValidationError
 
 from calfcord.agents.peer_roster import build_temp_instructions
@@ -75,13 +83,15 @@ from calfcord.discord.retry_feedback import (
     chunk_split,
     classify_error,
 )
+from calfcord.discord.sender import DiscordSender
+from calfcord.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 """Default per-call timeout for the target's response. Overridable via
-:func:`init`. Fail-fast on timeout per A2A design — the caller's LLM can
-adapt or re-issue."""
+:envvar:`CALFKIT_TOOLS_TIMEOUT_SECONDS` (see :func:`_resolve_timeout`).
+Fail-fast on timeout per A2A design — the caller's LLM can adapt or re-issue."""
 
 _AGENT_INBOX_TOPIC_TEMPLATE = "agent.{agent_id}.in"
 """Must match the template the agent factory subscribes on
@@ -118,51 +128,162 @@ _THREAD_NAME_EMPTY_PLACEHOLDER = "<empty>"
 empty or whitespace-only after normalization. Prevents the degenerate
 ``"alice→bob: "`` trailing-whitespace name."""
 
-# Module-level injected singletons. Populated only by the calfkit-tools
-# runner's startup via init(). Tests overwrite via monkeypatch.
-#
-# Note the absence of any AgentRegistry: the tool's deployment is decoupled
-# from the bridge and cannot read agents/*.md. The bridge passes the
-# canonical roster snapshot in deps["phonebook"] on every invocation;
-# the tool reads it per-call from ctx.deps.
-_client: Client | None = None
-_persona_sender: DiscordPersonaSender | None = None
-_resolver: A2AChannelResolver | None = None
-_discord_client: discord.Client | None = None
-_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+# --- Deployment configuration (read at resource-bracket startup) -----------
+# Env names + resolvers for the A2A audit channel and the per-call response
+# timeout. They live here (the consumer) rather than in the tools runner so the
+# runner stays free of private_chat specifics — a worker hosting only fs/shell
+# tools never reads them.
+_TIMEOUT_ENV = "CALFKIT_TOOLS_TIMEOUT_SECONDS"
+_CATEGORY_ENV = "CALFKIT_A2A_CHANNEL_CATEGORY"
+_CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
+_DEFAULT_CHANNEL_NAME = "private-a2a-chats"
+"""The single unified A2A audit channel. Every A2A conversation lives inside a
+thread under this channel; operator setup collapses to one channel + one
+permission overwrite. Overridable via :data:`_CHANNEL_NAME_ENV`."""
+
+
+def _resolve_timeout() -> float:
+    """Read ``CALFKIT_TOOLS_TIMEOUT_SECONDS`` or fall back to the default.
+
+    Raises ``RuntimeError`` on a malformed value: this runs inside the
+    :func:`_a2a_resource` bracket at worker startup, so a misconfiguration is an
+    infra bug (matching the bracket's ``DISCORD_GUILD_ID`` check) — not the
+    process-boot ``SystemExit`` it was when the tools runner called it directly.
+    A setup error here propagates out of the resource bracket and fails boot.
+    """
+    raw = os.getenv(_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise RuntimeError(f"{_TIMEOUT_ENV} must be a number, got {raw!r}") from e
+    if value <= 0:
+        raise RuntimeError(f"{_TIMEOUT_ENV} must be positive, got {value}")
+    return value
+
+
+def _resolve_category_name() -> str | None:
+    """Read ``CALFKIT_A2A_CHANNEL_CATEGORY`` or return ``None``.
+
+    Empty / whitespace-only values are treated as unset so a stray blank line in
+    ``.env`` yields the default uncategorized behavior rather than a category
+    literally named "" or " ".
+    """
+    raw = os.getenv(_CATEGORY_ENV)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _resolve_channel_name() -> str:
+    """Read ``CALFKIT_A2A_CHANNEL_NAME`` or fall back to the default.
+
+    Mirrors :func:`_resolve_category_name`'s empty-as-unset normalization so a
+    blank line in ``.env`` falls back to :data:`_DEFAULT_CHANNEL_NAME` rather
+    than creating a literally-named channel.
+    """
+    raw = os.getenv(_CHANNEL_NAME_ENV)
+    if raw is None:
+        return _DEFAULT_CHANNEL_NAME
+    stripped = raw.strip()
+    return stripped or _DEFAULT_CHANNEL_NAME
+
+
+@dataclass(frozen=True)
+class _A2ADiscord:
+    """The node-scoped Discord resource yielded by the ``@resource`` bracket.
+
+    Built once at worker startup (only when ``private_chat`` is hosted) and torn
+    down at drain. Distinct from the process-wide calfkit ``Client``, which the
+    Worker owns regardless and is merged in under :data:`_A2A`.
+    """
+
+    persona_sender: DiscordPersonaSender
+    resolver: A2AChannelResolver
+    discord_client: discord.Client
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class _A2A:
+    """The per-invocation working set threaded through the tool body + helpers.
+
+    Assembled from ``ctx.resources`` at the top of :func:`private_chat`: the
+    worker-scoped ``Client`` plus the node-scoped :class:`_A2ADiscord` fields.
+    Replaces the former module-level singletons.
+    """
+
+    client: Client
+    persona_sender: DiscordPersonaSender
+    resolver: A2AChannelResolver
+    discord_client: discord.Client
+    timeout_seconds: float
+
+    @classmethod
+    def from_parts(cls, *, client: Client, discord: _A2ADiscord) -> _A2A:
+        """Merge the worker-scoped ``Client`` with the node-scoped Discord bundle.
+
+        The single canonical assembly point so production (:func:`_resources_from_ctx`)
+        and the tests can't drift when an ``_A2ADiscord`` field is added. Spreads
+        the fields explicitly (not ``dataclasses.asdict``, which would deep-copy
+        the live ``Client``/``discord.Client`` instead of sharing them).
+        """
+        return cls(
+            client=client,
+            persona_sender=discord.persona_sender,
+            resolver=discord.resolver,
+            discord_client=discord.discord_client,
+            timeout_seconds=discord.timeout_seconds,
+        )
+
 
 _DISCORD_HISTORY_MAX_LIMIT = 100
 """Discord's per-call REST cap for ``channel.history(limit=...)``. Matches
 :data:`bridge.history._DISCORD_HISTORY_MAX_LIMIT` (duplicated rather than
 re-imported because the bridge symbol is module-private)."""
 
+# A2A resource keys read from ``ctx.resources`` (see :func:`_resources_from_ctx`).
+# ``_RES_CLIENT`` is worker-scoped (the process-wide calfkit ``Client`` the tools
+# runner exposes); ``_RES_DISCORD`` is node-scoped (built by :func:`_a2a_resource`,
+# only when private_chat is hosted).
+_RES_CLIENT = "a2a_client"
+_RES_DISCORD = "a2a"
 
-def init(
-    *,
-    client: Client,
-    persona_sender: DiscordPersonaSender,
-    resolver: A2AChannelResolver,
-    discord_client: discord.Client,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-) -> None:
-    """Inject the runtime dependencies the tool body uses.
 
-    Called exactly once at ``calfkit-tools`` startup before the Worker
-    starts consuming. Calling again replaces the singletons — useful for
-    tests, surprising in production. Not thread-safe; assumes a single
-    asyncio event loop, which is what calfkit's Worker provides.
+def _resources_from_ctx(ctx: ToolContext, correlation_id: str) -> _A2A:
+    """Assemble the per-call :class:`_A2A` working set from ``ctx.resources``.
 
-    ``discord_client`` powers :func:`_fetch_thread_history` on the
-    continue-thread branch. The tools process reuses the persona sender's
-    REST-only client (no second gateway connection) — pass
-    ``persona_sender._client`` here.
+    calfkit merges the worker-scoped resources (the ``Client``) under the
+    node-scoped ones (the Discord bundle) into ``ctx.resources`` on every
+    invocation. A missing key means the worker hosting this node never built
+    the resources — a deployment bug, not an LLM-recoverable error, so raise
+    with correlation context per the error-handling convention.
+
+    Note the absence of any AgentRegistry: the tool's deployment is decoupled
+    from the bridge and cannot read agents/*.md. The bridge passes the canonical
+    roster snapshot in ``deps["phonebook"]`` on every invocation; the tool reads
+    it per-call from ``ctx.deps``.
     """
-    global _client, _persona_sender, _resolver, _discord_client, _timeout_seconds
-    _client = client
-    _persona_sender = persona_sender
-    _resolver = resolver
-    _discord_client = discord_client
-    _timeout_seconds = timeout_seconds
+    client = ctx.resources.get(_RES_CLIENT)
+    discord_res = ctx.resources.get(_RES_DISCORD)
+    # Type-check BOTH halves, not just presence: a wrong-typed value (e.g. the
+    # runner keyed the wrong object under a2a_client) must fail here with the
+    # real cause, not 200 lines later as an opaque AttributeError. Name which
+    # half is missing so the operator fixes the right deployment side.
+    if not isinstance(client, Client) or not isinstance(discord_res, _A2ADiscord):
+        missing: list[str] = []
+        if not isinstance(client, Client):
+            missing.append(f"{_RES_CLIENT!r} (worker-scoped Client; tools runner must expose it)")
+        if not isinstance(discord_res, _A2ADiscord):
+            missing.append(f"{_RES_DISCORD!r} (node-scoped Discord bundle; private_chat must be hosted)")
+        _raise_infra(
+            "a2a resources unavailable; the worker did not supply "
+            f"{' and '.join(missing)} (have keys: {sorted(ctx.resources)})",
+            correlation_id=correlation_id,
+        )
+    return _A2A.from_parts(client=client, discord=discord_res)
 
 
 def _build_thread_name(caller: str, target: str, content: str) -> str:
@@ -309,16 +430,7 @@ async def private_chat(
           Drop the id and call again.
     """
     correlation_id = ctx.correlation_id
-    if (
-        _client is None
-        or _persona_sender is None
-        or _resolver is None
-        or _discord_client is None
-    ):
-        _raise_infra(
-            "tool not initialized; the calfkit-tools runner must call init() at startup",
-            correlation_id=correlation_id,
-        )
+    res = _resources_from_ctx(ctx, correlation_id)
 
     caller_agent_id = ctx.agent_name
     if caller_agent_id is None:
@@ -431,7 +543,7 @@ async def private_chat(
     # caller/target context at this layer because the resolver only
     # logs the success path.
     try:
-        unified_channel_id = await _resolver.resolve_unified_channel()
+        unified_channel_id = await res.resolver.resolve_unified_channel()
     except discord.DiscordException:
         logger.error(
             "a2a channel resolution failed caller=%s target=%s correlation_id=%s",
@@ -447,6 +559,7 @@ async def private_chat(
 
     if thread_id is None:
         message_history, conversation_thread_id = await _start_new_thread(
+            res=res,
             caller_persona=caller_persona,
             unified_channel_id=unified_channel_id,
             content=content,
@@ -456,6 +569,7 @@ async def private_chat(
         )
     else:
         continue_result = await _continue_existing_thread(
+            res=res,
             caller_persona=caller_persona,
             unified_channel_id=unified_channel_id,
             content=content,
@@ -480,10 +594,10 @@ async def private_chat(
         target_topic,
         conversation_thread_id,
         len(message_history),
-        _timeout_seconds,
+        res.timeout_seconds,
     )
     try:
-        result = await _client.execute_node(
+        result = await res.client.execute_node(
             user_prompt=content,
             topic=target_topic,
             deps={
@@ -502,7 +616,7 @@ async def private_chat(
                 "phonebook": phonebook_to_deps(phonebook),
             },
             output_type=str,
-            timeout=_timeout_seconds,
+            timeout=res.timeout_seconds,
             temp_instructions=build_temp_instructions(phonebook, target_agent_id, channel=False),
             message_history=message_history,
         )
@@ -516,9 +630,9 @@ async def private_chat(
             caller_agent_id,
             target_agent_id,
             target_topic,
-            _timeout_seconds,
+            res.timeout_seconds,
         )
-        return f"error: target {target_agent_id!r} did not reply within {_timeout_seconds:.0f}s"
+        return f"error: target {target_agent_id!r} did not reply within {res.timeout_seconds:.0f}s"
     except Exception as e:
         # Catch ``Exception`` (not ``BaseException``) so ``asyncio.CancelledError``
         # and ``KeyboardInterrupt`` — both ``BaseException`` subclasses in
@@ -539,6 +653,7 @@ async def private_chat(
     response_text = result.output if result.output is not None else ""
 
     projected_text = await _post_response_with_feedback_retries(
+        res=res,
         target_agent_id=target_agent_id,
         target_persona=target_persona,
         original_user_prompt=content,
@@ -566,6 +681,7 @@ async def private_chat(
 
 async def _post_response_with_feedback_retries(
     *,
+    res: _A2A,
     target_agent_id: str,
     target_persona: Persona,
     original_user_prompt: str,
@@ -606,7 +722,6 @@ async def _post_response_with_feedback_retries(
     aren't LLM-fixable and the caller's existing infra-bug contract
     applies.
     """
-    assert _persona_sender is not None  # guarded by private_chat's caller
     current_text = initial_response_text
     attempts_used = 0
     while True:
@@ -626,7 +741,7 @@ async def _post_response_with_feedback_retries(
                 correlation_id,
             )
         try:
-            await _persona_sender.send(
+            await res.persona_sender.send(
                 target_persona,
                 channel_id=unified_channel_id,
                 content=payload,
@@ -685,7 +800,7 @@ async def _post_response_with_feedback_retries(
                     error.status,
                 )
                 await _post_chunked_projection(
-                    target_persona, unified_channel_id, conversation_thread_id,
+                    res, target_persona, unified_channel_id, conversation_thread_id,
                     current_text, caller_agent_id, target_agent_id,
                 )
                 return current_text
@@ -698,6 +813,7 @@ async def _post_response_with_feedback_retries(
             )
             try:
                 current_text = await _execute_retry_with_feedback(
+                    res=res,
                     target_agent_id=target_agent_id,
                     error=error,
                     failed_text=current_text,
@@ -725,7 +841,7 @@ async def _post_response_with_feedback_retries(
                     caller_agent_id, target_agent_id, attempts_used,
                 )
                 await _post_chunked_projection(
-                    target_persona, unified_channel_id, conversation_thread_id,
+                    res, target_persona, unified_channel_id, conversation_thread_id,
                     current_text, caller_agent_id, target_agent_id,
                 )
                 return current_text
@@ -733,6 +849,7 @@ async def _post_response_with_feedback_retries(
 
 async def _execute_retry_with_feedback(
     *,
+    res: _A2A,
     target_agent_id: str,
     error: discord.HTTPException,
     failed_text: str,
@@ -751,7 +868,6 @@ async def _execute_retry_with_feedback(
     :meth:`Client.invoke_node` (fire-and-forget), because A2A is
     inside the caller's RPC.
     """
-    assert _client is not None  # guarded by private_chat's caller
     reminder = build_retry_reminder(error, failed_text)
     retry_history = build_retry_history(
         original_history=original_history,
@@ -759,7 +875,7 @@ async def _execute_retry_with_feedback(
         failed_text=failed_text,
     )
     target_topic = _AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=target_agent_id)
-    result = await _client.execute_node(
+    result = await res.client.execute_node(
         user_prompt=reminder,
         topic=target_topic,
         deps={
@@ -771,7 +887,7 @@ async def _execute_retry_with_feedback(
             "phonebook": phonebook_to_deps(phonebook),
         },
         output_type=str,
-        timeout=_timeout_seconds,
+        timeout=res.timeout_seconds,
         temp_instructions=build_temp_instructions(
             phonebook, target_agent_id, channel=False,
         ),
@@ -781,6 +897,7 @@ async def _execute_retry_with_feedback(
 
 
 async def _post_chunked_projection(
+    res: _A2A,
     persona: Persona,
     channel_id: int,
     thread_id: int,
@@ -798,7 +915,6 @@ async def _post_chunked_projection(
     than :class:`HTTPException`) — :class:`RateLimited` at the chunk
     layer is the last resort and nothing useful can route around it.
     """
-    assert _persona_sender is not None  # guarded by private_chat's caller
     chunks = chunk_split(text)
     if not chunks:
         logger.warning(
@@ -810,7 +926,7 @@ async def _post_chunked_projection(
     failure_statuses: list[int | None] = []
     for i, chunk in enumerate(chunks):
         try:
-            await _persona_sender.send(
+            await res.persona_sender.send(
                 persona=persona,
                 channel_id=channel_id,
                 content=chunk,
@@ -835,6 +951,7 @@ async def _post_chunked_projection(
 
 async def _start_new_thread(
     *,
+    res: _A2A,
     caller_persona: Persona,
     unified_channel_id: int,
     content: str,
@@ -851,6 +968,7 @@ async def _start_new_thread(
     anchor breaks the continuation contract.
     """
     sent = await _post_projection(
+        res,
         caller_persona,
         unified_channel_id,
         content,
@@ -871,7 +989,7 @@ async def _start_new_thread(
             correlation_id=correlation_id,
         )
     try:
-        new_thread_id = await _resolver.create_anchored_thread(  # type: ignore[union-attr]
+        new_thread_id = await res.resolver.create_anchored_thread(
             unified_channel_id,
             sent.id,
             name=_build_thread_name(caller_agent_id, target_agent_id, content),
@@ -893,6 +1011,7 @@ async def _start_new_thread(
 
 async def _continue_existing_thread(
     *,
+    res: _A2A,
     caller_persona: Persona,
     unified_channel_id: int,
     content: str,
@@ -915,10 +1034,9 @@ async def _continue_existing_thread(
     just-posted request in both ``message_history`` AND ``user_prompt``,
     which the callee would see as a duplicate.
     """
-    assert _discord_client is not None  # caller guarded
     try:
         records = await _fetch_thread_history(
-            _discord_client,
+            res.discord_client,
             thread_id,
             limit=target_entry.history_turns,
             phonebook=phonebook,
@@ -972,6 +1090,7 @@ async def _continue_existing_thread(
         )
     message_history = project_history(records, self_agent_id=target_agent_id)
     await _post_projection(
+        res,
         caller_persona,
         unified_channel_id,
         content,
@@ -1121,6 +1240,7 @@ def _raise_infra(
 
 
 async def _post_projection(
+    res: _A2A,
     persona: Persona,
     channel_id: int,
     content: str,
@@ -1170,7 +1290,6 @@ async def _post_projection(
         failure — callers that need an anchor must guard on ``None``
         and escalate via :func:`_raise_infra`.
     """
-    assert _persona_sender is not None  # guarded by the caller
     # Empty content is legal (some agents may legitimately reply ""), but
     # Discord rejects it. Substitute a visible placeholder so the audit log
     # makes sense rather than silently dropping the projection entry. Log
@@ -1190,7 +1309,7 @@ async def _post_projection(
     last_exc: discord.HTTPException | None = None
     for attempt in range(1, _MAX_PROJECTION_ATTEMPTS + 1):
         try:
-            return await _persona_sender.send(
+            return await res.persona_sender.send(
                 persona,
                 channel_id=channel_id,
                 content=payload,
@@ -1260,3 +1379,44 @@ async def _post_projection(
 # form so the bare function above stays directly importable (and unit-
 # testable) under its real name.
 private_chat_tool: ToolNodeDef = agent_tool(private_chat)
+
+
+@private_chat_tool.resource(_RES_DISCORD)
+async def _a2a_resource(ctx: ResourceSetupContext[ToolNodeDef]) -> AsyncIterator[_A2ADiscord]:
+    """Open the Discord connection ``private_chat`` needs, scoped to this node.
+
+    calfkit builds a node's resources iff the node is registered on the worker,
+    so this runs at startup only when ``private_chat`` is actually hosted and
+    tears the connection down at drain. That is why a worker hosting only
+    fs/shell tools never constructs Discord and never needs ``DISCORD_GUILD_ID``
+    — the requirement is enforced here, not unconditionally in the tools runner.
+
+    The thread-history fetch needs a live ``discord.Client``; the persona sender
+    already authenticates one on startup (REST-only, no gateway), so we reuse
+    ``persona_sender.client`` rather than opening a second connection.
+    """
+    settings = DiscordSettings()  # type: ignore[call-arg]
+    if settings.guild_id is None:
+        raise RuntimeError(
+            "DISCORD_GUILD_ID is required to host private_chat "
+            "(the A2A channel resolver anchors the audit channel to a guild)"
+        )
+    async with (
+        DiscordSender(settings) as sender,
+        DiscordPersonaSender(settings) as persona_sender,
+    ):
+        resolver = A2AChannelResolver(
+            sender,
+            settings.guild_id,
+            channel_name=_resolve_channel_name(),
+            category_name=_resolve_category_name(),
+        )
+        yield _A2ADiscord(
+            persona_sender=persona_sender,
+            resolver=resolver,
+            # ``persona_sender.client`` raises if start() hasn't been awaited;
+            # the ``async with`` above already awaited it, so a future lazy-init
+            # refactor fails fast here at boot rather than at first invocation.
+            discord_client=persona_sender.client,
+            timeout_seconds=_resolve_timeout(),
+        )

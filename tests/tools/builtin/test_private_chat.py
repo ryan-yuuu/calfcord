@@ -1,11 +1,13 @@
 """Unit tests for the ``private_chat`` A2A tool.
 
 Tests call the bare async function directly with a constructed
-:class:`ToolContext`, bypassing calfkit's tool dispatch. The module-level
-singletons are populated via ``monkeypatch.setattr`` per-test (so leak is
-impossible across tests), and the phonebook arrives via ``ctx.deps`` —
-mirroring the bridge ingress, which is the tool's only source of agent
-identity.
+:class:`ToolContext`, bypassing calfkit's tool dispatch. The live A2A
+dependencies (calfkit ``Client`` + the node-scoped ``_A2ADiscord`` bundle)
+reach the body through ``ctx.resources``: the ``deps`` fixture builds the mocks
+and points the module-level ``_ACTIVE_RESOURCES`` holder (which ``_ctx`` reads)
+at them, ``monkeypatch``-restored per test so leak is impossible across tests.
+The phonebook arrives via ``ctx.deps`` — mirroring the bridge ingress, which is
+the tool's only source of agent identity.
 
 The architecture under test is the **unified-channel + per-conversation
 thread** model: every A2A invocation lives inside a Discord thread
@@ -27,6 +29,7 @@ import discord
 import pytest
 from calfkit.client import Client
 from calfkit.models import ToolContext
+from calfkit.worker.lifecycle import ResourceSetupContext
 
 from calfcord.agents.phonebook import PhonebookEntry, phonebook_to_deps
 from calfcord.bridge.egress import A2AChannelResolver
@@ -113,12 +116,21 @@ _RESPONSE_SENT_MESSAGE_ID = 556
 _NEW_THREAD_ID = 99999
 
 
+# Test-scoped holder linking the ``deps`` fixture's mocks to ``_ctx``. calfkit
+# delivers a node's lifecycle resources to the tool body via ``ctx.resources``;
+# the ``deps`` fixture sets this (via monkeypatch) to the resources mapping the
+# body reads. Mirrors how the body formerly read patched module globals. Empty
+# by default so the "missing resource" infra tests can exercise the guard.
+_ACTIVE_RESOURCES: dict[str, Any] = {}
+
+
 def _ctx(
     *,
     caller: str = "alice",
     wire: WireMessage | None = None,
     phonebook: list[PhonebookEntry] | None = None,
     extra_deps: dict[str, Any] | None = None,
+    resources: dict[str, Any] | None = None,
 ) -> ToolContext:
     """Construct a ToolContext mirroring what calfkit's dispatch builds.
 
@@ -127,6 +139,9 @@ def _ctx(
     production. ``extra_deps`` adds further ambient keys the bridge may seed
     at the root (e.g. the memory-prompt template) to verify they project
     forward across A2A.
+
+    ``resources`` overrides the fixture-populated :data:`_ACTIVE_RESOURCES`
+    bag (used by the infra-guard tests to simulate a partially-built worker).
     """
     if wire is None:
         wire = _wire()
@@ -140,6 +155,7 @@ def _ctx(
         },
         run_id="corr-1",
         agent_name=caller,
+        resources=_ACTIVE_RESOURCES if resources is None else resources,
     )
 
 
@@ -160,19 +176,23 @@ def _sequential_send_mock(*message_ids: int) -> AsyncMock:
 
 @pytest.fixture
 def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Inject mocks into private_chat's module-level singletons.
+    """Populate the node-scoped A2A resources the tool body reads.
 
-    No registry: under the decoupled-deployment model the tool's only
-    source of agent identity is the phonebook in ``ctx.deps``. Tests
-    that want a different phonebook pass it to ``_ctx``.
+    Under calfkit 0.6.0 the tool body reads its live dependencies from
+    ``ctx.resources``: the worker-scoped ``Client`` under ``"a2a_client"`` and
+    the node-scoped :class:`pc._A2ADiscord` bundle under ``"a2a"``. This fixture
+    builds the mocks and points the test-module :data:`_ACTIVE_RESOURCES` holder
+    (which ``_ctx`` reads) at them. ``monkeypatch`` restores it after the test,
+    so one test's wiring cannot leak into another's.
 
-    ``monkeypatch.setattr`` restores the originals after the test, so
-    one test's ``init`` cannot leak into another's.
+    No registry: under the decoupled-deployment model the tool's only source of
+    agent identity is the phonebook in ``ctx.deps``. Tests that want a different
+    phonebook pass it to ``_ctx``.
 
     Default resolver returns the unified channel id on
     :meth:`resolve_unified_channel` and a fresh thread id on
-    :meth:`create_anchored_thread`. Default fetcher returns an empty
-    tuple — overridden by continue-path tests.
+    :meth:`create_anchored_thread`. Default fetcher returns an empty tuple —
+    overridden by continue-path tests.
     """
     client = MagicMock(spec=Client)
     client.execute_node = AsyncMock()
@@ -190,13 +210,18 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # contract surface (thread_id, limit, phonebook) without dragging
     # discord.py's async-iterator quirks into every test.
     fetch_thread_history = AsyncMock(return_value=[])
-
-    monkeypatch.setattr(pc, "_client", client)
-    monkeypatch.setattr(pc, "_persona_sender", persona_sender)
-    monkeypatch.setattr(pc, "_resolver", resolver)
-    monkeypatch.setattr(pc, "_discord_client", discord_client)
     monkeypatch.setattr(pc, "_fetch_thread_history", fetch_thread_history)
-    monkeypatch.setattr(pc, "_timeout_seconds", 30.0)
+
+    resources = {
+        "a2a_client": client,
+        "a2a": pc._A2ADiscord(
+            persona_sender=persona_sender,
+            resolver=resolver,
+            discord_client=discord_client,
+            timeout_seconds=30.0,
+        ),
+    }
+    monkeypatch.setattr(f"{__name__}._ACTIVE_RESOURCES", resources)
 
     return {
         "client": client,
@@ -204,7 +229,17 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "resolver": resolver,
         "discord_client": discord_client,
         "fetch_thread_history": fetch_thread_history,
+        "resources": resources,
     }
+
+
+def _a2a(deps: dict[str, Any]) -> pc._A2A:
+    """Assemble the per-call ``_A2A`` working set from the ``deps`` fixture's
+    mocks — for tests that call resource-threaded helpers directly. Uses the
+    same canonical constructor as production so the two can't drift."""
+    return pc._A2A.from_parts(
+        client=deps["resources"]["a2a_client"], discord=deps["resources"]["a2a"]
+    )
 
 
 def _result(text: str | None) -> Any:
@@ -902,27 +937,47 @@ class TestInputErrors:
 
 
 class TestInfraErrors:
-    async def test_not_initialized_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Calling the tool body without ``init()`` is a runner bug; raise
-        so it surfaces in logs rather than degrading silently."""
-        monkeypatch.setattr(pc, "_client", None)
-        monkeypatch.setattr(pc, "_persona_sender", None)
-        monkeypatch.setattr(pc, "_resolver", None)
-        monkeypatch.setattr(pc, "_discord_client", None)
-        with pytest.raises(RuntimeError, match="not initialized"):
-            await pc.private_chat(_ctx(), "bob", "x")
+    async def test_missing_resources_raises(self) -> None:
+        """Invoking the body on a worker that never built the node resources
+        (empty ``ctx.resources``) is a deployment bug; raise so it surfaces in
+        logs rather than degrading silently."""
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(_ctx(resources={}), "bob", "x")
 
-    async def test_missing_discord_client_alone_raises(
-        self, deps: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Even with every other singleton set, an absent discord client
-        must still fail-fast — pin the contract that ``init`` validates
-        all four."""
-        monkeypatch.setattr(pc, "_discord_client", None)
-        with pytest.raises(RuntimeError, match="not initialized"):
-            await pc.private_chat(_ctx(), "bob", "x")
+    async def test_missing_a2a_discord_resource_raises(self) -> None:
+        """The worker-scoped client alone is not enough — without the
+        node-scoped Discord bundle the tool cannot project, so fail-fast."""
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(
+                _ctx(resources={"a2a_client": MagicMock(spec=Client)}), "bob", "x"
+            )
+
+    async def test_wrong_typed_a2a_bundle_raises(self) -> None:
+        """A present-but-wrong-typed Discord bundle (not an ``_A2ADiscord``) is a
+        deployment bug; the type guard must catch it rather than let an attribute
+        access fail opaquely deep in the body."""
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(
+                _ctx(resources={"a2a_client": MagicMock(spec=Client), "a2a": object()}),
+                "bob",
+                "x",
+            )
+
+    async def test_wrong_typed_client_raises(self) -> None:
+        """Symmetric to the bundle check: a present-but-wrong-typed
+        ``a2a_client`` (e.g. the runner keyed the wrong object) must fail here
+        with the real cause, not later as an opaque AttributeError on
+        ``client.execute_node``."""
+        bundle = pc._A2ADiscord(
+            persona_sender=MagicMock(spec=DiscordPersonaSender),
+            resolver=MagicMock(spec=A2AChannelResolver),
+            discord_client=MagicMock(spec=discord.Client),
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(
+                _ctx(resources={"a2a_client": object(), "a2a": bundle}), "bob", "x"
+            )
 
     async def test_missing_emitter_node_id_raises(self, deps: dict[str, Any]) -> None:
         ctx = _ctx()
@@ -935,6 +990,7 @@ class TestInfraErrors:
             deps={},
             run_id="c",
             agent_name="alice",
+            resources=deps["resources"],
         )
         with pytest.raises(RuntimeError, match="deps\\['phonebook'\\]"):
             await pc.private_chat(ctx, "bob", "x")
@@ -944,6 +1000,7 @@ class TestInfraErrors:
             deps={"phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK)},
             run_id="c",
             agent_name="alice",
+            resources=deps["resources"],
         )
         with pytest.raises(RuntimeError, match="deps\\['discord'\\]"):
             await pc.private_chat(ctx, "bob", "x")
@@ -965,6 +1022,7 @@ class TestInfraErrors:
             },
             run_id="c",
             agent_name="alice",
+            resources=deps["resources"],
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
             await pc.private_chat(ctx, "bob", "x")
@@ -979,6 +1037,7 @@ class TestInfraErrors:
             },
             run_id="c",
             agent_name="alice",
+            resources=deps["resources"],
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['phonebook'\\]"):
             await pc.private_chat(ctx, "bob", "x")
@@ -993,6 +1052,7 @@ class TestInfraErrors:
             },
             run_id="c",
             agent_name="alice",
+            resources=deps["resources"],
         )
         with pytest.raises(RuntimeError, match="malformed deps\\['discord'\\]"):
             await pc.private_chat(ctx, "bob", "x")
@@ -1235,40 +1295,6 @@ class TestResponseProjectionRaises:
         assert "caller=alice" in joined
         assert "target=bob" in joined
         assert "correlation_id=tool-corr" in joined
-
-
-class TestInit:
-    """``init()`` is the only path the runner uses to wire dependencies.
-    A regression that swapped parameters would silently break A2A at
-    runtime — pin the bindings."""
-
-    def test_init_binds_each_arg_to_its_singleton(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pc, "_client", None)
-        monkeypatch.setattr(pc, "_persona_sender", None)
-        monkeypatch.setattr(pc, "_resolver", None)
-        monkeypatch.setattr(pc, "_discord_client", None)
-        monkeypatch.setattr(pc, "_timeout_seconds", -1.0)
-
-        client = MagicMock(spec=Client)
-        persona_sender = MagicMock(spec=DiscordPersonaSender)
-        resolver = MagicMock(spec=A2AChannelResolver)
-        discord_client = MagicMock(spec=discord.Client)
-
-        pc.init(
-            client=client,
-            persona_sender=persona_sender,
-            resolver=resolver,
-            discord_client=discord_client,
-            timeout_seconds=42.0,
-        )
-
-        assert pc._client is client
-        assert pc._persona_sender is persona_sender
-        assert pc._resolver is resolver
-        assert pc._discord_client is discord_client
-        assert pc._timeout_seconds == 42.0
 
 
 class TestExecuteNodeFailures:
@@ -1650,7 +1676,7 @@ class TestA2ARetryWithFeedback:
         # Timeout matches the configured A2A budget so a high-effort
         # original call doesn't silently get a different deadline on
         # retry.
-        assert kwargs["timeout"] == pc._timeout_seconds
+        assert kwargs["timeout"] == deps["resources"]["a2a"].timeout_seconds
         # temp_instructions present and contains the A2A roster intro
         # (the peer-roster builder uses ``channel=False`` for A2A).
         assert kwargs["temp_instructions"] is not None
@@ -1817,7 +1843,7 @@ class TestA2APostChunkedProjection:
         deps["persona_sender"].send = AsyncMock()
         with caplog.at_level(_logging.WARNING):
             await pc._post_chunked_projection(
-                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
                 "", "alice", "bob",
             )
         assert deps["persona_sender"].send.await_count == 0
@@ -1838,7 +1864,7 @@ class TestA2APostChunkedProjection:
             return_value=_sent_message(1, channel_id=self._CHANNEL_ID)
         )
         await pc._post_chunked_projection(
-            self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+            _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
             "short reply", "alice", "bob",
         )
         assert deps["persona_sender"].send.await_count == 1
@@ -1858,7 +1884,7 @@ class TestA2APostChunkedProjection:
             return_value=_sent_message(1, channel_id=self._CHANNEL_ID)
         )
         await pc._post_chunked_projection(
-            self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+            _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
             "x" * 5000, "alice", "bob",
         )
         # 5000 chars / 1990 chunk size → at least 3 chunks
@@ -1885,7 +1911,7 @@ class TestA2APostChunkedProjection:
         )
         with caplog.at_level(_logging.ERROR):
             await pc._post_chunked_projection(
-                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
                 "x" * 5000, "alice", "bob",
             )
         # Function does NOT raise — partial loss is logged + tolerated.
@@ -1915,7 +1941,7 @@ class TestA2APostChunkedProjection:
         with caplog.at_level(_logging.ERROR):
             # Must not raise.
             await pc._post_chunked_projection(
-                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
                 "x" * 5000, "alice", "bob",
             )
         # The RateLimited has no ``.status``; status is logged as None.
@@ -1944,7 +1970,7 @@ class TestA2APostChunkedProjection:
         )
         with caplog.at_level(_logging.WARNING):
             await pc._post_chunked_projection(
-                self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
+                _a2a(deps), self._PERSONA, self._CHANNEL_ID, self._THREAD_ID,
                 "x" * 5000, "alice", "bob",
             )
         warns = [r for r in caplog.records if r.levelno == _logging.WARNING]
@@ -1980,3 +2006,170 @@ class TestRetryFeedbackSharedSymbols:
         assert private_chat.build_retry_history is retry_feedback.build_retry_history
         assert private_chat.chunk_split is retry_feedback.chunk_split
         assert private_chat.MAX_REPLY_RETRY_ATTEMPTS is retry_feedback.MAX_REPLY_RETRY_ATTEMPTS
+
+
+class TestA2AResource:
+    """The node-scoped ``@private_chat_tool.resource("a2a")`` bracket.
+
+    Replaces the old runner-injected ``init()`` singletons: the Discord
+    connection is now built only when the ``private_chat`` node is hosted,
+    and the ``DISCORD_GUILD_ID`` requirement is enforced here rather than
+    unconditionally in the tools runner.
+    """
+
+    @staticmethod
+    def _resource_genfn():
+        return dict(pc.private_chat_tool._resource_cms())["a2a"]
+
+    @staticmethod
+    def _acm(inner: Any) -> MagicMock:
+        """A MagicMock that behaves as an async context manager yielding ``inner``."""
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=inner)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    def test_resource_registered_on_tool(self) -> None:
+        assert "a2a" in dict(pc.private_chat_tool._resource_cms())
+
+    async def test_requires_guild_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hosting private_chat without a guild id is unservable (no place to
+        anchor the audit channel) — fail boot loudly, here, not unconditionally
+        in the runner."""
+        monkeypatch.setattr(pc, "DiscordSettings", lambda: SimpleNamespace(guild_id=None))
+        agen = self._resource_genfn()(
+            ResourceSetupContext(owner=pc.private_chat_tool, resources={})
+        )
+        with pytest.raises(RuntimeError, match="DISCORD_GUILD_ID"):
+            await agen.__anext__()
+
+    async def test_yields_wired_bundle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The happy path wires the persona sender, the resolver, and the
+        REST client (reused from the persona sender) into the yielded bundle."""
+        monkeypatch.delenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.setattr(pc, "DiscordSettings", lambda: SimpleNamespace(guild_id=777))
+
+        sender = MagicMock(name="sender")
+        rest_client = MagicMock(spec=discord.Client)
+        persona_sender = MagicMock(spec=DiscordPersonaSender)
+        persona_sender.client = rest_client
+        resolver = MagicMock(spec=A2AChannelResolver)
+
+        sender_cm = self._acm(sender)
+        persona_cm = self._acm(persona_sender)
+        monkeypatch.setattr(pc, "DiscordSender", MagicMock(return_value=sender_cm))
+        monkeypatch.setattr(pc, "DiscordPersonaSender", MagicMock(return_value=persona_cm))
+        monkeypatch.setattr(pc, "A2AChannelResolver", MagicMock(return_value=resolver))
+
+        agen = self._resource_genfn()(
+            ResourceSetupContext(owner=pc.private_chat_tool, resources={})
+        )
+        bundle = await agen.__anext__()
+        # Drain the generator so the ``async with`` teardown runs cleanly.
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()
+
+        assert isinstance(bundle, pc._A2ADiscord)
+        assert bundle.persona_sender is persona_sender
+        assert bundle.resolver is resolver
+        assert bundle.discord_client is rest_client
+        assert bundle.timeout_seconds == pc.DEFAULT_TIMEOUT_SECONDS
+        # Teardown is the whole point of a node-scoped bracket: at drain calfkit
+        # re-enters the generator, exiting the ``async with`` and closing both
+        # Discord connections. A regression that leaked them would skip these.
+        sender_cm.__aexit__.assert_awaited_once()
+        persona_cm.__aexit__.assert_awaited_once()
+
+    async def test_settings_validation_error_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If ``DiscordSettings()`` itself raises (e.g. missing bot token / app
+        id — distinct from a missing guild id), the bracket must surface it at
+        startup before constructing any Discord connection, not midway."""
+        def _boom() -> object:
+            raise RuntimeError("missing DISCORD_BOT_TOKEN")
+
+        monkeypatch.setattr(pc, "DiscordSettings", _boom)
+        sender_factory = MagicMock()
+        monkeypatch.setattr(pc, "DiscordSender", sender_factory)
+
+        agen = self._resource_genfn()(
+            ResourceSetupContext(owner=pc.private_chat_tool, resources={})
+        )
+        with pytest.raises(RuntimeError, match="DISCORD_BOT_TOKEN"):
+            await agen.__anext__()
+        sender_factory.assert_not_called()
+
+
+class TestConfigResolvers:
+    """The A2A deployment-config env resolvers, relocated from the tools
+    runner to the tool that consumes them (kept the runner free of
+    private_chat specifics). Same env names and empty-as-unset semantics."""
+
+    def test_timeout_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", raising=False)
+        assert pc._resolve_timeout() == pc.DEFAULT_TIMEOUT_SECONDS
+
+    def test_timeout_numeric_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "15.5")
+        assert pc._resolve_timeout() == 15.5
+
+    def test_timeout_non_numeric_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Now resolved inside the @resource bracket at worker startup, so a bad
+        value raises RuntimeError (the infra-bug convention) rather than the
+        SystemExit that suited the old at-boot runner call."""
+        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "abc")
+        with pytest.raises(RuntimeError, match="must be a number"):
+            pc._resolve_timeout()
+
+    def test_timeout_zero_or_negative_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "0")
+        with pytest.raises(RuntimeError, match="must be positive"):
+            pc._resolve_timeout()
+
+    def test_category_unset_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_CATEGORY", raising=False)
+        assert pc._resolve_category_name() is None
+
+    def test_category_set_returns_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "private-a2a")
+        assert pc._resolve_category_name() == "private-a2a"
+
+    def test_category_empty_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "   ")
+        assert pc._resolve_category_name() is None
+
+    def test_category_whitespace_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "  private-a2a  ")
+        assert pc._resolve_category_name() == "private-a2a"
+
+    def test_channel_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_NAME", raising=False)
+        assert pc._resolve_channel_name() == "private-a2a-chats"
+
+    def test_channel_env_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "foo")
+        assert pc._resolve_channel_name() == "foo"
+
+    def test_channel_default_constant_value(self) -> None:
+        """Pin the literal default — a refactor that silently changed it
+        would split existing operators' deploys without warning."""
+        assert pc._DEFAULT_CHANNEL_NAME == "private-a2a-chats"
+
+    def test_channel_empty_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "   ")
+        assert pc._resolve_channel_name() == "private-a2a-chats"
+
+    def test_channel_whitespace_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "  team-a2a  ")
+        assert pc._resolve_channel_name() == "team-a2a"
+
+    def test_default_timeout_is_60_seconds(self) -> None:
+        """Pin the literal — the design discussion settled on 60s. A future
+        change should be a deliberate decision a reader confirms, not a silent
+        edit that passes because the test compared against the constant."""
+        assert pc.DEFAULT_TIMEOUT_SECONDS == 60.0

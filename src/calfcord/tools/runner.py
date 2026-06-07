@@ -8,19 +8,17 @@ both, matching calfkit's tool-as-deployment model.
 This deployment intentionally has no read access to ``agents/*.md``.
 Agent identities (display name, avatar, description, tools) arrive at
 the tool body via the phonebook the bridge places in ``deps`` on every
-invocation. The runner wires only the resources that exist on this
-host:
+invocation.
 
-* :class:`DiscordSender` — REST-only client used by
-  :class:`A2AChannelResolver` to discover/create the unified A2A audit
-  channel (configured via :envvar:`CALFKIT_A2A_CHANNEL_NAME`, default
-  ``private-a2a-chats``). Uses the bot token from this deployment's env.
-* :class:`DiscordPersonaSender` — webhook-based projector that posts
-  request/response audit entries under each agent's persona.
-* :class:`calfkit.client.Client` — connected with a private reply topic
-  distinct from the bridge's ``discord.outbox``, so target-agent replies
-  route back to this process and are NOT consumed by the bridge's
-  outbox-to-Discord poster.
+The runner is **resource-light by design**: it connects the process-wide
+:class:`calfkit.client.Client` (with a private reply topic distinct from the
+bridge's ``discord.outbox``, so target-agent replies route here and are NOT
+re-projected by the bridge's outbox poster) and exposes it as the worker-scoped
+``a2a_client`` resource. Any *tool-specific* live resource is owned by the tool
+itself via a node-scoped ``@resource`` bracket that calfkit builds only when
+that tool is hosted — notably ``private_chat`` opens its own Discord connection
+and enforces ``DISCORD_GUILD_ID`` there. So a host serving only fs/shell tools
+needs no Discord credentials.
 
 Run::
 
@@ -41,12 +39,8 @@ from dotenv import load_dotenv
 
 from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
-from calfcord.bridge.egress import A2AChannelResolver
-from calfcord.discord.persona import DiscordPersonaSender
-from calfcord.discord.sender import DiscordSender
-from calfcord.discord.settings import DiscordSettings
 from calfcord.tools import TOOL_REGISTRY
-from calfcord.tools.builtin import private_chat
+from calfcord.tools.builtin.private_chat import _RES_CLIENT as _A2A_CLIENT_RESOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +48,13 @@ _REPLY_TOPIC = "calfkit.tools.reply"
 """Named reply topic for the tools client. Must differ from the bridge's
 ``discord.outbox`` so target-agent ReturnCalls route here, not to the
 bridge's outbox consumer (which would project them to Discord twice)."""
-_TIMEOUT_ENV = "CALFKIT_TOOLS_TIMEOUT_SECONDS"
-_CATEGORY_ENV = "CALFKIT_A2A_CHANNEL_CATEGORY"
-_CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
-_DEFAULT_CHANNEL_NAME = "private-a2a-chats"
-"""The single unified A2A audit channel. Every A2A conversation lives
-inside a thread under this channel; operator setup collapses to one
-channel + one permission overwrite. Overridable via
-:data:`_CHANNEL_NAME_ENV`."""
+
+# The worker-resource key under which the process-wide ``Client`` is exposed to
+# A2A tool bodies is imported from its owner/consumer (private_chat) so producer
+# and consumer cannot drift — the same single-source-of-truth posture as the
+# cross-process topic literals in ``calfcord.topics``. The runner already
+# imports private_chat transitively via TOOL_REGISTRY discovery, so this adds no
+# new coupling across the (same-process) tools deployment.
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -70,49 +63,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run the calfkit tools process (private_chat etc.).",
     )
     return parser.parse_args(argv)
-
-
-def _resolve_timeout() -> float:
-    """Read ``CALFKIT_TOOLS_TIMEOUT_SECONDS`` or fall back to the default."""
-    raw = os.getenv(_TIMEOUT_ENV)
-    if raw is None:
-        return private_chat.DEFAULT_TIMEOUT_SECONDS
-    try:
-        value = float(raw)
-    except ValueError as e:
-        raise SystemExit(f"{_TIMEOUT_ENV} must be a number, got {raw!r}") from e
-    if value <= 0:
-        raise SystemExit(f"{_TIMEOUT_ENV} must be positive, got {value}")
-    return value
-
-
-def _resolve_category_name() -> str | None:
-    """Read ``CALFKIT_A2A_CHANNEL_CATEGORY`` or return ``None``.
-
-    Empty / whitespace-only values are treated as unset so an operator
-    who leaves the line blank in ``.env`` gets the default uncategorized
-    behavior rather than a category literally named "" or " ".
-    """
-    raw = os.getenv(_CATEGORY_ENV)
-    if raw is None:
-        return None
-    stripped = raw.strip()
-    return stripped or None
-
-
-def _resolve_channel_name() -> str:
-    """Read ``CALFKIT_A2A_CHANNEL_NAME`` or fall back to the default.
-
-    Mirrors :func:`_resolve_category_name`'s empty-as-unset normalization
-    so a stray blank line in ``.env`` falls back to
-    :data:`_DEFAULT_CHANNEL_NAME` rather than creating a literally-named
-    channel.
-    """
-    raw = os.getenv(_CHANNEL_NAME_ENV)
-    if raw is None:
-        return _DEFAULT_CHANNEL_NAME
-    stripped = raw.strip()
-    return stripped or _DEFAULT_CHANNEL_NAME
 
 
 def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
@@ -153,61 +103,33 @@ async def _run_worker(worker: Worker) -> None:
 
 
 async def _amain() -> None:
-    settings = DiscordSettings()  # type: ignore[call-arg]
-    if settings.guild_id is None:
-        raise SystemExit(
-            "DISCORD_GUILD_ID is required for calfkit-tools (a2a channel resolver needs it)"
-        )
-
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    timeout_seconds = _resolve_timeout()
-    category_name = _resolve_category_name()
-    channel_name = _resolve_channel_name()
 
-    async with (
-        DiscordSender(settings) as sender,
-        DiscordPersonaSender(settings) as persona_sender,
-        Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
-    ):
+    async with Client.connect(
+        server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
+    ) as client:
         # No manual provisioning: this runner uses the managed Worker (started
         # via _run_worker below), whose _on_startup hook + the connect-time
         # pre-start hook auto-provision the worker's tool-node topics AND the
         # client reply topic at broker start. Tools only ``execute_node`` while
         # consuming a message — which can only happen after ``Worker.start()`` has
         # started the broker — so no eager start is needed for the dispatcher.
-        resolver = A2AChannelResolver(
-            sender,
-            settings.guild_id,
-            channel_name=channel_name,
-            category_name=category_name,
-        )
-        # The thread-history fetch needs a live :class:`discord.Client`.
-        # The persona sender already authenticates one on startup
-        # (REST-only, no gateway) — reuse it rather than spinning up a
-        # second connection just for thread reads. ``persona_sender.client``
-        # raises if start() hasn't been awaited, so a future lifecycle
-        # refactor that lazy-initializes the client will fail fast here
-        # at boot rather than at first invocation.
-        private_chat.init(
-            client=client,
-            persona_sender=persona_sender,
-            resolver=resolver,
-            discord_client=persona_sender.client,
-            timeout_seconds=timeout_seconds,
-        )
-
         tool_nodes = _resolve_tool_nodes(TOOL_REGISTRY)
 
         worker = Worker(client, tool_nodes)
+        # Expose the process-wide client as a worker-scoped resource so A2A tool
+        # bodies (private_chat) reach it via ``ctx.resources`` — calfkit merges
+        # worker resources under each node's own. The client's lifecycle is owned
+        # by the ``async with`` above; this only publishes the live reference.
+        # Any Discord connection a tool needs is built by that tool's own
+        # node-scoped ``@resource`` bracket, so nothing Discord-related is
+        # constructed here.
+        worker.resources[_A2A_CLIENT_RESOURCE] = client
         logger.info(
-            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s "
-            "timeout_s=%.1f a2a_channel=%s a2a_category=%s include_filter=%s",
+            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s include_filter=%s",
             sorted(TOOL_REGISTRY),
             server_urls,
             _REPLY_TOPIC,
-            timeout_seconds,
-            channel_name,
-            category_name,
             os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>",
         )
         await _run_worker(worker)

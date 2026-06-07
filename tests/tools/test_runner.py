@@ -1,128 +1,32 @@
 """Unit tests for ``calfkit-tools`` runner helpers.
 
-Covers the pure helpers (``_resolve_timeout``, ``_resolve_channel_name``,
-``_resolve_category_name``, ``_resolve_tool_nodes``) and the
-``_run_worker`` shutdown contract. The full ``_amain`` requires Discord
-auth, a Kafka broker, and an agents directory — too heavy for a unit
-test. Operators will see boot failures of those in stderr; the
-contracts worth pinning are the local validation helpers, the
-init-call shape (so private_chat receives the fetcher), and the
-supervisor-restart invariant.
+Covers the tool-registry guard (``_resolve_tool_nodes``), the
+supervisor-restart shutdown contract (``_run_worker``), and the runner's
+one A2A-specific responsibility: exposing the process-wide calfkit
+``Client`` as a worker-scoped resource so the ``private_chat`` tool body
+can reach it via ``ctx.resources``. The Discord connection itself is no
+longer the runner's concern — it is built by ``private_chat``'s own
+node-scoped ``@resource`` bracket (see ``tests/tools/builtin/
+test_private_chat.py::TestA2AResource``), so the per-call response
+timeout and audit-channel env resolvers now live with that tool and are
+tested there.
+
+The full ``_amain`` requires Discord auth, a Kafka broker, and an agents
+directory — too heavy for a unit test; the client-exposure test patches
+those boundaries.
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from calfkit.client import Client
 from calfkit.worker import Worker
 
-from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.tools import runner
 from calfcord.tools.builtin import private_chat
-
-
-class TestResolveTimeout:
-    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", raising=False)
-        assert runner._resolve_timeout() == private_chat.DEFAULT_TIMEOUT_SECONDS
-
-    def test_numeric_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "15.5")
-        assert runner._resolve_timeout() == 15.5
-
-    def test_non_numeric_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A typo'd env var must fail boot rather than silently use the
-        default — a 60s timeout when the operator typed something different
-        would be very confusing."""
-        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "abc")
-        with pytest.raises(SystemExit, match="must be a number"):
-            runner._resolve_timeout()
-
-    def test_zero_or_negative_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A non-positive timeout is a misconfiguration — without this
-        guard, ``execute_node(timeout=0)`` would either always fail or
-        block depending on calfkit's interpretation."""
-        monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "0")
-        with pytest.raises(SystemExit, match="must be positive"):
-            runner._resolve_timeout()
-
-
-class TestResolveCategoryName:
-    """``CALFKIT_A2A_CHANNEL_CATEGORY`` reading. Opt-in, empty-as-unset."""
-
-    def test_unset_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_CATEGORY", raising=False)
-        assert runner._resolve_category_name() is None
-
-    def test_set_returns_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "private-a2a")
-        assert runner._resolve_category_name() == "private-a2a"
-
-    def test_empty_string_treated_as_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An operator who leaves the line blank in ``.env`` should
-        get the default uncategorized behavior, not a category literally
-        named ``""``."""
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "")
-        assert runner._resolve_category_name() is None
-
-    def test_whitespace_only_treated_as_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "   ")
-        assert runner._resolve_category_name() is None
-
-    def test_leading_trailing_whitespace_stripped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Quoting in shell/env files commonly leaves stray whitespace;
-        normalize so ``"  private-a2a "`` and ``"private-a2a"`` are
-        equivalent rather than two different Discord categories."""
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_CATEGORY", "  private-a2a  ")
-        assert runner._resolve_category_name() == "private-a2a"
-
-
-class TestResolveChannelName:
-    """``CALFKIT_A2A_CHANNEL_NAME`` reading. Has a default
-    (``"private-a2a-chats"``) — operators don't need to set it for the system
-    to work, but they can override for multi-tenant deployments."""
-
-    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_NAME", raising=False)
-        assert runner._resolve_channel_name() == "private-a2a-chats"
-
-    def test_env_var_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "foo")
-        assert runner._resolve_channel_name() == "foo"
-
-    def test_default_constant_value(self) -> None:
-        """Pin the literal default — a refactor that silently changes
-        the default channel name would split existing operators' deploys
-        without warning."""
-        assert runner._DEFAULT_CHANNEL_NAME == "private-a2a-chats"
-
-    def test_empty_string_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Empty / whitespace-only treated as unset (same posture as
-        ``_resolve_category_name``) so a blank line in ``.env`` doesn't
-        create a literally-named channel."""
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "")
-        assert runner._resolve_channel_name() == "private-a2a-chats"
-
-    def test_whitespace_only_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "   ")
-        assert runner._resolve_channel_name() == "private-a2a-chats"
-
-    def test_leading_trailing_whitespace_stripped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "  team-a2a  ")
-        assert runner._resolve_channel_name() == "team-a2a"
 
 
 class TestResolveToolNodes:
@@ -170,58 +74,55 @@ class TestResolveToolNodes:
         assert "CALFCORD_TOOLS_INCLUDE=<unset>" in message
 
 
-class TestDefaultTimeoutValue:
-    def test_default_is_60_seconds(self) -> None:
-        """Pin the literal — the design discussion settled on 60s. A future
-        change to e.g. 600s should be a deliberate decision the test forces
-        a reader to confirm, not a silent edit that passes existing tests
-        because they only compared against the constant."""
-        assert private_chat.DEFAULT_TIMEOUT_SECONDS == 60.0
-
-
-class TestInitWiringFromRunner:
-    """``private_chat.init`` is the boot-time wiring contract from runner
-    to tool. These tests pin the kwargs the runner passes so a refactor
-    that drops the fetcher (or renames the channel-name kwarg on the
-    resolver) breaks here, not in production where A2A would silently
-    skip history projection.
+class TestAmainExposesClientResource:
+    """The runner's sole A2A wiring responsibility after the 0.6.0 migration:
+    expose the process-wide calfkit ``Client`` as the worker-scoped
+    ``a2a_client`` resource. ``private_chat``'s body reads it from
+    ``ctx.resources`` (merged under its own node-scoped Discord bundle), so a
+    regression that dropped this line would break A2A at runtime — pin it.
+    Discord is built by the tool's own ``@resource`` bracket, so the runner
+    constructs none here.
     """
 
-    def test_init_signature_accepts_discord_client(self) -> None:
-        """``private_chat.init`` must accept ``discord_client`` as a
-        keyword argument — pinning the signature catches a future
-        rename that would break the runner."""
-        import inspect
+    def test_resource_key_matches_private_chat(self) -> None:
+        """Producer (runner) and consumer (private_chat) must agree on the
+        worker-resource key. The runner imports the constant from private_chat,
+        so they're the same object — pin that single-source-of-truth so a future
+        edit that re-hardcodes the literal here is caught (mirrors the
+        cross-module symbol-parity guards elsewhere)."""
+        assert runner._A2A_CLIENT_RESOURCE is private_chat._RES_CLIENT
 
-        sig = inspect.signature(private_chat.init)
-        assert "discord_client" in sig.parameters
-        # All four singletons must be kwargs-only so call-site renames
-        # don't silently swap them.
-        for name in ("client", "persona_sender", "resolver", "discord_client"):
-            assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
-
-    def test_init_binds_discord_client_into_module_singleton(
+    async def test_connected_client_is_registered_as_worker_resource(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """End-to-end binding: after init() returns, the module-level
-        ``_discord_client`` is the client we passed in."""
-        import discord
-        from calfkit.client import Client as _Client
+        client = MagicMock(spec=Client)
+        captured: dict[str, object] = {}
 
-        from calfcord.discord.persona import (
-            DiscordPersonaSender as _PersonaSender,
-        )
+        @asynccontextmanager
+        async def _fake_connect(*args, **kwargs):
+            captured["connect_kwargs"] = kwargs
+            yield client
 
-        monkeypatch.setattr(private_chat, "_discord_client", None)
-        discord_client = MagicMock(spec=discord.Client)
-        private_chat.init(
-            client=MagicMock(spec=_Client),
-            persona_sender=MagicMock(spec=_PersonaSender),
-            resolver=MagicMock(spec=A2AChannelResolver),
-            discord_client=discord_client,
-            timeout_seconds=1.0,
-        )
-        assert private_chat._discord_client is discord_client
+        fake_client_cls = MagicMock()
+        fake_client_cls.connect = _fake_connect
+        monkeypatch.setattr(runner, "Client", fake_client_cls)
+
+        def _make_worker(c, nodes):
+            worker = MagicMock(spec=Worker)
+            worker.resources = {}
+            captured["worker"] = worker
+            return worker
+
+        monkeypatch.setattr(runner, "Worker", _make_worker)
+        monkeypatch.setattr(runner, "_resolve_tool_nodes", lambda registry: [MagicMock()])
+        monkeypatch.setattr(runner, "_run_worker", AsyncMock())
+
+        await runner._amain()
+
+        assert captured["worker"].resources["a2a_client"] is client
+        # The reply topic must be the tools-private one (NOT the bridge's
+        # discord.outbox) or target-agent ReturnCalls get double-projected.
+        assert captured["connect_kwargs"]["reply_topic"] == runner._REPLY_TOPIC
 
 
 class TestRunWorkerShutdownContract:
@@ -242,4 +143,3 @@ class TestRunWorkerShutdownContract:
         worker.start = AsyncMock(side_effect=crash)
         with pytest.raises(ValueError, match="simulated kafka drop"):
             await runner._run_worker(worker)
-

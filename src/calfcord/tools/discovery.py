@@ -244,7 +244,7 @@ def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
     """
     try:
         new_schema = dataclasses.replace(node.tool_schema, name=new_name)
-        return dataclasses.replace(
+        clone = dataclasses.replace(
             node,
             tool_schema=new_schema,
             subscribe_topics=[f"tool.{new_name}.input"],
@@ -267,6 +267,24 @@ def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
             f"this calfkit version. Aliasing requires calfkit's "
             f"ToolNodeDef + ToolDefinition to remain @dataclass."
         ) from e
+
+    # ``dataclasses.replace`` copies only dataclass fields. A node's lifecycle
+    # registrations — ``@resource`` brackets and on_startup/etc. hooks — live in
+    # ``__dict__`` (lazily created by ``LifecycleHookMixin``), so they do NOT
+    # ride the replace. Carry them onto the clone so an aliased tool keeps the
+    # same resource lifecycle as its source: same Python body (the ``_tool``
+    # field is preserved above) implies the same resource needs. Fresh
+    # containers so later registration on either node can't mutate the other.
+    # The runtime resource *bag* (``_lifecycle_resources``) is intentionally not
+    # copied — the worker populates it at startup, not at clone time.
+    src_cms = node.__dict__.get("_lifecycle_resource_cms")
+    if src_cms:
+        clone.__dict__["_lifecycle_resource_cms"] = list(src_cms)
+    src_hooks = node.__dict__.get("_lifecycle_hooks")
+    if src_hooks:
+        clone.__dict__["_lifecycle_hooks"] = {phase: list(hooks) for phase, hooks in src_hooks.items()}
+
+    return clone
 
 
 def discover_tools(
