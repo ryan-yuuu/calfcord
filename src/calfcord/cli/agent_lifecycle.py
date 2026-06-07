@@ -45,7 +45,7 @@ import frontmatter
 import yaml
 
 from calfcord.agents import md_writer
-from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.definition import AgentDefinition, parse_agent_md
 from calfcord.cli._agents import atomic_write, slug_stem
 from calfcord.cli._fields import FIELDS_BY_KEY, write_simple_field
 
@@ -116,7 +116,29 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
             return 1
         written.append(key)
 
-    print(f"Updated {name} ({', '.join(written)}). Restart `calfcord calfkit-agent` to apply.")
+    print(f"Updated {name} ({', '.join(written)}).")
+    # The terse next-step block (behavior #3): a sentence ending in a colon, a
+    # blank line, the two-space-indented command. A config edit takes effect on a
+    # running agent via the roster `restart` verb (the node bakes its config at
+    # construction); the parenthetical flags that a provider/key change can affect
+    # every agent sharing that provider, so a same-provider fleet may need
+    # restarting too. We re-read the resolved provider off disk so the caveat names
+    # the agent's CURRENT provider (post-`set`), whether or not it was just changed.
+    #
+    # The re-read is GUARDED: the success line above already printed, so a re-read
+    # that raises (a now-unparsable `.md` — e.g. an external edit racing this write)
+    # must not escape as a traceback on an otherwise-successful command. On failure,
+    # drop the provider parenthetical (we can't name the provider) but still steer
+    # the operator to restart, which is the load-bearing half of the hint.
+    try:
+        provider = parse_agent_md(md_path).provider
+    except (ValueError, OSError):
+        print(f"Restart {name} to apply:\n\n  calfcord agent restart {name}")
+    else:
+        print(
+            f"Restart {name} to apply (and any other agents on {provider} if the "
+            f"provider/key changed):\n\n  calfcord agent restart {name}"
+        )
     return 0
 
 

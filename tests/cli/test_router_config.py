@@ -67,17 +67,29 @@ def _stub_configure(provider: str, model: str):
 
 
 class _StubClient:
-    """A scriptable ProcessComposeClient for the lifecycle delegation tests."""
+    """A scriptable ProcessComposeClient for the lifecycle delegation tests.
 
-    def __init__(self, *, workspace_up: bool = True) -> None:
+    ``running`` backs ``list_processes`` (the physical-liveness read
+    ``component_start`` consults for its already-running-here restart decision,
+    behavior #2): an empty default means the router slot is NOT running, so a
+    ``start`` is a genuine clock-in (the start-path the delegation tests assert),
+    not a restart.
+    """
+
+    def __init__(self, *, workspace_up: bool = True, running: list[str] | None = None) -> None:
         self._workspace_up = workspace_up
+        self._running = list(running or [])
         self.start_calls: list[str] = []
         self.stop_calls: list[str] = []
+        self.restart_calls: list[str] = []
 
     async def project_state(self):
         if not self._workspace_up:
             raise RuntimeError("project_state: connection refused")
         return {"status": "ok"}
+
+    async def list_processes(self):
+        return [{"name": n, "status": "Running"} for n in self._running]
 
     async def start_process(self, name: str):
         self.start_calls.append(name)
@@ -85,6 +97,10 @@ class _StubClient:
 
     async def stop_process(self, name: str):
         self.stop_calls.append(name)
+        return {}
+
+    async def restart_process(self, name: str):
+        self.restart_calls.append(name)
         return {}
 
 
@@ -157,6 +173,21 @@ def test_set_writes_both_vars_when_both_given(
     written = read_env(env)
     assert written[_PROVIDER_VAR] == "anthropic"
     assert written[_MODEL_VAR] == "claude-haiku-4-5"
+
+
+def test_set_success_prints_restart_next_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A successful ``router set`` reports the change, then the EXACT terse
+    next-step block (behavior #3): the restart sentence, a blank line, the
+    two-space-indented `router restart` command."""
+    env = tmp_path / ".env"
+
+    rc = router_config.set_config(env_path=env, provider="anthropic", model="claude-haiku-4-5")
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Restart the router to apply:\n\n  calfcord router restart" in out
 
 
 def test_set_accepts_non_anthropic_valid_provider(tmp_path: Path) -> None:
@@ -259,11 +290,14 @@ def test_edit_writes_router_env_and_returns_zero(
     assert written[_PROVIDER_VAR] == "anthropic"
     assert written[_MODEL_VAR] == "claude-haiku-4-5"
 
-    out = capsys.readouterr().out.lower()
+    out = capsys.readouterr().out
+    out_lower = out.lower()
     # The explanation must still convey the router is optional and ambient,
     # preserving what the old `router setup` taught.
-    assert "optional" in out
-    assert "@mention" in out
+    assert "optional" in out_lower
+    assert "@mention" in out_lower
+    # And it ends with the EXACT terse next-step block (behavior #3).
+    assert "Restart the router to apply:\n\n  calfcord router restart" in out
 
 
 def test_edit_default_provider_prefers_existing_router_choice(
@@ -455,5 +489,38 @@ async def test_router_stop_workspace_down(
 
     assert rc == 1
     assert client.stop_calls == []
+    out = capsys.readouterr().out
+    assert "workspace not running" in out
+
+
+# --- router_restart: always delegates (config-agnostic, the apply mechanism) -
+
+
+async def test_router_restart_delegates_to_component(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``restart`` is the apply mechanism after a config edit — like ``stop`` it
+    needs no config precheck (the running router already had config), so it
+    delegates straight to the generic ``component_restart`` for the router slot."""
+    client = _StubClient()
+
+    rc = await router_config.router_restart(_home(tmp_path), client=client)
+
+    assert rc == 0
+    assert client.restart_calls == ["router"]
+    out = capsys.readouterr().out
+    assert "router" in out
+    assert "restarted" in out
+
+
+async def test_router_restart_workspace_down(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = _StubClient(workspace_up=False)
+
+    rc = await router_config.router_restart(_home(tmp_path), client=client)
+
+    assert rc == 1
+    assert client.restart_calls == []
     out = capsys.readouterr().out
     assert "workspace not running" in out

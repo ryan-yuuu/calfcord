@@ -10,6 +10,7 @@ quickly, then explains the cause and the fix.
   - [`status` shows "process up, Discord disconnected"](#status-shows-process-up-discord-disconnected)
   - [Everything's green but the agent still doesn't reply](#everythings-green-but-the-agent-still-doesnt-reply)
   - [`status` says an agent's process is up, but it isn't registered](#status-says-an-agents-process-is-up-but-it-isnt-registered)
+  - [I changed my API key / `.env` but nothing changed](#i-changed-my-api-key--env-but-nothing-changed)
   - [Nothing survives a reboot](#nothing-survives-a-reboot)
   - [`agent start` refused: "already running in the organization"](#agent-start-refused-already-running-in-the-organization)
 - [Codex subscription auth](#codex-subscription-auth)
@@ -194,6 +195,47 @@ agent's `.md`, `agent restart <agent>` is also how you reload it.
 > expected for an agent to be live in the org while running on another box. See
 > [the cross-host guard](#agent-start-refused-already-running-in-the-organization)
 > and [distributed-deployment.md](./distributed-deployment.md).
+
+### I changed my API key / `.env` but nothing changed
+
+**Symptom.** You edited a value in `.env` (or ran `calfcord agent set` /
+`calfcord router set`) — a new API key, a different model, a changed broker URL —
+but the running component still behaves the old way: the same key is rejected, the
+old model still answers, the agent still points at the old broker.
+
+**What it means.** `.env` is read **once, at process boot**. Each component (every
+agent, the router, the tools/MCP hosts, the bridge) loads its environment when it
+starts and holds it for its lifetime, so editing `.env` does nothing to a process
+that's *already running*. You have to **restart the process that reads the value**
+for the new setting to take effect.
+
+**Resolution.** Restart only what reads the value you changed:
+
+```bash
+calfcord agent restart <name>     # one agent's key / model / provider changed
+calfcord agent restart --all      # a key SEVERAL agents share (e.g. ANTHROPIC_API_KEY) — this host's agents
+calfcord router restart           # the router's provider/model changed
+calfcord tools restart            # something the tools host reads changed
+calfcord mcp restart              # something the MCP host reads changed
+```
+
+For a **workspace-wide value the whole roster reads** (e.g. `CALF_HOST_URL`),
+recycle the substrate *and* bring the roster back up on the new value:
+
+```bash
+calfcord stop && calfcord start   # stop tears EVERYTHING down; start brings up the substrate (broker + bridge) ONLY
+calfcord agent start --all        # ...then bring every defined agent back up on the new value
+```
+
+> `calfcord stop` tears the **whole** workspace down (broker + bridge **and**
+> every agent and singleton), and `calfcord start` brings up the **substrate
+> only** — it does not bring the roster back. So `stop && start` leaves you with
+> the substrate up but **no agents running**: use `agent start --all` (every
+> *defined* agent), not `agent restart --all` (which would be a no-op, since
+> nothing is running to restart). Add `calfcord tools start` / `router start` /
+> `mcp start` for whichever singletons you run. That's the boot-time gotcha to
+> watch for. The full change → command mapping lives in
+> [configuration.md](./configuration.md#applying-changes).
 
 ### Nothing survives a reboot
 

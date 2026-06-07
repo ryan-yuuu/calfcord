@@ -183,12 +183,15 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     agent's system prompt). A given ``name`` pre-fills the name prompt; the
     operator can still rename at the prompt.
 
-    On success prints the restart guidance and returns 0. Per the CLI
-    error-handling convention, a write failure (``ValueError``/``OSError`` from
-    the validate-before-write path) is reported as a single ``error:`` line and
-    returns 1 with no success banner — printing "Created agent ..." on a failed
-    write would send the operator off to boot processes against an agent that
-    isn't there.
+    On success it names the created agent then prints the terse next-step block
+    (behavior #3): a sentence ending in a colon, a blank line, the indented
+    command. A brand-new agent comes online via the roster verb (the new
+    substrate/roster model), so the steer is ``calfcord agent start <name>`` — not
+    the old runner-restart banner. Per the CLI error-handling convention, a write
+    failure (``ValueError``/``OSError`` from the validate-before-write path) is
+    reported as a single ``error:`` line and returns 1 with no success banner —
+    printing "Created agent ..." on a failed write would send the operator off to
+    boot processes against an agent that isn't there.
     """
     try:
         created = create_agent(
@@ -207,8 +210,6 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
         print(f"error: could not create agent {(name or '?')!r}: {e}")
         return 1
 
-    print(
-        f"Created agent {created.name!r}. Restart `calfcord calfkit-agent` "
-        f"(and `calfcord calfkit-bridge` to register /{created.name}) to load it."
-    )
+    print(f"Created agent {created.name!r}.")
+    print(f"Bring {created.name} online:\n\n  calfcord agent start {created.name}")
     return 0

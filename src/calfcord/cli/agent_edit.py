@@ -336,5 +336,15 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
             print(f"error: {e}")
 
     if changed:
-        print("Restart `calfcord calfkit-agent` to apply.")
+        # The terse next-step block (behavior #3): a sentence ending in a colon, a
+        # blank line, the two-space-indented command. A config edit takes effect on
+        # a running agent via the roster `restart` verb (the node bakes its config at
+        # construction); the parenthetical flags that a provider/key change can
+        # affect every agent sharing that provider, so a same-provider fleet may need
+        # restarting too. ``defn`` is the last re-read definition (the menu re-parses
+        # each iteration), so it reflects the just-applied provider.
+        print(
+            f"Restart {agent_name} to apply (and any other agents on {defn.provider} "
+            f"if the provider/key changed):\n\n  calfcord agent restart {agent_name}"
+        )
     return 0

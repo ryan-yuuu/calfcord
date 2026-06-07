@@ -108,20 +108,39 @@ printf '%s' "$out" | grep -Fq \
   && pass "dispatch deploy systemd -> calfcord-cli" || fail "dispatch deploy args: $out"
 
 # `tools` is a calfcord-cli verb group (the singleton tools-host lifecycle:
-# `tools start|stop`), so the whole group routes to the argparse entry point and
-# the subverb + args are forwarded verbatim.
-for sub in start stop; do
+# `tools start|stop|restart`), so the whole group routes to the argparse entry
+# point and the subverb + args are forwarded verbatim. `restart` rides the
+# top-level `tools)` alternation arm (no per-subverb change needed) — verified here.
+for sub in start stop restart; do
   out="$("$B" "$C" tools "$sub" 2>&1)"
   printf '%s' "$out" | grep -Fq \
     "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli tools $sub" \
     && pass "dispatch tools $sub -> calfcord-cli" || fail "dispatch tools $sub: $out"
 done
 
-# `mcp` is SPLIT: the new lifecycle subverbs (`start|stop`) route to calfcord-cli,
-# while the pre-existing config subverbs (`add|codegen`) still route to their own
-# console scripts (calfcord-mcp-add / calfcord-mcp-codegen). The split is the
-# point — adding lifecycle must not break the config verbs (regression below).
-for sub in start stop; do
+# `agent` / `router` are calfcord-cli verb groups too, so their new `restart`
+# subverb rides the same top-level alternation arm (the `--all` flag forwards
+# verbatim too). Pin that the roster `restart` (and `restart --all`) reach the
+# argparse entry point unchanged.
+for grp in agent router; do
+  out="$("$B" "$C" "$grp" restart assistant 2>&1)"
+  printf '%s' "$out" | grep -Fq \
+    "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli $grp restart assistant" \
+    && pass "dispatch $grp restart -> calfcord-cli" || fail "dispatch $grp restart: $out"
+done
+out="$("$B" "$C" agent start --all 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli agent start --all" \
+  && pass "dispatch agent start --all -> calfcord-cli" || fail "dispatch agent start --all: $out"
+
+# `mcp` is SPLIT: the lifecycle subverbs (`start|stop|restart`) route to
+# calfcord-cli, while the pre-existing config subverbs (`add|codegen`) still route
+# to their own console scripts (calfcord-mcp-add / calfcord-mcp-codegen). Unlike
+# agent/tools/router (which ride the top-level alternation), `mcp` is dispatched by
+# a per-subverb case in the shim, so `restart` must be added to that arm explicitly
+# — this loop covers it. The split is the point: adding lifecycle must not break
+# the config verbs (regression below).
+for sub in start stop restart; do
   out="$("$B" "$C" mcp "$sub" 2>&1)"
   printf '%s' "$out" | grep -Fq \
     "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli mcp $sub" \

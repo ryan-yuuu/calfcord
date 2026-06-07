@@ -51,7 +51,7 @@ from calfcord.cli._envfile import read_env, upsert
 from calfcord.cli._prompts import Prompter
 from calfcord.router.definition import _MODEL_ENV as _MODEL_VAR
 from calfcord.router.definition import _PROVIDER_ENV as _PROVIDER_VAR
-from calfcord.supervisor.component import component_start, component_stop
+from calfcord.supervisor.component import component_restart, component_start, component_stop
 
 # The agents' default provider, used to seed ``edit`` when the router has no prior
 # choice of its own — so an operator who configured one provider in ``init`` isn't
@@ -148,6 +148,10 @@ def set_config(*, env_path: Path, provider: str | None, model: str | None) -> in
         print(f"  provider -> {updates[_PROVIDER_VAR]}")
     if _MODEL_VAR in updates:
         print(f"  model    -> {updates[_MODEL_VAR]}")
+    # The terse next-step block (behavior #3): a sentence ending in a colon, a
+    # blank line, the two-space-indented command. The router bakes its config at
+    # construction, so a config change takes effect via the roster `restart` verb.
+    print("\nRestart the router to apply:\n\n  calfcord router restart")
     return 0
 
 
@@ -194,8 +198,13 @@ def edit(prompter: Prompter, *, env_path: Path) -> int:
 
     print()
     print(f"Router will use {provider}/{model}.")
-    print("Bring it online with: calfcord router start")
     print("It is optional — skip it and @mentions still work.")
+    # The terse next-step block (behavior #3): a sentence ending in a colon, a
+    # blank line, the two-space-indented command. The router bakes its config at
+    # construction, so a config change takes effect via the roster `restart` verb
+    # (which also brings a stopped router up — so it is the right steer whether or
+    # not the router was already running).
+    print("\nRestart the router to apply:\n\n  calfcord router restart")
     return 0
 
 
@@ -253,3 +262,22 @@ async def router_stop(
     for testing. Returns ``0`` on success, ``1`` when the workspace is down.
     """
     return await component_stop(home, name=_ROUTER_PROCESS_NAME, client=client)
+
+
+async def router_restart(
+    home: str | os.PathLike[str],
+    *,
+    client=None,
+) -> int:
+    """``calfcord router restart``: reload the running router after a config change.
+
+    The apply mechanism behind ``router set`` / ``router edit``'s next-step hint:
+    the runner bakes its provider/model at construction, so a restart is how a
+    config edit takes effect on a live router. Like ``stop`` it runs NO config
+    precheck — a running router already had valid config, and ``component_restart``
+    issues the REST restart unconditionally — so it delegates straight to
+    :func:`calfcord.supervisor.component.component_restart` for the ``router`` slot.
+    ``client`` is injected for testing. Returns ``0`` on success, ``1`` when the
+    workspace is down.
+    """
+    return await component_restart(home, name=_ROUTER_PROCESS_NAME, client=client)

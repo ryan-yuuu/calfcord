@@ -111,6 +111,7 @@ async def agent_start(
     server_urls: str,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
+    live: list[AgentDefinition] | None = None,
     now: Clock | None = None,
 ) -> int:
     """Bring agent ``name`` online: a teammate clocking into the live org (§3.5).
@@ -120,14 +121,20 @@ async def agent_start(
     1. **Workspace check** — if the supervisor REST is unreachable there is
        nothing to start; print the not-running hint and return ``1`` *before*
        spending a broker probe or a doomed start.
-    2. **Duplicate guard (§3.5)** — query the broker-wide live roster; if ``name``
-       is already answering *anywhere* (this host or another), do NOT start a
-       second instance (the bridge would accept it as a benign re-announce and
-       both would reply). Print a clear message and return ``0`` — a duplicate
-       start is a benign no-op, not a failure.
-    3. **Start** — otherwise ``POST /process/start/{name}`` against the local
+    2. **Already-running-here is a restart (behavior #2)** — if ``name`` is a
+       ``Running`` process on THIS host, a re-``start`` is the useful idempotency:
+       reload it in place (``POST /process/restart/{name}``), print ``agent <name>
+       restarted``, return ``0``. This branch comes BEFORE the org probe so a local
+       instance is never mistaken for a remote duplicate — it is ours to restart,
+       not a second host's to refuse.
+    3. **Duplicate guard (§3.5)** — otherwise query the broker-wide live roster; if
+       ``name`` is already answering on *another host*, do NOT start a second
+       instance (the bridge would accept it as a benign re-announce and both would
+       reply). Print a clear message and return ``0`` — a duplicate start is a
+       benign no-op, not a failure.
+    4. **Start** — otherwise ``POST /process/start/{name}`` against the local
        supervisor; on success print ``agent <name> online`` and return ``0``.
-    4. **Not-declared vs. genuine fault (§13.1 / Fix #9)** — if the start raises,
+    5. **Not-declared vs. genuine fault (§13.1 / Fix #9)** — if the start raises,
        branch on the STRUCTURAL HTTP status the client carries: a **4xx** is the
        not-declared case (a brand-new agent authored after ``calfcord start`` is
        not a declared slot, so the PC server rejects it), so steer the operator to
@@ -138,9 +145,29 @@ async def agent_start(
        convention it is re-raised loudly with caller/target/correlation rather than
        mistranslated into the benign reload hint that would mask it.
 
-    ``client`` / ``probe`` are injected for testing; ``now`` is accepted for
-    symmetry with the rest of the lifecycle surface and is unused today.
+    ``client`` / ``probe`` are injected for testing. ``live`` is the
+    pre-resolved broker-wide roster: when given (the ``start --all`` sweep probes
+    once and threads it in), the duplicate guard reads it directly and does NOT
+    re-probe — so N agents cost ONE probe and ONE aggregate broker-down warning,
+    not N. When ``None`` (the standalone single-start), this probes itself, exactly
+    as before. ``now`` is accepted for symmetry with the rest of the lifecycle
+    surface and is unused today.
     """
+    # Reserved-name chokepoint: the substrate (broker/bridge) and the singleton
+    # components (tools/router/mcp) are owned by `calfcord start` and their own
+    # component verbs — never the agent roster. The id pattern does NOT reject a
+    # creatable `tools.md` (only `calfcord start`'s build_compose_project does), so
+    # an `agent start tools` would otherwise drive `start_process('tools')` against
+    # the live singleton. Refuse here, before any workspace check / probe / start,
+    # so this single seam closes the exposure for both `agent start <reserved>` and
+    # (via the upstream filter in agent_start_all) `start --all`.
+    if name in _NON_AGENT_PROCESSES:
+        print(
+            f"error: {name!r} is a reserved component, not an agent; "
+            f"manage it with `calfcord {name} start` (or `calfcord start`)."
+        )
+        return 1
+
     home = os.fspath(home)
     client = _resolve_client(client, home)
 
@@ -148,19 +175,38 @@ async def agent_start(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    # Duplicate guard (§3.5): the probe is broker-wide, so a name live on ANY host
-    # is caught here, CLI-side, with no bridge change. Refusing to start a second
-    # instance is the whole point — two same-id agents double-reply / split-brain.
-    probe = _resolve_probe(probe)
-    try:
-        live = await probe(server_urls)
-    except Exception:
-        # The duplicate guard is best-effort (§3.5 already concedes a TOCTOU
-        # window): if the broker is unreachable we cannot verify org-wide
-        # duplicates, so warn and proceed with the local start rather than blocking
-        # it — a same-host duplicate is impossible (one declared process per name).
-        print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
-        live = []
+    # Already-running-here is a restart (behavior #2). A re-`start` of a process
+    # that is Running on THIS host reloads it in place — the same effect as
+    # `restart`. This is checked BEFORE the org probe so a *local* instance is never
+    # misread as a remote duplicate: it is ours to restart, not a peer's to refuse.
+    if name in await _running_agent_names(client):
+        await client.restart_process(name)
+        print(f"agent {name} restarted")
+        return 0
+
+    # Duplicate guard (§3.5): the probe is broker-wide, so a name live on ANOTHER
+    # host is caught here, CLI-side, with no bridge change. Refusing to start a
+    # second instance is the whole point — two same-id agents double-reply /
+    # split-brain. (A same-host duplicate was already handled as a restart above.)
+    # When the bulk sweep pre-resolved the roster (``live`` given), reuse it — it
+    # already probed once and emitted any single aggregate broker-down warning, so
+    # we must NOT re-probe (that would be N round-trips / N warnings for one
+    # operator action). A standalone single-start (``live is None``) probes itself.
+    if live is None:
+        probe = _resolve_probe(probe)
+        try:
+            live = await probe(server_urls)
+        except Exception:
+            # The duplicate guard is best-effort (§3.5 already concedes a TOCTOU
+            # window): if the broker is unreachable we cannot verify org-wide
+            # duplicates, so warn and proceed with the local start rather than
+            # blocking it — a same-host duplicate is impossible (one declared
+            # process per name).
+            print(
+                "warning: could not verify org-wide duplicates "
+                "(broker unreachable); proceeding."
+            )
+            live = []
     if any(defn.agent_id == name for defn in live):
         print(f"agent {name} is already running in the organization")
         return 0
@@ -241,6 +287,204 @@ async def agent_restart(
     return 0
 
 
+async def agent_start_all(
+    home: str | os.PathLike[str],
+    *,
+    agent_ids: list[str],
+    server_urls: str,
+    client: ProcessComposeClient | None = None,
+    probe: Probe | None = None,
+    now: Clock | None = None,
+) -> int:
+    """Bring every DEFINED agent online on this host (``start --all``, behavior #1).
+
+    ``--all`` is the uniform-surface bulk verb (decision B): for ``start`` the
+    target is every *defined* agent (the caller passes ``agent_ids`` from the
+    ``.md`` files — roster.py stays off the agents-dir read so it does not grow a
+    disk dependency). Each id runs the SAME single-start logic as ``agent_start``,
+    so a locally-running one restarts (behavior #2), a stopped one starts, and one
+    only answering on another host hits the duplicate refusal — one honest,
+    LOCAL-only sweep of this host's supervisor.
+
+    Workspace check first (the shared not-running hint + ``1`` if the office is
+    shut), mirroring the single ops. An empty defined set is a clean no-op
+    (``no agents defined``, ``0``). Otherwise it is **best-effort**: a per-item
+    failure is reported and the sweep continues to the next id, then a one-line
+    summary closes it. Returns ``1`` if any id HARD-failed (a genuine fault — a 4xx
+    reload-needed or a raised 5xx/transport error), else ``0``; the restart and
+    duplicate-refuse outcomes are successes, not failures.
+
+    The §3.5 duplicate guard reads the same broker-wide roster for EVERY id, so it
+    is probed ONCE up front and threaded into each per-id ``agent_start`` (via its
+    ``live`` param). A broker-down probe therefore yields ONE aggregate warning for
+    the operator's single action — not one per id — and the count is reflected in
+    the closing summary; the sweep then proceeds with an empty roster (the guard is
+    best-effort, §3.5).
+
+    ``client`` / ``probe`` are injected for testing; only the resolved client
+    object/port is shared across the sweep — each id still issues its own
+    workspace + roster reads through ``agent_start``. ``now`` is accepted for
+    symmetry with the rest of the lifecycle surface and is unused.
+    """
+    # Drop reserved names BEFORE the empty-check: main.py passes the raw `.md`
+    # stems from detect_agents, and a creatable `tools.md` / `router.md` / `mcp.md`
+    # / `broker.md` / `bridge.md` is not rejected by the id pattern. Without this
+    # filter the sweep would fall through to `start_process('tools')` against the
+    # live singleton — breaking the "--all never touches another component type"
+    # invariant. (agent_start's own guard would also refuse each one, but filtering
+    # here keeps them out of the per-id sweep AND the summary count entirely.) An
+    # all-reserved input collapses to the empty set → the clean no-op below.
+    agent_ids = [n for n in agent_ids if n not in _NON_AGENT_PROCESSES]
+
+    home = os.fspath(home)
+    client = _resolve_client(client, home)
+
+    if not await _workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    if not agent_ids:
+        print("no agents defined")
+        return 0
+
+    # Probe the broker-wide roster ONCE for the whole sweep: the §3.5 guard reads
+    # the same org-wide view for every id, so a per-id re-probe would be N
+    # round-trips (and N broker-down warnings) for one operator action. The
+    # resolved roster is threaded into each per-id ``agent_start`` via ``live``, so
+    # none of them re-probe.
+    probe = _resolve_probe(probe)
+    try:
+        live: list[AgentDefinition] = await probe(server_urls)
+        probe_unavailable = False
+    except Exception:
+        # One aggregate broker-down warning for the whole action (not one per id),
+        # then proceed with an empty roster — the guard is best-effort (§3.5) and a
+        # same-host duplicate is impossible. The summary reflects that the org-wide
+        # check was skipped fleet-wide so the operator gets a single signal.
+        print(
+            "warning: could not verify org-wide duplicates "
+            "(broker unreachable); proceeding for all agents."
+        )
+        live = []
+        probe_unavailable = True
+
+    failures = 0
+    for name in agent_ids:
+        try:
+            rc = await agent_start(
+                home,
+                name=name,
+                server_urls=server_urls,
+                client=client,
+                probe=probe,
+                live=live,
+            )
+        except Exception as exc:
+            # Best-effort: a raised fault on one id (e.g. a 5xx that agent_start
+            # re-raises loudly) must not abort the rest of the sweep. Surface it and
+            # keep going; the non-zero summary tells the operator to look.
+            print(f"agent {name}: failed to start ({exc})")
+            failures += 1
+            continue
+        if rc != 0:
+            failures += 1
+
+    summary = f"start --all: {len(agent_ids)} agent(s) processed, {failures} failed."
+    if probe_unavailable:
+        # Surface the skipped fleet-wide guard in the closing summary so the single
+        # aggregate signal carries through to the operator's last line of output.
+        summary += " (org-wide duplicate check skipped: broker unreachable)"
+    print(summary)
+    return 1 if failures else 0
+
+
+async def agent_stop_all(
+    home: str | os.PathLike[str],
+    *,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Take every RUNNING local agent offline (``stop --all``, behavior #1).
+
+    LOCAL-only and read-from-the-supervisor: the target set is exactly this host's
+    Running agent processes (:func:`_running_agent_names` — the same physical filter
+    ``ps`` uses, so the substrate and the tools/router/mcp singletons are never
+    swept). There is no over-the-wire control; ``--all`` acts on THIS host.
+
+    Workspace check first (the shared not-running hint + ``1``). Nothing running
+    locally is a clean no-op (``no agents running locally``, ``0``). Otherwise it is
+    **best-effort**: each stop is attempted, a per-item failure is reported and the
+    sweep continues, and a one-line summary closes it. Returns ``1`` if any stop
+    failed, else ``0``.
+    """
+    home = os.fspath(home)
+    client = _resolve_client(client, home)
+
+    if not await _workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    targets = sorted(await _running_agent_names(client))
+    if not targets:
+        print("no agents running locally")
+        return 0
+
+    failures = 0
+    for name in targets:
+        try:
+            await client.stop_process(name)
+        except Exception as exc:
+            print(f"agent {name}: failed to stop ({exc})")
+            failures += 1
+            continue
+        print(f"agent {name} stopped")
+
+    print(f"stop --all: {len(targets)} agent(s) processed, {failures} failed.")
+    return 1 if failures else 0
+
+
+async def agent_restart_all(
+    home: str | os.PathLike[str],
+    *,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Reload every RUNNING local agent (``restart --all``, behavior #1).
+
+    Same LOCAL-only target set as :func:`agent_stop_all` — this host's Running agent
+    processes (:func:`_running_agent_names`), never the substrate or the singletons.
+    Useful after a provider/key change that affects a whole host's agents at once.
+
+    Workspace check first (the shared not-running hint + ``1``). Nothing running
+    locally is a clean no-op (``no agents running locally``, ``0``). Otherwise
+    **best-effort**: each restart is attempted, a per-item failure is reported and
+    the sweep continues, and a one-line summary closes it. Returns ``1`` if any
+    restart failed, else ``0``.
+    """
+    home = os.fspath(home)
+    client = _resolve_client(client, home)
+
+    if not await _workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    targets = sorted(await _running_agent_names(client))
+    if not targets:
+        print("no agents running locally")
+        return 0
+
+    failures = 0
+    for name in targets:
+        try:
+            await client.restart_process(name)
+        except Exception as exc:
+            print(f"agent {name}: failed to restart ({exc})")
+            failures += 1
+            continue
+        print(f"agent {name} restarted")
+
+    print(f"restart --all: {len(targets)} agent(s) processed, {failures} failed.")
+    return 1 if failures else 0
+
+
 async def agent_ps(
     home: str | os.PathLike[str],
     *,
@@ -314,6 +558,20 @@ def _running_roster_names(payload: object) -> set[str]:
         if item.get("status") == _PC_RUNNING:
             names.add(name)
     return names
+
+
+async def _running_agent_names(client: ProcessComposeClient) -> set[str]:
+    """This host's ``Running`` agent names — the local target/membership set.
+
+    The single source of truth for "which agents are physically up here": the same
+    physical filter the ps board uses (:func:`_running_roster_names` over
+    ``list_processes``), so ``agent_start``'s already-running-here restart branch
+    (behavior #2) and the ``stop_all``/``restart_all`` sweeps agree on exactly what
+    counts as a locally-running agent (``Running`` status, not a reserved
+    substrate/singleton process). Factored to one place so that definition cannot
+    drift between the single-start guard and the bulk verbs.
+    """
+    return _running_roster_names(await client.list_processes())
 
 
 def _render_ps_board(*, physical: set[str], logical: set[str]) -> None:

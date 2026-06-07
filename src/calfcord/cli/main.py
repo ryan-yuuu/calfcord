@@ -104,16 +104,25 @@ def _build_parser() -> argparse.ArgumentParser:
     # *running* office. These are thin veneers over
     # :mod:`calfcord.supervisor.roster`; the duplicate guard, the workspace check,
     # and the §13.1 not-a-declared-slot steer live there. ``start``/``stop``/
-    # ``restart`` take a required positional name; ``ps`` (the *running* roster, as
-    # opposed to ``list``'s *defined* roster) takes none.
-    start_p = agent_sub.add_parser("start", help="Bring an agent online: a teammate clocks into the live org.")
-    start_p.add_argument("name", help="Agent name.")
-
-    stop_p = agent_sub.add_parser("stop", help="Take an agent offline: a teammate clocks out.")
-    stop_p.add_argument("name", help="Agent name.")
-
-    restart_p = agent_sub.add_parser("restart", help="Reload a running agent after editing its .md.")
-    restart_p.add_argument("name", help="Agent name.")
+    # ``restart`` take EITHER a positional name OR ``--all`` (exactly one — the
+    # mutual-exclusion is enforced in the dispatcher, not by argparse, so it can
+    # carry a clear domain message). ``--all`` is LOCAL-only: it sweeps THIS host's
+    # supervisor (per-verb target set: ``start`` = every defined agent; ``stop`` /
+    # ``restart`` = every running local agent), never the org over the wire. ``ps``
+    # (the *running* roster, as opposed to ``list``'s *defined* roster) takes none.
+    for _verb, _help in (
+        ("start", "Bring an agent online: a teammate clocks into the live org."),
+        ("stop", "Take an agent offline: a teammate clocks out."),
+        ("restart", "Reload a running agent after editing its .md."),
+    ):
+        _p = agent_sub.add_parser(_verb, help=_help)
+        _p.add_argument("name", nargs="?", help="Agent name (or pass --all).")
+        _p.add_argument(
+            "--all",
+            dest="all",
+            action="store_true",
+            help="Act on every agent on this host (instead of one named agent).",
+        )
 
     agent_sub.add_parser("ps", help="Show RUNNING agents (vs. `agent list`, which shows DEFINED agents).")
 
@@ -129,8 +138,23 @@ def _build_parser() -> argparse.ArgumentParser:
     router_set_p.add_argument("--provider")  # validated in router_config.set_config against the Provider literal
     router_set_p.add_argument("--model")
     router_sub.add_parser("edit", help="Configure the OPTIONAL ambient router interactively (provider, model).")
-    router_sub.add_parser("start", help="Bring the router online (needs config).")
-    router_sub.add_parser("stop", help="Take the router offline.")
+    # Router lifecycle mirrors the agent roster verbs (start/stop/restart). The
+    # router is one process per host, so ``--all`` is a forward-compatible SYNONYM
+    # for the bare verb (it acts on this host's single router slot); it is accepted
+    # for a uniform surface across the roster verbs and dispatches to the same
+    # singular handler.
+    for _verb, _help in (
+        ("start", "Bring the router online (needs config)."),
+        ("stop", "Take the router offline."),
+        ("restart", "Reload the running router after a config change."),
+    ):
+        _rp = router_sub.add_parser(_verb, help=_help)
+        _rp.add_argument(
+            "--all",
+            dest="all",
+            action="store_true",
+            help="Synonym for the bare verb (acts on this host's router).",
+        )
     # ``setup`` is the pre-redesign wizard, now SUPERSEDED by ``edit``. Kept as a
     # back-compat alias so existing muscle memory / docs / scripts keep working;
     # it dispatches to the same one-shot ambient-router wizard it always has.
@@ -145,11 +169,25 @@ def _build_parser() -> argparse.ArgumentParser:
     # slot name. ``required=True`` makes a bare ``calfcord tools`` / ``calfcord
     # mcp`` print help + exit non-zero rather than silently no-op, so the groups
     # can grow further verbs later.
+    # Each is a ``start|stop|restart`` group. ``--all`` is a forward-compatible
+    # SYNONYM for the bare verb here: a singleton is one process per host, so
+    # ``--all`` targets that one instance — it dispatches to the same singular
+    # component handler, accepted only so the roster verbs read uniformly.
     for _component in ("tools", "mcp"):
         component_p = sub.add_parser(_component, help=f"Manage the {_component} host.")
         component_sub = component_p.add_subparsers(dest=f"{_component}_command", required=True)
-        component_sub.add_parser("start", help=f"Bring the {_component} host online.")
-        component_sub.add_parser("stop", help=f"Take the {_component} host offline.")
+        for _verb, _help in (
+            ("start", f"Bring the {_component} host online."),
+            ("stop", f"Take the {_component} host offline."),
+            ("restart", f"Reload the running {_component} host."),
+        ):
+            _cp = component_sub.add_parser(_verb, help=_help)
+            _cp.add_argument(
+                "--all",
+                dest="all",
+                action="store_true",
+                help=f"Synonym for the bare verb (acts on this host's {_component}).",
+            )
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
     # bridge) up detached, close it, and glance at the org board. These are thin
@@ -284,7 +322,24 @@ def _collect_set_updates(args: argparse.Namespace) -> dict[str, str]:
 _ROSTER_COMMANDS = frozenset({"start", "stop", "restart", "ps"})
 
 
-def _run_agent_roster(command: str, name: str | None) -> int:
+def _require_one_roster_target(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Enforce exactly one of ``<name>`` | ``--all`` for an agent roster verb.
+
+    ``name`` is ``nargs="?"`` and ``--all`` is a flag, so argparse alone would
+    accept BOTH (contradictory: one targets a single agent, the other every agent
+    on this host) or NEITHER (a no-op). Both are operator errors, so this resolves
+    them at the dispatcher with a clear domain message via :meth:`parser.error`
+    (which prints usage and exits ``2``) rather than letting the bare verb silently
+    act on nothing — mirroring how the singleton groups' ``required=True`` rejects a
+    bare group. ``ps`` takes neither and never calls this.
+    """
+    if args.all and args.name is not None:
+        parser.error("name and --all are mutually exclusive")
+    if not args.all and args.name is None:
+        parser.error("give an agent name or --all")
+
+
+def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Dispatch a roster verb (``agent start|stop|restart|ps``) — §3.4-§3.5.
 
     Like :func:`_run_lifecycle`, these drive the *install-scoped* Process Compose
@@ -294,36 +349,71 @@ def _run_agent_roster(command: str, name: str | None) -> int:
     so these verbs refuse to run there with the same actionable native-install
     message rather than driving a half-built invocation against the project tree.
 
+    ``start``/``stop``/``restart`` take EITHER a ``name`` OR ``--all`` (behavior
+    #1, decision B — uniform surface; exactly-one enforced by
+    :func:`_require_one_roster_target`). ``--all`` is LOCAL-only and per-verb:
+    ``start --all`` sweeps every DEFINED agent (so it passes the detected ``.md``
+    ids — the same :func:`detect_agents` seam ``start`` / ``agent list`` use, so
+    roster.py needs no agents-dir read); ``stop --all`` / ``restart --all`` sweep
+    every RUNNING local agent (the bulk fns read the supervisor themselves, so no
+    ids and no broker URL are passed). ``ps`` takes no target.
+
     ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``, the
     same default the runners, the broker healthcheck, and ``start`` use); it feeds
-    the §3.5 duplicate guard (``start``) and the §3.4 logical-roster probe
-    (``ps``). ``stop``/``restart`` need no probe. Each roster coroutine's POSIX
-    exit code is propagated unchanged.
+    the §3.5 duplicate guard (``start`` / ``start --all``) and the §3.4
+    logical-roster probe (``ps``). ``stop``/``restart`` (and their ``--all``
+    sweeps) need no probe. Each roster coroutine's POSIX exit code is propagated
+    unchanged.
     """
+    command = args.agent_command
+
+    # Argument validity comes BEFORE the native-install guard: an invalid invocation
+    # (no target, or both a name and --all) is an operator error to flag with the
+    # parser (exit 2) regardless of whether a home is configured — so a dev run's
+    # bare `agent start` still errors at the parser, not the home check. ``ps`` takes
+    # no target and skips this.
+    if command != "ps":
+        _require_one_roster_target(parser, args)
+
     home = _require_home(f"agent {command}")
     if home is None:
         return 1
 
-    if command == "stop":
-        return asyncio.run(roster.agent_stop(home, name=name))
-    if command == "restart":
-        return asyncio.run(roster.agent_restart(home, name=name))
-
-    # ``start`` and ``ps`` additionally consult the broker-wide control-plane
-    # probe, so they need the broker URL.
-    server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     if command == "ps":
+        # ``ps`` is the read-only running view; it consults the broker-wide probe.
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
         return asyncio.run(roster.agent_ps(home, server_urls=server_urls))
-    return asyncio.run(roster.agent_start(home, name=name, server_urls=server_urls))
+
+    if command == "stop":
+        if args.all:
+            return asyncio.run(roster.agent_stop_all(home))
+        return asyncio.run(roster.agent_stop(home, name=args.name))
+    if command == "restart":
+        if args.all:
+            return asyncio.run(roster.agent_restart_all(home))
+        return asyncio.run(roster.agent_restart(home, name=args.name))
+
+    # ``start`` (and ``start --all``) additionally consult the broker-wide
+    # control-plane probe, so they need the broker URL. ``start --all`` targets
+    # every DEFINED agent — the ids come from the agents dir here so roster.py
+    # stays off the disk read.
+    server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    if args.all:
+        _, agents_dir = init.resolve_paths(home)
+        return asyncio.run(
+            roster.agent_start_all(home, agent_ids=detect_agents(agents_dir), server_urls=server_urls)
+        )
+    return asyncio.run(roster.agent_start(home, name=args.name, server_urls=server_urls))
 
 
-def _run_agent(args: argparse.Namespace) -> int:
+def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Dispatch a ``calfcord agent <verb>`` command, resolving the install paths once."""
     # Roster verbs drive the supervisor, not the agents *files*, so they short-
     # circuit BEFORE the disk-path resolution the file verbs share — and keep the
-    # *running* view (`ps`) distinct from the *defined* view (`list`).
+    # *running* view (`ps`) distinct from the *defined* view (`list`). They take the
+    # parser too so the exactly-one-of name|--all rule can `parser.error` cleanly.
     if args.agent_command in _ROSTER_COMMANDS:
-        return _run_agent_roster(args.agent_command, getattr(args, "name", None))
+        return _run_agent_roster(parser, args)
 
     home = _resolve_home()
     env_path, agents_dir = init.resolve_paths(home)
@@ -467,6 +557,11 @@ def _run_router(args: argparse.Namespace) -> int:
         return 1
     if args.router_command == "start":
         return asyncio.run(router_config.router_start(home, env_path=env_path))
+    if args.router_command == "restart":
+        # `router restart` is the apply mechanism after `router set` / `router edit`
+        # (the node bakes its config at construction). `--all` is a synonym here —
+        # one router per host — so it routes to the SAME singular handler.
+        return asyncio.run(router_config.router_restart(home))
     return asyncio.run(router_config.router_stop(home))
 
 
@@ -498,6 +593,11 @@ def _run_component(name: str, verb: str) -> int:
     decoupling invariant) and the ``mcp add`` writer's private parser (which pulls
     in the whole add machinery), so a light, clean reuse is not available — per
     design §12.4 the veneer is just ``component_start``.
+
+    ``verb`` is one of ``start|stop|restart``. ``--all`` (behavior #1, decision B)
+    is a forward-compatible SYNONYM here: a singleton runs one process per host, so
+    ``--all`` targets that one instance — the caller has already collapsed it onto
+    the same singular verb, so it is honest, not a separate code path.
     """
     home = _require_home(f"{name} {verb}")
     if home is None:
@@ -505,6 +605,8 @@ def _run_component(name: str, verb: str) -> int:
 
     if verb == "start":
         return asyncio.run(component.component_start(home, name=name))
+    if verb == "restart":
+        return asyncio.run(component.component_restart(home, name=name))
     return asyncio.run(component.component_stop(home, name=name))
 
 
@@ -585,7 +687,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         )
 
     if args.command == "agent":
-        return _run_agent(args)
+        return _run_agent(parser, args)
 
     if args.command == "_healthcheck":
         return _run_healthcheck(args.component)

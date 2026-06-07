@@ -202,10 +202,16 @@ def test_restart_hint_printed_only_when_changed(tmp_path: Path, capsys: pytest.C
     agent_edit.run(noop, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe")
     assert "Restart" not in capsys.readouterr().out
 
-    # Change something → hint printed.
+    # Change something → the EXACT terse next-step block (behavior #3): the
+    # restart sentence (naming the provider-wide caveat), a blank line, the
+    # two-space-indented `agent restart <name>` command.
     changed = FakePrompter(selects=["description", _DONE], texts=["Changed."])
     agent_edit.run(changed, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe")
-    assert "Restart `calfcord calfkit-agent`" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert (
+        "Restart scribe to apply (and any other agents on anthropic if the "
+        "provider/key changed):\n\n  calfcord agent restart scribe"
+    ) in out
     assert parse_agent_md(md).description == "Changed."
 
 

@@ -684,12 +684,34 @@ def test_main_agent_roster_help_exits_zero(verb: str) -> None:
 
 
 @pytest.mark.parametrize("verb", ["start", "stop", "restart"])
-def test_main_agent_roster_requires_name(verb: str) -> None:
-    # The name is positional + required: a bare `agent start` (no name) must
-    # error (exit 2), never silently act on nothing.
+def test_main_agent_roster_requires_name_or_all(verb: str) -> None:
+    # Exactly one of <name> | --all is required: a bare `agent start` (neither)
+    # must error (exit 2), never silently act on nothing. The name is now
+    # optional (nargs="?") so the mutual-exclusion is enforced in the dispatcher
+    # via parser.error (which exits 2), not by argparse's required-positional.
     with pytest.raises(SystemExit) as exc:
         main(["agent", verb])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+def test_main_agent_roster_name_and_all_are_mutually_exclusive(
+    verb: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Passing BOTH a name and --all is contradictory (one targets a single agent,
+    # the other every agent on this host) — parser.error (exit 2), and neither the
+    # singular nor the bulk roster fn runs.
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("no roster fn should run when name and --all collide")
+
+    monkeypatch.setattr(roster, f"agent_{verb}", _boom)
+    monkeypatch.setattr(roster, f"agent_{verb}_all", _boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["agent", verb, "assistant", "--all"])
+    assert exc.value.code == 2
+    assert "mutually exclusive" in capsys.readouterr().err
 
 
 def test_main_agent_start_dispatches_with_resolved_args(
@@ -857,6 +879,106 @@ def test_main_agent_restart_without_home_errors_native_install(
 
     monkeypatch.setattr(roster, "agent_restart", _boom)
     assert main(["agent", "restart", "assistant"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+# --- roster lifecycle: agent start/stop/restart --all (behavior #1) ---------
+#
+# `--all` is the uniform-surface bulk verb (decision B), LOCAL-only (this host's
+# supervisor). `start --all` targets every DEFINED agent (so main must pass the
+# detected .md ids); `stop --all` / `restart --all` target every RUNNING local
+# agent (the bulk fn reads the supervisor itself, so main passes no ids).
+
+
+def test_main_agent_start_all_dispatches_with_defined_agent_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent start --all` resolves home + server_urls and passes the DEFINED agent
+    # ids (the same detect_agents seam `start`/`agent list` use) to agent_start_all.
+    home = tmp_path / "home"
+    agents = home / "agents"
+    agents.mkdir(parents=True)
+    (agents / "assistant.md").write_text("---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n")
+    (agents / "scribe.md").write_text("---\nname: scribe\nmodel: gpt-5-nano\n---\nYou are scribe.\n")
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _start_all(home_arg, *, agent_ids, server_urls, **kwargs):
+        captured.update(home=home_arg, agent_ids=list(agent_ids), server_urls=server_urls)
+        return 0
+
+    def _single_boom(*args, **kwargs):
+        raise AssertionError("--all must dispatch to agent_start_all, not the singular")
+
+    monkeypatch.setattr(roster, "agent_start_all", _start_all)
+    monkeypatch.setattr(roster, "agent_start", _single_boom)
+    assert main(["agent", "start", "--all"]) == 0
+    assert captured["home"] == home
+    assert captured["agent_ids"] == ["assistant", "scribe"]
+    assert captured["server_urls"] == "broker.example:9092"
+
+
+@pytest.mark.parametrize("verb", ["stop", "restart"])
+def test_main_agent_stop_restart_all_dispatch_with_home_only(
+    verb: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent stop --all` / `restart --all` target every RUNNING local agent — the
+    # bulk fn reads the supervisor itself, so main passes only the resolved home
+    # (no ids, no server_urls / broker probe).
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    captured: dict[str, object] = {}
+
+    async def _all(home_arg, **kwargs):
+        captured.update(home=home_arg, kwargs=kwargs)
+        return 0
+
+    def _single_boom(*args, **kwargs):
+        raise AssertionError(f"--all must dispatch to agent_{verb}_all, not the singular")
+
+    monkeypatch.setattr(roster, f"agent_{verb}_all", _all)
+    monkeypatch.setattr(roster, f"agent_{verb}", _single_boom)
+    assert main(["agent", verb, "--all"]) == 0
+    assert captured["home"] == home
+    # No name, no server_urls leak into the bulk-stop/restart call.
+    assert "name" not in captured["kwargs"]
+    assert "server_urls" not in captured["kwargs"]
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+def test_main_agent_all_propagates_exit_code(
+    verb: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _all(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(roster, f"agent_{verb}_all", _all)
+    assert main(["agent", verb, "--all"]) == 1
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+def test_main_agent_all_without_home_errors_native_install(
+    verb: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--all` drives the install-scoped supervisor too, so a dev run with no home
+    # refuses with the same native-install steer rather than running a bulk sweep.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"agent_{verb}_all must not run without a home")
+
+    monkeypatch.setattr(roster, f"agent_{verb}_all", _boom)
+    assert main(["agent", verb, "--all"]) == 1
     assert "native install" in capsys.readouterr().out
 
 
@@ -1335,6 +1457,111 @@ def test_main_component_lifecycle_without_home_errors_native_install(
     monkeypatch.setattr(component, "component_stop", _boom)
     assert main([group, verb]) == 1
     assert "native install" in capsys.readouterr().out
+
+
+# --- tools / mcp / router restart + --all synonym (behavior #1, uniform) ----
+#
+# The four roster verbs are uniform across agent (multi-instance) and the
+# singletons. For a singleton the new `restart` subcommand dispatches through the
+# generic component_restart, and `--all` is a documented SYNONYM that just calls
+# the singular component fn (there is one instance on this host to act on).
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_restart_help_exits_zero(group: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([group, "restart", "--help"])
+    assert exc.value.code == 0
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_restart_dispatches_with_home_and_slot_name(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `<group> restart` drives the generic component_restart with the slot name and
+    # the $CALFCORD_HOME dir (what pc_port_for keys on), no broker probe.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _restart(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(component, "component_restart", _restart)
+    assert main([group, "restart"]) == 0
+    assert captured["home"] == home
+    assert captured["name"] == group
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+def test_main_component_restart_propagates_exit_code(
+    group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _restart(*args, **kwargs):
+        return 2
+
+    monkeypatch.setattr(component, "component_restart", _restart)
+    assert main([group, "restart"]) == 2
+
+
+@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize(
+    "verb,fn",
+    [("start", "component_start"), ("stop", "component_stop"), ("restart", "component_restart")],
+)
+def test_main_component_all_is_synonym_for_singular(
+    group: str, verb: str, fn: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # For a one-process-per-host singleton, `--all` is an honest SYNONYM: it just
+    # calls the SAME singular component fn with the slot name (it targets the one
+    # instance), so `<group> <verb> --all` is indistinguishable from `<group> <verb>`.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _fn(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(component, fn, _fn)
+    assert main([group, verb, "--all"]) == 0
+    assert captured["home"] == home
+    assert captured["name"] == group
+
+
+@pytest.mark.parametrize("verb,fn", [("start", "router_start"), ("stop", "router_stop"), ("restart", "router_restart")])
+def test_main_router_restart_and_all_synonym_dispatch(
+    verb: str, fn: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `router restart` (new) dispatches through router_config.router_restart; and
+    # `router <verb> --all` is the same SYNONYM (one router per host), routing to
+    # the SAME singular fn. start/restart pass env_path; stop/restart do not need it
+    # but the dispatch must at least pass the home and propagate the exit code.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _fn(home_arg, **kwargs):
+        captured.update(home=home_arg)
+        return 0
+
+    monkeypatch.setattr(router_config, fn, _fn)
+    assert main(["router", verb, "--all"]) == 0
+    assert captured["home"] == home
+
+
+def test_main_router_restart_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["router", "restart", "--help"])
+    assert exc.value.code == 0
 
 
 # --- explain: read-only teaching screens (no native-install guard) ----------

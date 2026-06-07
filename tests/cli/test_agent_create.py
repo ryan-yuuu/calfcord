@@ -132,17 +132,19 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
     assert set(agent.tools) == {"read_file", "web_search"}
 
 
-def test_run_prints_created_and_restart_banner(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Success prints the 'Created agent' line naming the restart commands + slash."""
+def test_run_prints_created_and_next_step(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Success names the agent, then gives the EXACT terse next-step block
+    (behavior #3): a colon sentence, a blank line, the indented command — steering
+    a brand-new agent into the live org via the roster verb (NOT the old
+    runner-restart banner)."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe")
     assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
 
     out = capsys.readouterr().out
     assert "Created agent 'scribe'." in out
-    assert "calfcord calfkit-agent" in out
-    assert "calfcord calfkit-bridge" in out
-    assert "/scribe" in out
+    # The exact next-step shape: sentence:, blank line, two-space-indented command.
+    assert "Bring scribe online:\n\n  calfcord agent start scribe" in out
 
 
 def test_run_passes_name_default_through(tmp_path: Path) -> None:

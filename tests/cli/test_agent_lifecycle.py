@@ -101,6 +101,57 @@ def test_set_writes_multiple_simple_fields(tmp_path: Path) -> None:
     assert reparsed.thinking_effort == "high"
 
 
+def test_set_success_prints_next_step_block(tmp_path: Path, capsys) -> None:
+    """A successful ``set`` names the fields it wrote, then the EXACT terse
+    next-step block (behavior #3): the restart sentence (naming the resolved
+    provider in the provider-wide caveat), a blank line, the indented
+    `agent restart <name>` command — the roster verb, not the old runner banner."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe")  # seed provider is anthropic
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"description": "New desc."}) == 0
+    out = capsys.readouterr().out
+    assert "Updated scribe (description)." in out
+    assert (
+        "Restart scribe to apply (and any other agents on anthropic if the "
+        "provider/key changed):\n\n  calfcord agent restart scribe"
+    ) in out
+
+
+def test_set_success_survives_unparsable_md_on_provider_reread(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A success line was already printed, so a failing post-write provider re-read
+    must NOT escape: ``run_set`` still reports success + the restart hint, just
+    without the provider parenthetical.
+
+    The next-step caveat re-reads the ``.md`` off disk to name the agent's CURRENT
+    provider. If that re-read raises (a now-unparsable file — e.g. an external edit
+    racing the write), the only ``try/except`` is in the per-field loop, so the
+    error would escape AFTER ``run_set`` already printed ``Updated …`` — leaving the
+    operator with a traceback on an otherwise-successful command. The re-read must
+    be guarded.
+    """
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe")
+
+    # The per-field write uses md_writer (not parse_agent_md), so the edit lands
+    # cleanly; only the final next-step re-read is forced to fail, simulating a
+    # ``.md`` that became unparsable between the write and the re-read.
+    def _boom_reread(path):
+        raise ValueError(f"{path}: malformed YAML frontmatter")
+
+    monkeypatch.setattr(agent_lifecycle, "parse_agent_md", _boom_reread)
+
+    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"description": "New desc."})
+
+    assert rc == 0  # the command still succeeded; no traceback escaped
+    out = capsys.readouterr().out
+    assert "Updated scribe (description)." in out
+    # The restart hint still appears (so the operator knows to apply the change),
+    # naming the agent and the roster `restart` verb.
+    assert "calfcord agent restart scribe" in out
+
+
 def test_set_tools_writes_exactly_those(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe", tools_line=None)
