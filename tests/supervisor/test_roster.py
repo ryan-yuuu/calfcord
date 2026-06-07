@@ -567,8 +567,11 @@ async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys)
     ``calfcord start``'s ``build_compose_project`` rejects them). So if a reserved
     name leaks into ``agent_ids`` the sweep must drop it rather than ``start`` /
     ``restart`` the live singleton — the "--all never touches another component
-    type" invariant. Here ``tools`` is Running locally, so an unfiltered sweep
-    would (mis)restart it; the guard must keep it out of BOTH start and restart.
+    type" invariant. Note the leak would be a mis-START, not a mis-restart: even
+    with ``tools`` Running locally, the restart branch keys off
+    ``_running_agent_names``, which already filters reserved names out of the
+    locally-Running set — so an unfiltered sweep would fall through to
+    ``start_process('tools')``. The assertions below pin BOTH paths regardless.
     """
     client = _StubClient(
         list_processes_result=[{"name": "tools", "status": "Running"}]
