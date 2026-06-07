@@ -144,17 +144,19 @@ Which restart depends on which process reads the value you changed:
 | The router's provider/model (`CALFKIT_ROUTER_*`, `router set`/`edit`) | `calfcord router restart` |
 | Anything the tools host reads | `calfcord tools restart` |
 | Anything the MCP host reads | `calfcord mcp restart` |
-| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then restart the running roster: `calfcord agent restart --all` plus `calfcord tools restart` / `router restart` / `mcp restart` for any of those you run |
+| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then bring the roster back up on the new value: `calfcord agent start --all` plus `calfcord tools start` / `router start` / `mcp start` for any of those you run |
 
-> **Boot-time gotcha for workspace-wide values.** `calfcord start` brings up the
-> **substrate only** (broker + bridge) — it does *not* restart the roster. So
-> after changing a value the *roster* reads (like `CALF_HOST_URL`, which every
-> agent, tool, router, and MCP host dials), `calfcord stop && calfcord start`
-> reloads the substrate but leaves the roster running on the *old* value. Follow
-> it with `calfcord agent restart --all` **and** `calfcord tools restart` /
-> `router restart` / `mcp restart` for whichever roster members you run, to roll
-> the whole roster onto the new value. All of these are local — they act on this
-> host's running processes.
+> **Boot-time gotcha for workspace-wide values.** `calfcord stop` tears the
+> **whole** workspace down (broker + bridge **and** every agent and singleton),
+> and `calfcord start` brings up the **substrate only** (broker + bridge) — it
+> does *not* bring the roster back. So after changing a value the *roster* reads
+> (like `CALF_HOST_URL`, which every agent, tool, router, and MCP host dials),
+> `calfcord stop && calfcord start` leaves you with the substrate up but **no
+> agents running**. Re-start the roster on the new value with `calfcord agent
+> start --all` (which targets every *defined* agent — `agent restart --all` would
+> be a no-op here, because nothing is running to restart) **and** `calfcord tools
+> start` / `router start` / `mcp start` for whichever singletons you run. All of
+> these are local — they act on this host's processes.
 
 ## See also
 

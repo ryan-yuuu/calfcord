@@ -36,15 +36,24 @@ class _StubClient:
     ``running`` is the set of process names Process Compose reports in the
     ``Running`` state — it backs ``list_processes`` so a test can place the
     component in (or out of) the local Running set that ``component_start`` reads
-    to decide start-vs-restart. Every lifecycle call records its name so a test
-    can assert it was (or was NOT) issued.
+    to decide start-vs-restart. ``dormant`` maps each present-but-NOT-Running slot
+    name to its PC status string (the real v1.110.0 values: ``"Completed"`` for an
+    operator-stopped slot, ``"Disabled"`` for a never-started one — never
+    ``"Stopped"``), so a test can exercise the ``status == Running`` check with a
+    name PRESENT but not Running (distinct from the name-ABSENT path). Every
+    lifecycle call records its name so a test can assert it was (or was NOT) issued.
     """
 
     def __init__(
-        self, *, workspace_up: bool = True, running: set[str] | None = None
+        self,
+        *,
+        workspace_up: bool = True,
+        running: set[str] | None = None,
+        dormant: dict[str, str] | None = None,
     ) -> None:
         self._workspace_up = workspace_up
         self._running = running or set()
+        self._dormant = dormant or {}
         self.start_calls: list[str] = []
         self.stop_calls: list[str] = []
         self.restart_calls: list[str] = []
@@ -57,8 +66,15 @@ class _StubClient:
     async def list_processes(self):
         # Mirror Process Compose's ``GET /processes`` shape just enough for the
         # Running filter: a list of {name, status} dicts. Running names come from
-        # ``running``; nothing else is reported.
-        return [{"name": name, "status": "Running"} for name in sorted(self._running)]
+        # ``running``; ``dormant`` adds slots that ARE present but report a
+        # non-Running status, so ``_is_running_locally``'s ``status == Running``
+        # check is exercised on a present name (not only the name-absent path).
+        rows = [{"name": name, "status": "Running"} for name in sorted(self._running)]
+        rows += [
+            {"name": name, "status": status}
+            for name, status in sorted(self._dormant.items())
+        ]
+        return rows
 
     async def start_process(self, name: str):
         self.start_calls.append(name)
@@ -117,6 +133,28 @@ async def test_component_start_when_already_running_restarts(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "router" in out
     assert "restarted" in out
+
+
+async def test_component_start_when_present_but_not_running_starts(tmp_path, capsys):
+    """Workspace up, slot PRESENT but NOT Running → POST start, online, exit 0.
+
+    Distinct from the name-ABSENT case: here the declared slot IS in the process
+    list but reports a non-Running PC status (``"Completed"`` — an operator-stopped
+    singleton). ``_is_running_locally`` must read the STATUS (not mere presence),
+    so a ``start`` is a genuine clock-in (``POST start`` + ``online``), NOT a
+    restart. This pins the ``status == Running`` check against a ``return True``
+    mutant that the name-absent test cannot catch.
+    """
+    client = _StubClient(dormant={"router": "Completed"})
+
+    rc = await component.component_start(_home(tmp_path), name="router", client=client)
+
+    assert rc == 0
+    assert client.start_calls == ["router"]  # not Running → a real start
+    assert client.restart_calls == []  # NOT mistaken for a running slot
+    out = capsys.readouterr().out
+    assert "router" in out
+    assert "online" in out
 
 
 async def test_component_start_workspace_down(tmp_path, capsys):

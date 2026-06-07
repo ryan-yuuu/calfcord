@@ -554,6 +554,94 @@ async def test_agent_start_all_mixes_running_stopped_and_remote(tmp_path, capsys
     assert "restarted" in out  # local_up
     assert "online" in out  # stopped
     assert "already running in the organization" in out  # remote
+    # The closing summary pins the count math + wording for an all-success sweep.
+    assert "start --all: 3 agent(s) processed, 0 failed." in out
+
+
+async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys):
+    """`start --all` must NEVER touch a reserved (substrate/singleton) process.
+
+    The caller (main.py) passes the RAW ``.md`` stems from ``detect_agents``,
+    unfiltered — and a creatable ``tools.md`` / ``router.md`` / ``mcp.md`` /
+    ``broker.md`` / ``bridge.md`` is not rejected by the id pattern (only
+    ``calfcord start``'s ``build_compose_project`` rejects them). So if a reserved
+    name leaks into ``agent_ids`` the sweep must drop it rather than ``start`` /
+    ``restart`` the live singleton — the "--all never touches another component
+    type" invariant. Here ``tools`` is Running locally, so an unfiltered sweep
+    would (mis)restart it; the guard must keep it out of BOTH start and restart.
+    """
+    client = _StubClient(
+        list_processes_result=[{"name": "tools", "status": "Running"}]
+    )
+    probe = _StubProbe([])  # nobody live → a leaked agent id would reach start
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["assistant", "tools"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    # The reserved singleton is neither started nor restarted by `start --all`.
+    assert "tools" not in client.start_calls
+    assert "tools" not in client.restart_calls
+    # The real agent is still swept normally.
+    assert client.start_calls == ["assistant"]
+
+
+async def test_agent_start_all_all_reserved_is_clean_no_op(tmp_path, capsys):
+    """An ``agent_ids`` of only reserved names drops to the empty no-op, not a sweep.
+
+    After the reserved filter the defined set is empty, so it must take the same
+    clean ``no agents defined`` / exit-0 path as a genuinely empty set — never
+    fall through to start a singleton.
+    """
+    client = _StubClient()
+    probe = _StubProbe([])
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["tools", "router", "mcp", "broker", "bridge"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    assert client.start_calls == []
+    assert client.restart_calls == []
+    out = capsys.readouterr().out
+    assert "no agents defined" in out
+
+
+async def test_agent_start_single_op_refuses_reserved_name(tmp_path, capsys):
+    """A single ``agent start tools`` is refused at the chokepoint: error + exit 1.
+
+    Reserved names (substrate + the tools/router/mcp singletons) are owned by
+    ``calfcord start`` and their own component verbs, never the agent roster. The
+    single-op guard at the top of ``agent_start`` closes the ``agent start tools``
+    exposure before any workspace check / probe / start runs.
+    """
+    client = _StubClient()
+    probe = _StubProbe([])
+
+    rc = await roster.agent_start(
+        _home(tmp_path),
+        name="tools",
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 1
+    assert client.start_calls == []
+    assert client.restart_calls == []
+    assert probe.calls == []  # refused before any world-touching work
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "tools" in out
 
 
 async def test_agent_start_all_empty_defined_set(tmp_path, capsys):
@@ -598,6 +686,105 @@ async def test_agent_start_all_continues_past_a_hard_failure_returns_1(tmp_path,
     # The sweep continued past the failure: every id was attempted, including the
     # one AFTER the failing one.
     assert client.start_calls == ["good", "bad", "later"]
+    # The summary pins the count math (3 processed, exactly 1 failed) + wording.
+    assert "start --all: 3 agent(s) processed, 1 failed." in capsys.readouterr().out
+
+
+async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(
+    tmp_path, capsys
+):
+    """A NON-raising per-id failure (agent_start returns 1) still fails the sweep.
+
+    ``agent_start_all`` has two failure paths: ``except Exception`` (a raised 5xx)
+    and ``if rc != 0`` (a NON-raising failure — agent_start's 4xx not-declared case
+    *returns* 1 without raising). This pins the second: a brand-new ``newbie``
+    triggers agent_start's 4xx reload steer (return 1, no raise), and the sweep
+    must (a) count it as a failure → return 1, (b) keep going to the later id, and
+    (c) print the reload steer for it.
+    """
+    client = _StubClient(
+        # empty list_processes → nothing Running locally → no restart branch; the
+        # per-id starts reach start_process, where `newbie` raises a 4xx that
+        # agent_start translates to a RETURN 1 (not a re-raise).
+        list_processes_result=[],
+        fail_start={"newbie": ProcessComposeError("HTTP 404", status_code=404)},
+    )
+    probe = _StubProbe([])  # nobody live → each id reaches start_process
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["newbie", "later"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 1  # the non-raising rc!=0 still fails the sweep
+    # The sweep continued past the non-raising failure to the later id.
+    assert client.start_calls == ["newbie", "later"]
+    out = capsys.readouterr().out
+    # agent_start's 4xx steer fired for newbie (the reload guidance).
+    assert "calfcord stop" in out
+    assert "calfcord start" in out
+
+
+async def test_agent_start_all_probes_org_once_and_threads_live(tmp_path, capsys):
+    """`start --all` probes the broker-wide roster ONCE, not once per id (FIX 5).
+
+    The §3.5 duplicate guard reads the same org-wide roster for every id, so the
+    sweep resolves it up front and threads it into each per-id start; a per-id
+    re-probe would be N round-trips for one operator action. With a `remote`
+    agent answering elsewhere, the single probe still feeds the refusal for it
+    while the local `stopped` starts — all off ONE probe call.
+    """
+    client = _StubClient(list_processes_result=[])
+    probe = _StubProbe([_defn("remote")])  # answering on another host
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["stopped", "remote"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    # Exactly ONE org probe for the whole sweep, not one per id.
+    assert probe.calls == [_SERVERS]
+    assert client.start_calls == ["stopped"]  # the free one started
+    out = capsys.readouterr().out
+    assert "already running in the organization" in out  # remote refused off the shared probe
+
+
+async def test_agent_start_all_broker_down_warns_once_not_per_id(tmp_path, capsys):
+    """A broker-down probe during `start --all` warns ONCE, not N times (FIX 5).
+
+    Previously each per-id ``agent_start`` independently caught the probe failure
+    and printed "could not verify org-wide duplicates ...; proceeding." — N
+    warnings for one operator action, with the guard silently skipped fleet-wide
+    and no aggregate signal. The sweep must probe once up front, emit a SINGLE
+    aggregate warning, then proceed with an empty live roster (so the local starts
+    still happen).
+    """
+    client = _StubClient(list_processes_result=[])
+    probe = _RaisingProbe()  # broker unreachable
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["a", "b", "c"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    # The up-front probe was attempted exactly once (not re-probed per id).
+    assert probe.calls == [_SERVERS]
+    # Each id still started despite the unverifiable guard.
+    assert client.start_calls == ["a", "b", "c"]
+    out = capsys.readouterr().out.lower()
+    # Exactly ONE aggregate broker-down warning for the whole sweep.
+    assert out.count("could not verify") == 1
 
 
 async def test_agent_start_all_workspace_down(tmp_path, capsys):
@@ -638,7 +825,9 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
             {"name": "mcp", "status": "Running"},  # singleton — never
             {"name": "assistant", "status": "Running"},  # agent → stop
             {"name": "scheduler", "status": "Running"},  # agent → stop
-            {"name": "dormant", "status": "Stopped"},  # not Running → skip
+            # PC v1.110.0 reports an operator-stopped slot as "Completed" (never
+            # "Stopped"); not Running → skip.
+            {"name": "dormant", "status": "Completed"},
         ]
     )
 
@@ -648,6 +837,8 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
     assert sorted(client.stop_calls) == ["assistant", "scheduler"]
     for never in ("broker", "tools", "router", "mcp", "dormant"):
         assert never not in client.stop_calls
+    # The summary pins the count math (2 targets, 0 failed) + wording.
+    assert "stop --all: 2 agent(s) processed, 0 failed." in capsys.readouterr().out
 
 
 async def test_agent_stop_all_empty_running_set(tmp_path, capsys):
@@ -677,6 +868,8 @@ async def test_agent_stop_all_continues_past_a_failure_returns_1(tmp_path, capsy
 
     assert rc == 1
     assert sorted(client.stop_calls) == ["a", "b", "c"]  # every one attempted
+    # The summary pins the count math (3 targets, exactly 1 failed) + wording.
+    assert "stop --all: 3 agent(s) processed, 1 failed." in capsys.readouterr().out
 
 
 async def test_agent_stop_all_workspace_down(tmp_path, capsys):
@@ -700,7 +893,9 @@ async def test_agent_restart_all_targets_only_running_local_agents(tmp_path, cap
         list_processes_result=[
             {"name": "bridge", "status": "Running"},  # substrate — never
             {"name": "assistant", "status": "Running"},  # agent → restart
-            {"name": "dormant", "status": "Stopped"},  # not Running → skip
+            # PC v1.110.0 reports a never-started declared slot as "Disabled"
+            # (never "Stopped"); not Running → skip.
+            {"name": "dormant", "status": "Disabled"},
         ]
     )
 
@@ -710,6 +905,8 @@ async def test_agent_restart_all_targets_only_running_local_agents(tmp_path, cap
     assert client.restart_calls == ["assistant"]
     assert "bridge" not in client.restart_calls
     assert "dormant" not in client.restart_calls
+    # The summary pins the count math (1 target, 0 failed) + wording.
+    assert "restart --all: 1 agent(s) processed, 0 failed." in capsys.readouterr().out
 
 
 async def test_agent_restart_all_empty_running_set(tmp_path, capsys):
@@ -738,6 +935,8 @@ async def test_agent_restart_all_continues_past_a_failure_returns_1(tmp_path, ca
 
     assert rc == 1
     assert sorted(client.restart_calls) == ["a", "b"]  # every one attempted
+    # The summary pins the count math (2 targets, exactly 1 failed) + wording.
+    assert "restart --all: 2 agent(s) processed, 1 failed." in capsys.readouterr().out
 
 
 async def test_agent_restart_all_workspace_down(tmp_path, capsys):
@@ -797,7 +996,9 @@ async def test_agent_ps_union_three_cases(tmp_path, capsys):
             _pc_proc("bridge", "Running"),  # substrate — excluded
             _pc_proc("assistant", "Running"),  # physical + logical
             _pc_proc("ghost", "Running"),  # physical only
-            _pc_proc("stopped", "Stopped"),  # not Running → not physically up
+            # PC v1.110.0 reports a dormant slot as "Completed"/"Disabled", never
+            # "Stopped"; not Running → not physically up.
+            _pc_proc("dormant", "Completed"),
         ]
     )
     probe = _StubProbe([_defn("assistant"), _defn("remote")])
@@ -827,7 +1028,7 @@ async def test_agent_ps_union_three_cases(tmp_path, capsys):
         assert not stripped.startswith("bridge")
     # A non-Running declared process is not "physically up", so it is not shown
     # as running here (it is neither logical nor physically-up).
-    assert "stopped" not in out
+    assert "dormant" not in out
 
 
 async def test_agent_ps_empty(tmp_path, capsys):

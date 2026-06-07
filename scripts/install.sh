@@ -503,7 +503,7 @@ case "${1:-}" in
   # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
   # they don't fall through to the `uv run` passthrough (which would try to exec
   # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
-  # verb group (the singleton tools-host lifecycle: `tools start|stop`); `mcp` is
+  # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`); `mcp` is
   # SPLIT below (lifecycle -> calfcord-cli, add/codegen -> their own scripts), so
   # it is NOT matched here. The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args

@@ -124,11 +124,21 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
     # every agent sharing that provider, so a same-provider fleet may need
     # restarting too. We re-read the resolved provider off disk so the caveat names
     # the agent's CURRENT provider (post-`set`), whether or not it was just changed.
-    provider = parse_agent_md(md_path).provider
-    print(
-        f"Restart {name} to apply (and any other agents on {provider} if the "
-        f"provider/key changed):\n\n  calfcord agent restart {name}"
-    )
+    #
+    # The re-read is GUARDED: the success line above already printed, so a re-read
+    # that raises (a now-unparsable `.md` — e.g. an external edit racing this write)
+    # must not escape as a traceback on an otherwise-successful command. On failure,
+    # drop the provider parenthetical (we can't name the provider) but still steer
+    # the operator to restart, which is the load-bearing half of the hint.
+    try:
+        provider = parse_agent_md(md_path).provider
+    except (ValueError, OSError):
+        print(f"Restart {name} to apply:\n\n  calfcord agent restart {name}")
+    else:
+        print(
+            f"Restart {name} to apply (and any other agents on {provider} if the "
+            f"provider/key changed):\n\n  calfcord agent restart {name}"
+        )
     return 0
 
 

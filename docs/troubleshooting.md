@@ -219,17 +219,22 @@ calfcord tools restart            # something the tools host reads changed
 calfcord mcp restart              # something the MCP host reads changed
 ```
 
-For a **workspace-wide value the substrate reads** (e.g. `CALF_HOST_URL`),
-restart the substrate *and* roll the roster:
+For a **workspace-wide value the whole roster reads** (e.g. `CALF_HOST_URL`),
+recycle the substrate *and* bring the roster back up on the new value:
 
 ```bash
-calfcord stop && calfcord start   # reloads the substrate (broker + bridge) ONLY
-calfcord agent restart --all      # ...then roll the running agents onto the new value
+calfcord stop && calfcord start   # stop tears EVERYTHING down; start brings up the substrate (broker + bridge) ONLY
+calfcord agent start --all        # ...then bring every defined agent back up on the new value
 ```
 
-> `calfcord start` brings up the **substrate only** — it does not restart the
-> roster — so `stop && start` alone leaves your agents on the old value. That's
-> the boot-time gotcha to watch for. The full change → command mapping lives in
+> `calfcord stop` tears the **whole** workspace down (broker + bridge **and**
+> every agent and singleton), and `calfcord start` brings up the **substrate
+> only** — it does not bring the roster back. So `stop && start` leaves you with
+> the substrate up but **no agents running**: use `agent start --all` (every
+> *defined* agent), not `agent restart --all` (which would be a no-op, since
+> nothing is running to restart). Add `calfcord tools start` / `router start` /
+> `mcp start` for whichever singletons you run. That's the boot-time gotcha to
+> watch for. The full change → command mapping lives in
 > [configuration.md](./configuration.md#applying-changes).
 
 ### Nothing survives a reboot

@@ -111,6 +111,7 @@ async def agent_start(
     server_urls: str,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
+    live: list[AgentDefinition] | None = None,
     now: Clock | None = None,
 ) -> int:
     """Bring agent ``name`` online: a teammate clocking into the live org (§3.5).
@@ -144,9 +145,29 @@ async def agent_start(
        convention it is re-raised loudly with caller/target/correlation rather than
        mistranslated into the benign reload hint that would mask it.
 
-    ``client`` / ``probe`` are injected for testing; ``now`` is accepted for
-    symmetry with the rest of the lifecycle surface and is unused today.
+    ``client`` / ``probe`` are injected for testing. ``live`` is the
+    pre-resolved broker-wide roster: when given (the ``start --all`` sweep probes
+    once and threads it in), the duplicate guard reads it directly and does NOT
+    re-probe — so N agents cost ONE probe and ONE aggregate broker-down warning,
+    not N. When ``None`` (the standalone single-start), this probes itself, exactly
+    as before. ``now`` is accepted for symmetry with the rest of the lifecycle
+    surface and is unused today.
     """
+    # Reserved-name chokepoint: the substrate (broker/bridge) and the singleton
+    # components (tools/router/mcp) are owned by `calfcord start` and their own
+    # component verbs — never the agent roster. The id pattern does NOT reject a
+    # creatable `tools.md` (only `calfcord start`'s build_compose_project does), so
+    # an `agent start tools` would otherwise drive `start_process('tools')` against
+    # the live singleton. Refuse here, before any workspace check / probe / start,
+    # so this single seam closes the exposure for both `agent start <reserved>` and
+    # (via the upstream filter in agent_start_all) `start --all`.
+    if name in _NON_AGENT_PROCESSES:
+        print(
+            f"error: {name!r} is a reserved component, not an agent; "
+            f"manage it with `calfcord {name} start` (or `calfcord start`)."
+        )
+        return 1
+
     home = os.fspath(home)
     client = _resolve_client(client, home)
 
@@ -167,16 +188,25 @@ async def agent_start(
     # host is caught here, CLI-side, with no bridge change. Refusing to start a
     # second instance is the whole point — two same-id agents double-reply /
     # split-brain. (A same-host duplicate was already handled as a restart above.)
-    probe = _resolve_probe(probe)
-    try:
-        live = await probe(server_urls)
-    except Exception:
-        # The duplicate guard is best-effort (§3.5 already concedes a TOCTOU
-        # window): if the broker is unreachable we cannot verify org-wide
-        # duplicates, so warn and proceed with the local start rather than blocking
-        # it — a same-host duplicate is impossible (one declared process per name).
-        print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
-        live = []
+    # When the bulk sweep pre-resolved the roster (``live`` given), reuse it — it
+    # already probed once and emitted any single aggregate broker-down warning, so
+    # we must NOT re-probe (that would be N round-trips / N warnings for one
+    # operator action). A standalone single-start (``live is None``) probes itself.
+    if live is None:
+        probe = _resolve_probe(probe)
+        try:
+            live = await probe(server_urls)
+        except Exception:
+            # The duplicate guard is best-effort (§3.5 already concedes a TOCTOU
+            # window): if the broker is unreachable we cannot verify org-wide
+            # duplicates, so warn and proceed with the local start rather than
+            # blocking it — a same-host duplicate is impossible (one declared
+            # process per name).
+            print(
+                "warning: could not verify org-wide duplicates "
+                "(broker unreachable); proceeding."
+            )
+            live = []
     if any(defn.agent_id == name for defn in live):
         print(f"agent {name} is already running in the organization")
         return 0
@@ -284,10 +314,28 @@ async def agent_start_all(
     reload-needed or a raised 5xx/transport error), else ``0``; the restart and
     duplicate-refuse outcomes are successes, not failures.
 
-    ``client`` / ``probe`` are injected for testing; the resolved client is reused
-    across every id so the sweep opens one REST seam, not one per agent. ``now`` is
-    accepted for symmetry with the rest of the lifecycle surface and is unused.
+    The §3.5 duplicate guard reads the same broker-wide roster for EVERY id, so it
+    is probed ONCE up front and threaded into each per-id ``agent_start`` (via its
+    ``live`` param). A broker-down probe therefore yields ONE aggregate warning for
+    the operator's single action — not one per id — and the count is reflected in
+    the closing summary; the sweep then proceeds with an empty roster (the guard is
+    best-effort, §3.5).
+
+    ``client`` / ``probe`` are injected for testing; only the resolved client
+    object/port is shared across the sweep — each id still issues its own
+    workspace + roster reads through ``agent_start``. ``now`` is accepted for
+    symmetry with the rest of the lifecycle surface and is unused.
     """
+    # Drop reserved names BEFORE the empty-check: main.py passes the raw `.md`
+    # stems from detect_agents, and a creatable `tools.md` / `router.md` / `mcp.md`
+    # / `broker.md` / `bridge.md` is not rejected by the id pattern. Without this
+    # filter the sweep would fall through to `start_process('tools')` against the
+    # live singleton — breaking the "--all never touches another component type"
+    # invariant. (agent_start's own guard would also refuse each one, but filtering
+    # here keeps them out of the per-id sweep AND the summary count entirely.) An
+    # all-reserved input collapses to the empty set → the clean no-op below.
+    agent_ids = [n for n in agent_ids if n not in _NON_AGENT_PROCESSES]
+
     home = os.fspath(home)
     client = _resolve_client(client, home)
 
@@ -299,15 +347,37 @@ async def agent_start_all(
         print("no agents defined")
         return 0
 
-    # Resolve the probe once so the per-id starts share it (and a stub's call log
-    # reflects the real number of org probes, one per non-local id).
+    # Probe the broker-wide roster ONCE for the whole sweep: the §3.5 guard reads
+    # the same org-wide view for every id, so a per-id re-probe would be N
+    # round-trips (and N broker-down warnings) for one operator action. The
+    # resolved roster is threaded into each per-id ``agent_start`` via ``live``, so
+    # none of them re-probe.
     probe = _resolve_probe(probe)
+    try:
+        live: list[AgentDefinition] = await probe(server_urls)
+        probe_unavailable = False
+    except Exception:
+        # One aggregate broker-down warning for the whole action (not one per id),
+        # then proceed with an empty roster — the guard is best-effort (§3.5) and a
+        # same-host duplicate is impossible. The summary reflects that the org-wide
+        # check was skipped fleet-wide so the operator gets a single signal.
+        print(
+            "warning: could not verify org-wide duplicates "
+            "(broker unreachable); proceeding for all agents."
+        )
+        live = []
+        probe_unavailable = True
 
     failures = 0
     for name in agent_ids:
         try:
             rc = await agent_start(
-                home, name=name, server_urls=server_urls, client=client, probe=probe
+                home,
+                name=name,
+                server_urls=server_urls,
+                client=client,
+                probe=probe,
+                live=live,
             )
         except Exception as exc:
             # Best-effort: a raised fault on one id (e.g. a 5xx that agent_start
@@ -319,7 +389,12 @@ async def agent_start_all(
         if rc != 0:
             failures += 1
 
-    print(f"start --all: {len(agent_ids)} agent(s) processed, {failures} failed.")
+    summary = f"start --all: {len(agent_ids)} agent(s) processed, {failures} failed."
+    if probe_unavailable:
+        # Surface the skipped fleet-wide guard in the closing summary so the single
+        # aggregate signal carries through to the operator's last line of output.
+        summary += " (org-wide duplicate check skipped: broker unreachable)"
+    print(summary)
     return 1 if failures else 0
 
 
