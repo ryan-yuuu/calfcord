@@ -158,7 +158,8 @@ async def provision_extra_topics(server_urls: str | Iterable[str], topics: Itera
         raise RuntimeError(
             f"topic provisioning unauthorized for {sorted(report.unauthorized)} on "
             f"broker {server_urls}: the broker denies CREATE (ACLs). Pre-create these "
-            f"out-of-band; a consumer/publisher would otherwise stall on the missing topic."
+            f"out-of-band; a consumer/publisher would otherwise stall on the missing "
+            f"topic. (created={sorted(report.created)}, existing={sorted(report.existing)})"
         )
 
 

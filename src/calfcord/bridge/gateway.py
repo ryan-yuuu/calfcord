@@ -1034,14 +1034,17 @@ def main() -> None:
                         # worker never started, so this is safe on a failed boot.
                         #
                         # ``typing_notifier.aclose()`` runs AFTER the drain: a
-                        # steps-consumer hop draining here can still fire typing, so
-                        # the notifier must outlive the drain (``aclose`` cancels
-                        # in-flight tasks — closing it before the drain would fire a
-                        # draining hop into a cancelled notifier). The inner
-                        # ``try/finally`` keeps the close unconditional even if the
-                        # drain raises. All bracketed INSIDE the persona / connection
-                        # / transcript ``async with`` contexts, so the notifier's
-                        # underlying client is still open when it closes.
+                        # steps-consumer hop draining here can still ``fire()`` typing.
+                        # ``aclose`` cancels + awaits only the typing tasks live at
+                        # that instant; it does NOT disable the notifier (``fire`` has
+                        # no closed guard). So if it ran BEFORE the drain, a hop firing
+                        # during the drain would spawn a fresh typing task ``aclose``
+                        # can no longer track or cancel — left dangling at loop
+                        # shutdown. Running it after the drain means every fired task
+                        # is accounted for. The inner ``try/finally`` keeps the close
+                        # unconditional even if the drain raises. All bracketed INSIDE
+                        # the persona / connection / transcript ``async with``
+                        # contexts, so the notifier's underlying client is still open.
                         try:
                             await worker.stop()
                         finally:

@@ -337,9 +337,10 @@ class TestEmbeddedBootOrdering:
         # Ordered shutdown: stop the Discord ingress (gateway.close), drain the
         # broker (worker.stop — so in-flight discord.outbox replies post before
         # disconnect), THEN close the typing notifier. A steps-consumer hop
-        # draining at shutdown can still fire typing, so the notifier must OUTLIVE
-        # the drain (aclose cancels in-flight tasks — closing it before the drain
-        # would fire a draining hop into a cancelled notifier).
+        # draining at shutdown can still fire typing, and aclose only cancels the
+        # tasks live at that instant (fire has no closed guard) — so closing it
+        # before the drain would leave a drain-fired typing task dangling at loop
+        # shutdown. Closing after the drain accounts for every fired task.
         assert order.events.index("gateway.close") < order.events.index("worker.stop"), (
             f"worker.stop (broker drain) must run after gateway.close so in-flight "
             f"replies drain before the broker disconnects; got {order.events}"
@@ -375,3 +376,32 @@ class TestEmbeddedBootOrdering:
         assert "gateway.close" in order.events
         assert "worker.stop" in order.events
         assert "typing.aclose" in order.events
+
+    async def test_typing_notifier_closes_even_when_broker_drain_raises(self, _patched_run, monkeypatch) -> None:
+        from calfcord.bridge import gateway as gw
+
+        order, handles = _patched_run
+
+        # The drain (worker.stop) raises. The guarded ``try: worker.stop() finally:
+        # typing_notifier.aclose()`` must STILL close the notifier (no leaked typing
+        # tasks on a flaky drain), and the drain error must propagate (a failed drain
+        # is a real fault, not swallowed). Gateway returns cleanly so the foreground
+        # race ends on its own — no signal/cancellation needed to reach teardown.
+        async def _clean_start() -> None:
+            order.record("gateway.start")
+
+        async def _failing_stop() -> None:
+            order.record("worker.stop")
+            raise RuntimeError("drain failed")
+
+        monkeypatch.setattr(handles.gateway, "start", _clean_start)
+        monkeypatch.setattr(handles.worker, "stop", _failing_stop)
+        monkeypatch.setattr(gw, "DiscordSettings", lambda *a, **k: _run_settings())
+        monkeypatch.setenv("CALF_HOST_URL", "localhost")
+
+        coro = _extract_run_coro(gw)
+        with pytest.raises(RuntimeError, match="drain failed"):
+            await coro
+
+        assert "typing.aclose" in order.events, "aclose must run even when the drain raises"
+        assert order.events.index("worker.stop") < order.events.index("typing.aclose")
