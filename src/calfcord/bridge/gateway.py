@@ -995,10 +995,22 @@ def main() -> None:
                             )
                         )
                         try:
-                            await asyncio.wait(
+                            done, _ = await asyncio.wait(
                                 {gateway_task, stop_task},
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                            # A FATAL gateway crash (not a shutdown signal) must
+                            # surface as a non-zero exit so the supervisor restarts
+                            # us — ``asyncio.wait`` does NOT propagate a task's
+                            # exception, so without this the bridge would exit 0, a
+                            # crash masquerading as a clean stop. On the signal path
+                            # stop_task wins the race and gateway_task is still
+                            # running (not in ``done``), so it is cancelled in the
+                            # finally instead.
+                            if gateway_task in done and not gateway_task.cancelled():
+                                exc = gateway_task.exception()
+                                if exc is not None:
+                                    raise exc
                         finally:
                             for t in (gateway_task, stop_task, refresher_task):
                                 if not t.done():
@@ -1009,20 +1021,34 @@ def main() -> None:
                             # CancelledError and returns cleanly, so this await
                             # does NOT re-raise.
                             await refresher_task
-                            await typing_notifier.aclose()
                             await gateway.close()
                     finally:
-                        # Drain the broker LAST — after the gateway is closed and
-                        # the foreground tasks are cancelled — so any in-flight
-                        # agent reply on ``discord.outbox`` is posted before the
-                        # broker disconnects. ``stop()`` runs the worker's
-                        # on_shutdown → broker.stop (drain) → after_shutdown and
-                        # is a no-op if the worker never started, so this is safe
-                        # even on a failed boot. It is bracketed INSIDE the
-                        # persona-sender / connection / transcript ``async with``
-                        # contexts so the broker drains before the connection
-                        # disconnects.
-                        await worker.stop()
+                        # Ordered shutdown: the gateway ingress is already closed
+                        # (inner finally above); drain the broker, THEN close the
+                        # typing notifier.
+                        #
+                        # Drain (``worker.stop``) runs after ``gateway.close`` so any
+                        # in-flight agent reply on ``discord.outbox`` posts before the
+                        # broker disconnects. ``stop()`` runs the worker's on_shutdown
+                        # → broker.stop (drain) → after_shutdown and is a no-op if the
+                        # worker never started, so this is safe on a failed boot.
+                        #
+                        # ``typing_notifier.aclose()`` runs AFTER the drain: a
+                        # steps-consumer hop draining here can still ``fire()`` typing.
+                        # ``aclose`` cancels + awaits only the typing tasks live at
+                        # that instant; it does NOT disable the notifier (``fire`` has
+                        # no closed guard). So if it ran BEFORE the drain, a hop firing
+                        # during the drain would spawn a fresh typing task ``aclose``
+                        # can no longer track or cancel — left dangling at loop
+                        # shutdown. Running it after the drain means every fired task
+                        # is accounted for. The inner ``try/finally`` keeps the close
+                        # unconditional even if the drain raises. All bracketed INSIDE
+                        # the persona / connection / transcript ``async with``
+                        # contexts, so the notifier's underlying client is still open.
+                        try:
+                            await worker.stop()
+                        finally:
+                            await typing_notifier.aclose()
 
     asyncio.run(_run())
 

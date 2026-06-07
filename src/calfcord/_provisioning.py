@@ -146,7 +146,21 @@ async def provision_extra_topics(server_urls: str | Iterable[str], topics: Itera
         server_urls=server_urls,
         config=PROVISIONING,
     )
-    await provisioner.provision(topic_list, framework_topics=set())
+    report = await provisioner.provision(topic_list, framework_topics=set())
+    # calfkit's provisioner does NOT raise when the broker authorizes the
+    # connection but DENIES create (ACL code 29): it records the topic in
+    # ``report.unauthorized`` and only logs a warning. Swallowing that lets the
+    # runner come up and then silently stall on the wire (a raw subscriber or a
+    # publish to a topic that never gets created), so raise loudly instead —
+    # calfcord's infra-failure-raises rule. Operators must pre-create these
+    # out-of-band when the broker enforces CREATE ACLs.
+    if report.unauthorized:
+        raise RuntimeError(
+            f"topic provisioning unauthorized for {sorted(report.unauthorized)} on "
+            f"broker {server_urls}: the broker denies CREATE (ACLs). Pre-create these "
+            f"out-of-band; a consumer/publisher would otherwise stall on the missing "
+            f"topic. (created={sorted(report.created)}, existing={sorted(report.existing)})"
+        )
 
 
 async def provision_and_start_broker(
