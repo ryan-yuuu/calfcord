@@ -27,7 +27,7 @@ Calfcord is **four independent process types that communicate through Kafka**. E
 
 - When planned work is large, you may spawn sub-agents to split up or parallelize the work where possible
 - Always spawn sub-agents with the opus model and xhigh thinking effort
-- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering
+- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering. The goal is a wide and deep fan-out.
 
 ## Test driven development
 
@@ -37,13 +37,13 @@ Calfcord is **four independent process types that communicate through Kafka**. E
 ## Deep implementation reviews
 
 - Use `/pr-review-toolkit:review-pr` to deeply review the code changes for:
-    - functional bugs and issues, 
+    - functional bugs and issues,
     - anti-patterns,
     - test coverage,
     - documentation correctness & coverage
 - Review implementations using the `/simplify` skill to surface any potential design or implementation simplifications using more elegant, well-engineered solutions or designs.
 - In certain cases, when prompted, you may have to go through multiple rounds of deep reviews for code changes. In these events, the review is not considered done until the findings from consecutive review rounds converge towards no critical or must-fix issues.
-- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering
+- Spawn intelligent sub-agents generously for any kind of review work, investigation, and intel gathering. The goal is a wide and deep fan-out.
 
 ## Development: calfkit agents SDK
 
