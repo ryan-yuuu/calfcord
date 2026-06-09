@@ -11,7 +11,7 @@ ensurer can declare:
 * A **Worker's node topics** are auto-provisioned only on the *managed* run
   surfaces (``Worker.run()`` / ``start()`` / ``async with``), whose
   ``_on_startup`` hook declares :func:`~calfkit.provisioning.topics_for_nodes`
-  into the same ensurer. The tools/mcp/router/agents runners use ``Worker.run()``
+  into the same ensurer. The tools/router/agents runners use ``Worker.run()``
   and the bridge uses the embedded ``Worker.start()`` — all managed surfaces — so
   every Worker-hosted process gets its node topics for free.
 
@@ -186,7 +186,7 @@ async def provision_and_start_broker(
     ``broker.running`` guard avoids a non-idempotent second ``start()`` if the
     broker was already brought up (e.g. by an earlier lazy first publish).
 
-    The Worker-hosted runners do NOT use this helper: tools/mcp/router/agents run
+    The Worker-hosted runners do NOT use this helper: tools/router/agents run
     via ``Worker.run()`` and the bridge via the embedded ``Worker.start()``,
     whose managed lifecycle auto-provisions reply + node topics; the router
     provisions only its publish-only blind spot via :func:`provision_extra_topics`,

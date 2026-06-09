@@ -24,15 +24,13 @@ cannot drift.
 
 Lifecycle (``router start|stop``) is built on the generic
 :func:`calfcord.supervisor.component.component_start` /
-:func:`~calfcord.supervisor.component.component_stop` (DRY with tools/mcp), with
+:func:`~calfcord.supervisor.component.component_stop` (DRY with tools), with
 one router-specific rule: **``router start`` FAILS FAST when unconfigured** — it
 refuses to launch a router with no provider/model *before* any supervisor call, so
 the operator gets an actionable "configure it first" message instead of a process
 that boots and immediately dies on a missing LLM target.
 
-This deliberately avoids the bridge-only ``calfcord.mcp.servers`` (transport +
-``$VAR`` secrets), keeping the agent-side decoupling invariant. It is **not**,
-however, SDK-light: ``from calfcord.agents.definition import Provider`` triggers
+This is **not** SDK-light: ``from calfcord.agents.definition import Provider`` triggers
 the ``calfcord.agents`` package ``__init__``, which eagerly imports
 ``agents.factory`` and through it the anthropic/openai provider SDKs. We accept
 that transitive cost — the entry point already pays it for the agent verbs — and
@@ -232,7 +230,7 @@ async def router_start(
     supervisor call* — and point the operator at ``router set`` / ``router edit``.
     Only once configured do we delegate to the generic
     :func:`calfcord.supervisor.component.component_start` (the same DRY base
-    tools/mcp use), which does the workspace check and starts the ``router`` slot.
+    tools uses), which does the workspace check and starts the ``router`` slot.
 
     ``client`` is injected for testing; production defaults it (in
     ``component_start``) to a per-home REST client. Returns ``0`` on a successful

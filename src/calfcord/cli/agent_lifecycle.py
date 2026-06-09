@@ -33,8 +33,7 @@ identity changes, ``calfkit-bridge``) boot — the node bakes its config at
 construction — so each success line tells the operator to restart.
 
 This module imports only the lightweight ``calfcord.agents`` / ``calfcord.cli``
-seams (no provider SDK, no ``calfcord.mcp.servers``), so it stays importable from
-the argparse entry point.
+seams (no provider SDK), so it stays importable from the argparse entry point.
 """
 
 from __future__ import annotations

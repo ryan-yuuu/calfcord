@@ -1311,18 +1311,17 @@ def test_main_router_setup_still_dispatches_back_compat(
     assert "router edit" in out
 
 
-# --- tools / mcp lifecycle: start / stop (singleton-component veneers) -------
+# --- tools lifecycle: start / stop (singleton-component veneers) -------------
 #
-# `tools` and `mcp` are SINGLETON roster components: their start/stop are thin
-# veneers over the generic component_start/component_stop, dispatched with the
-# component's Process Compose slot name. Unlike the router, they have NO config
-# surface (tools needs none; mcp's add/codegen route to separate console scripts
-# in the shim), so the CLI wiring is the entire veneer — these tests pin that the
-# resolved install home and the slot name reach component_start/stop and that
-# their exit codes propagate, mirroring the router lifecycle tests above.
+# `tools` is a SINGLETON roster component: its start/stop are thin veneers over
+# the generic component_start/component_stop, dispatched with the component's
+# Process Compose slot name. Unlike the router, it has NO config surface, so the
+# CLI wiring is the entire veneer — these tests pin that the resolved install
+# home and the slot name reach component_start/stop and that their exit codes
+# propagate, mirroring the router lifecycle tests above.
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 @pytest.mark.parametrize("verb", ["start", "stop"])
 def test_main_component_lifecycle_help_exits_zero(group: str, verb: str) -> None:
     with pytest.raises(SystemExit) as exc:
@@ -1330,16 +1329,16 @@ def test_main_component_lifecycle_help_exits_zero(group: str, verb: str) -> None
     assert exc.value.code == 0
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_requires_subcommand(group: str) -> None:
-    # `tools` / `mcp` are verb groups: a bare `calfcord tools` must error (exit 2),
+    # `tools` is a verb group: a bare `calfcord tools` must error (exit 2),
     # never a silent no-op (so the group can grow further commands later).
     with pytest.raises(SystemExit) as exc:
         main([group])
     assert exc.value.code == 2
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_start_dispatches_with_home_and_slot_name(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1364,7 +1363,7 @@ def test_main_component_start_dispatches_with_home_and_slot_name(
     assert captured["name"] == group
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_stop_dispatches_with_home_and_slot_name(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1385,7 +1384,7 @@ def test_main_component_stop_dispatches_with_home_and_slot_name(
     assert captured["name"] == group
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_start_propagates_exit_code(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1399,7 +1398,7 @@ def test_main_component_start_propagates_exit_code(
     assert main([group, "start"]) == 1
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_stop_propagates_exit_code(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1413,7 +1412,7 @@ def test_main_component_stop_propagates_exit_code(
     assert main([group, "stop"]) == 3
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_start_and_stop_pass_the_same_home(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1439,7 +1438,7 @@ def test_main_component_start_and_stop_pass_the_same_home(
     assert seen["start_home"] == seen["stop_home"] == home
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 @pytest.mark.parametrize("verb", ["start", "stop"])
 def test_main_component_lifecycle_without_home_errors_native_install(
     group: str, verb: str, monkeypatch: pytest.MonkeyPatch,
@@ -1459,7 +1458,7 @@ def test_main_component_lifecycle_without_home_errors_native_install(
     assert "native install" in capsys.readouterr().out
 
 
-# --- tools / mcp / router restart + --all synonym (behavior #1, uniform) ----
+# --- tools / router restart + --all synonym (behavior #1, uniform) ----------
 #
 # The four roster verbs are uniform across agent (multi-instance) and the
 # singletons. For a singleton the new `restart` subcommand dispatches through the
@@ -1467,14 +1466,14 @@ def test_main_component_lifecycle_without_home_errors_native_install(
 # the singular component fn (there is one instance on this host to act on).
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_restart_help_exits_zero(group: str) -> None:
     with pytest.raises(SystemExit) as exc:
         main([group, "restart", "--help"])
     assert exc.value.code == 0
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_restart_dispatches_with_home_and_slot_name(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1496,7 +1495,7 @@ def test_main_component_restart_dispatches_with_home_and_slot_name(
     assert captured["name"] == group
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 def test_main_component_restart_propagates_exit_code(
     group: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1510,7 +1509,7 @@ def test_main_component_restart_propagates_exit_code(
     assert main([group, "restart"]) == 2
 
 
-@pytest.mark.parametrize("group", ["tools", "mcp"])
+@pytest.mark.parametrize("group", ["tools"])
 @pytest.mark.parametrize(
     "verb,fn",
     [("start", "component_start"), ("stop", "component_stop"), ("restart", "component_restart")],

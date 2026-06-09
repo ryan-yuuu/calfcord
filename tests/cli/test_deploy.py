@@ -21,8 +21,6 @@ The hard contracts pinned here (design §11.6 honesty + §12.3 secrets):
 from __future__ import annotations
 
 import configparser
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -224,7 +222,7 @@ def test_k8s_unparseable_broker_port_passes_through_verbatim(server_urls: str) -
 
 def test_k8s_renders_one_deployment_per_process_type() -> None:
     deployments = _by_name(_k8s_docs(), "Deployment")
-    for name in ("bridge", "router", "tools", "mcp"):
+    for name in ("bridge", "router", "tools"):
         assert name in deployments, f"missing a {name} Deployment"
 
 
@@ -252,7 +250,6 @@ def test_k8s_process_deployments_use_the_calfkit_console_scripts() -> None:
         "bridge": "calfkit-bridge",
         "router": "calfkit-router",
         "tools": "calfkit-tools",
-        "mcp": "calfkit-mcp",
     }
     for name, script in expected.items():
         container = deployments[name]["spec"]["template"]["spec"]["containers"][0]
@@ -281,7 +278,7 @@ def test_k8s_pulls_secrets_by_reference_not_literal() -> None:
 
 def test_k8s_no_agents_still_renders_the_substrate() -> None:
     deployments = _by_name(_k8s_docs([]), "Deployment")
-    for name in ("bridge", "router", "tools", "mcp"):
+    for name in ("bridge", "router", "tools"):
         assert name in deployments
     # ...and no orphan agent Deployment slipped in.
     assert not any(n.startswith("agent-") for n in deployments)
@@ -483,39 +480,3 @@ def test_run_unknown_target_returns_error(
     assert "error" in capsys.readouterr().out.lower()
 
 
-# --- import isolation (decoupling invariant) ---------------------------------
-
-# Importing the deploy generator must never pull in the bridge-only MCP loader
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets from mcp.json — design §12.3).
-# A fresh interpreter gives a clean ``sys.modules`` to assert against; mirrors
-# ``tests/supervisor/test_compose.py``.
-_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.cli.deploy  # noqa: F401
-
-leaked = "calfcord.mcp.config" in sys.modules
-assert not leaked, (
-    "cli.deploy transitively imported the bridge-only MCP loader "
-    "(all calfcord.mcp.*: "
-    + repr([m for m in sys.modules if m.startswith("calfcord.mcp")])
-    + ")"
-)
-print("ISOLATION_OK")
-"""
-
-
-def test_deploy_does_not_import_mcp_config() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", _ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

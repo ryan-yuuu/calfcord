@@ -270,15 +270,6 @@ def test_shim_run_maps_services_to_runner_scripts(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["run", "agent", "scribe"]) == "calfkit-agent scribe"
     assert _run_shim_argv(home, ["run", "router"]) == "calfkit-router"
     assert _run_shim_argv(home, ["run", "tools"]) == "calfkit-tools"
-    assert _run_shim_argv(home, ["run", "mcp"]) == "calfkit-mcp"
-
-
-def test_shim_mcp_maps_to_authoring_scripts(tmp_path: Path) -> None:
-    """``calfcord mcp <add|codegen>`` surfaces the bridge-side / agent-side MCP authoring tools."""
-    home = tmp_path / "home"
-    _install_shims(home)
-    assert _run_shim_argv(home, ["mcp", "add", "gmail"]) == "calfcord-mcp-add gmail"
-    assert _run_shim_argv(home, ["mcp", "codegen", "gmail"]) == "calfcord-mcp-codegen gmail"
 
 
 def test_shim_auth_maps_to_calfkit_auth(tmp_path: Path) -> None:
@@ -322,13 +313,11 @@ def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
     [
         # Regression: adding the lifecycle verbs above must not perturb how the
         # pre-existing verbs route. `run <svc>` still maps to the calfkit-* runner
-        # console scripts; the management verbs still land on calfcord-cli; and the
-        # MCP config verbs still reach their own console scripts (not calfcord-cli).
+        # console scripts; the management verbs still land on calfcord-cli.
         (["run", "bridge"], "calfkit-bridge"),
         (["run", "agent", "scribe"], "calfkit-agent scribe"),
         (["init"], "calfcord-cli init"),
         (["doctor"], "calfcord-cli doctor"),
-        (["mcp", "add", "gmail"], "calfcord-mcp-add gmail"),
     ],
 )
 def test_shim_existing_verbs_still_route_after_lifecycle_verbs(
@@ -364,7 +353,7 @@ def test_shim_help_prints_usage_to_stdout(tmp_path: Path, flag: str) -> None:
     result = _run_shim_proc(home, [flag])
     assert result.returncode == 0
     assert "usage" in result.stdout.lower()
-    for verb in ("run", "doctor", "mcp", "auth"):
+    for verb in ("run", "doctor", "auth"):
         assert verb in result.stdout
 
 
@@ -377,14 +366,14 @@ def test_shim_no_args_prints_usage_to_stderr_exit_2(tmp_path: Path) -> None:
     assert "usage" in result.stderr.lower()
 
 
-@pytest.mark.parametrize("argv", [["run"], ["run", "nope"], ["mcp"], ["mcp", "nope"]])
+@pytest.mark.parametrize("argv", [["run"], ["run", "nope"]])
 def test_shim_unknown_subcommand_exits_2(tmp_path: Path, argv: list[str]) -> None:
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_proc(home, argv).returncode == 2
 
 
-@pytest.mark.parametrize("argv", [["run", "--help"], ["run", "-h"], ["mcp", "--help"], ["mcp", "-h"]])
+@pytest.mark.parametrize("argv", [["run", "--help"], ["run", "-h"]])
 def test_shim_subcommand_help_exits_0(tmp_path: Path, argv: list[str]) -> None:
     home = tmp_path / "home"
     _install_shims(home)

@@ -100,7 +100,7 @@ def create_agent(
        never written here) so a fresh agent biases toward the operator's usual
        choice; ``current_model`` pre-selects an existing agent's model on a
        re-run.
-    4. **Tools.** The pre-checked builtin/MCP checkbox via
+    4. **Tools.** The pre-checked builtin-tool checkbox via
        :func:`~calfcord.cli._agents.pick_tools`.
     5. **Write.** :func:`~calfcord.cli._agents.write_agent` (validate before
        write; ``prune_seed`` only when the caller opted in).

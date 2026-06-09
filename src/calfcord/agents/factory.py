@@ -77,13 +77,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from calfkit._vendor.pydantic_ai import ToolOutput
 from calfkit.client import Client
-from calfkit.mcp import McpToolDef
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
@@ -97,8 +94,6 @@ from calfcord.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 from calfcord.agents.thinking import build_model_settings
 from calfcord.discord.persona import DiscordPersonaSender
-from calfcord.mcp.schema_build import resolve_mcp_selectors
-from calfcord.mcp.selector import is_mcp_selector
 from calfcord.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
 
 # NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
@@ -261,7 +256,6 @@ class AgentFactory:
         model_client_factory: ModelClientFactory | None = None,
         subscribe_topic_template: str = _DEFAULT_SUBSCRIBE_TOPIC_TEMPLATE,
         tool_registry: dict[str, ToolNodeDef] | None = None,
-        mcp_catalog: Mapping[str, list[McpToolDef]] | None = None,
     ) -> None:
         """Construct an agent factory.
 
@@ -295,16 +289,6 @@ class AgentFactory:
                 resolve the bare builtin names declared in
                 ``definition.tools``. Defaults to the module-level
                 :data:`TOOL_REGISTRY`; tests pass a fixture-built dict.
-            mcp_catalog: Map of MCP server name → that server's
-                :class:`~calfkit.mcp.McpToolDef` list, used to resolve the
-                ``mcp/<server>[/<tool>]`` selectors in ``definition.tools``
-                into schema-only tool nodes. Defaults to the module-level
-                :data:`~calfcord.mcp.catalog.MCP_CATALOG` (the committed,
-                transport-free catalog); tests pass a fixture-built mapping.
-                Lazily imported on the default path — mirroring
-                ``tool_registry`` — so merely constructing a factory in a
-                context that never touches MCP does not force the catalog
-                build.
         """
         self._persona_sender = persona_sender
         self._calfkit_client = calfkit_client
@@ -317,16 +301,6 @@ class AgentFactory:
 
             tool_registry = TOOL_REGISTRY
         self._tool_registry = tool_registry
-        if mcp_catalog is None:
-            # Lazy import mirrors ``tool_registry`` above: defer the catalog
-            # build to factory construction time. The catalog is agent-safe
-            # (no transport / no ``$VAR`` secrets), but keeping the import
-            # lazy avoids building it for factories that never resolve an
-            # MCP selector.
-            from calfcord.mcp.catalog import MCP_CATALOG
-
-            mcp_catalog = MCP_CATALOG
-        self._mcp_catalog = mcp_catalog
 
     def build(
         self,
@@ -558,32 +532,15 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _resolve_tools(self, definition: AgentDefinition) -> list[BaseToolNodeSchema]:
-        """Resolve ``definition.tools`` into calfkit tool nodes.
+    def _resolve_tools(self, definition: AgentDefinition) -> list[ToolNodeDef]:
+        """Resolve ``definition.tools`` into builtin calfkit tool nodes.
 
-        The ``tools:`` list mixes two kinds of entry (see
-        :attr:`AgentDefinition.tools` and
-        :mod:`calfcord.mcp.selector`): bare *builtin* names (``shell``,
-        ``calendar``) and ``mcp/<server>[/<tool>]`` *selectors*. They are
-        partitioned and resolved through separate paths, then concatenated:
-
-            - **builtins** resolve against the in-memory tool registry,
-              with the same aggregate unknown-name :class:`ValueError` as
-              before (every unknown name in one message);
-            - **MCP selectors** resolve via
-              :func:`~calfcord.mcp.schema_build.resolve_mcp_selectors`
-              against :attr:`_mcp_catalog` into schema-only nodes that
-              advertise ``<server>_<tool>`` to the LLM and route on
-              ``mcp.<server>.<tool>.{input,output}``; an unknown server or
-              tool raises there (message lists the valid alternatives).
-
-        The combined list is then checked for **agent-facing name
-        collisions**: calfkit silently last-wins when two tool nodes share
-        a ``tool_schema.name`` (it builds a ``{name: node}`` dict), which
-        would let one tool shadow another with no error. We detect the
-        clash here and fail loud, naming the agent and the colliding
-        name(s) — mirroring the collision phrasing in
-        :func:`calfcord.tools.discovery.discover_tools`.
+        Every ``tools:`` entry is a bare *builtin* name (``shell``,
+        ``calendar``) resolved against the in-memory tool registry, with an
+        aggregate unknown-name :class:`ValueError` (every unknown name in one
+        message). ``mcp/...`` selectors are no longer supported and are already
+        rejected at parse time by :meth:`AgentDefinition._validate_tools`, so
+        none reach here.
 
         Semantics (mirrors :attr:`AgentDefinition.tools`):
             - ``None``: tools-by-default — every registered builtin tool.
@@ -592,45 +549,28 @@ class AgentFactory:
               The loader normalizes to a concrete tuple, so a ``None``
               reaching this method usually means a code-built definition
               bypassed the loader (e.g. a test or the router build path,
-              which doesn't go through this method). MCP tools are never
-              part of the "all" default — they must be selected explicitly.
+              which doesn't go through this method).
             - empty tuple ``()``: zero tools (explicit opt-out).
-            - non-empty tuple: exactly those builtins + MCP selections,
-              with unknown-name / unknown-selector / collision validation.
+            - non-empty tuple: exactly those builtins, with unknown-name
+              validation.
 
         Raises:
-            ValueError: if any bare builtin name is missing from the
-                registry (lists every unknown name in one message); if any
-                ``mcp/...`` selector references an unknown server or tool;
-                or if two resolved tools collide on their agent-facing
-                ``tool_schema.name``.
+            ValueError: if any builtin name is missing from the registry
+                (lists every unknown name in one message).
         """
         if definition.tools is None:
             return list(self._tool_registry.values())
         if not definition.tools:
             return []
 
-        # Partition the flat ``tools:`` list into bare builtin names and
-        # ``mcp/...`` selectors. ``is_mcp_selector`` is a cheap prefix
-        # check; the selectors were already shape-validated by
-        # ``AgentDefinition._validate_tools`` at parse time, so any malformed
-        # selector never reaches here.
-        builtin_names: list[str] = []
-        mcp_selectors: list[str] = []
-        for entry in definition.tools:
-            if is_mcp_selector(entry):
-                mcp_selectors.append(entry)
-            else:
-                builtin_names.append(entry)
-
-        builtin_nodes: list[ToolNodeDef] = []
+        nodes: list[ToolNodeDef] = []
         unknown: list[str] = []
-        for name in builtin_names:
+        for name in definition.tools:
             node = self._tool_registry.get(name)
             if node is None:
                 unknown.append(name)
             else:
-                builtin_nodes.append(node)
+                nodes.append(node)
         if unknown:
             known = sorted(self._tool_registry)
             raise ValueError(
@@ -638,35 +578,9 @@ class AgentFactory:
                 f"{unknown!r}; known tools: {known or '<none registered>'}"
             )
 
-        # ``resolve_mcp_selectors`` raises on an unknown server/tool; only
-        # call it when there is something to resolve so a no-MCP agent never
-        # depends on the catalog being non-empty.
-        mcp_nodes: list[BaseToolNodeSchema] = (
-            resolve_mcp_selectors(mcp_selectors, self._mcp_catalog) if mcp_selectors else []
-        )
+        return nodes
 
-        combined: list[BaseToolNodeSchema] = [*builtin_nodes, *mcp_nodes]
-
-        # Collision check across the COMBINED surface. calfkit keys tools by
-        # ``tool_schema.name`` and silently last-wins on a duplicate, so a
-        # builtin named e.g. ``gmail_search`` colliding with an MCP selection
-        # ``mcp/gmail/search`` (also ``gmail_search``) would otherwise shadow
-        # one of the two with no error. Detect and fail loud, naming all
-        # colliding names so the operator can fix the ``.md`` in one pass.
-        counts = Counter(node.tool_schema.name for node in combined)
-        collisions = sorted(name for name, n in counts.items() if n > 1)
-        if collisions:
-            raise ValueError(
-                f"agent {definition.agent_id!r} has colliding tool name(s) "
-                f"{collisions!r}; each tool's LLM-facing name must be "
-                f"unique (a builtin and an MCP selection resolved to the same "
-                f"name, or the same MCP tool was selected twice under "
-                f"different selectors)"
-            )
-
-        return combined
-
-    def _require_memory_tools(self, definition: AgentDefinition, tools: list[BaseToolNodeSchema]) -> None:
+    def _require_memory_tools(self, definition: AgentDefinition, tools: list[ToolNodeDef]) -> None:
         """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.
 
         A memory-enabled agent manages its notepad with the general-purpose
@@ -674,10 +588,9 @@ class AgentFactory:
         instructions are a silent no-op, so fail loud at build time instead.
         Agents that omit ``tools:`` get every registered tool and pass
         automatically — only an explicitly-restricted ``tools:`` list can trip
-        this. Operates on the resolved
-        :class:`~calfkit.models.node_schema.BaseToolNodeSchema` list (builtins
-        *and* any MCP selections, not the raw names) so the "all tools"
-        expansion is reflected correctly.
+        this. Operates on the resolved :class:`~calfkit.nodes.tool.ToolNodeDef`
+        list (not the raw names) so the "all tools" expansion is reflected
+        correctly.
         """
         if not definition.memory:
             return

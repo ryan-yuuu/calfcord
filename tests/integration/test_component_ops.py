@@ -6,15 +6,15 @@ must-pass contract for the *control flow* (the workspace check, the start/stop
 REST call site, the absence of an agent-only duplicate guard). This module is the
 complement: it runs ``component_start`` / ``component_stop`` against a real
 ``process-compose`` v1.110.0 binary to prove the property only a real binary can
-show — that clocking a pre-declared ``disabled`` singleton slot (``tools`` and
-``mcp``, the two components wired in this change) in and out goes through the real
-REST handlers AND leaves the substrate PIDs untouched (the §13.1 / upstream-#494
-PID-stable path the agent roster ops already prove for an agent slot).
+show — that clocking a pre-declared ``disabled`` singleton slot (``tools``) in
+and out goes through the real REST handlers AND leaves the substrate PIDs
+untouched (the §13.1 / upstream-#494 PID-stable path the agent roster ops
+already prove for an agent slot).
 
 This is the component analogue of ``tests/integration/test_roster_ops.py``: same
 substrate-plus-disabled-slot stub project, same PID-stability assertion, but
 exercising the *generic component* entry points (with their slot names) rather
-than the agent roster ops. Tools and mcp are SINGLETONs, so there is no probe and
+than the agent roster ops. ``tools`` is a SINGLETON, so there is no probe and
 no duplicate guard to inject — the ops fall straight through to the real Process
 Compose calls. A :class:`ProcessComposeClient` bound to the launched port is
 injected so the ops' workspace check + start/stop hit the throwaway supervisor
@@ -52,10 +52,9 @@ pytestmark = pytest.mark.skipif(
     reason="set CALF_TEST_PC=1 with `process-compose` on PATH to run the real-binary component test",
 )
 
-# The singleton component slots the ops clock in/out — the two wired in this
-# change — and the substrate process whose PID must stay stable across that (the
-# §13.1 PID-stability assertion).
-_COMPONENT_SLOTS = ("tools", "mcp")
+# The singleton component slots the ops clock in/out, and the substrate process
+# whose PID must stay stable across that (the §13.1 PID-stability assertion).
+_COMPONENT_SLOTS = ("tools",)
 _SUBSTRATE_PID_ANCHOR = "broker"
 
 # Bounded polling for state transitions / teardown, so a wedged binary fails the
@@ -75,8 +74,8 @@ def _stub_project(path: Path, logs: Path) -> None:
 
     ``broker`` is the PID anchor whose stability we assert; ``keepalive`` keeps
     the supervisor's REST server up after the component slots are stopped (PC exits
-    once *all* processes finish). ``tools`` / ``mcp`` are the pre-declared
-    ``disabled`` singleton slots — each a sleeper with an ``exec`` readiness probe
+    once *all* processes finish). ``tools`` is the pre-declared
+    ``disabled`` singleton slot — a sleeper with an ``exec`` readiness probe
     of ``true`` (mirroring the real renderer's component shape) that the ops clock
     in via ``POST /process/start``, the §13.1 GO path that must leave the substrate
     PIDs intact.

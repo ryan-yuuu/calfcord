@@ -110,12 +110,11 @@ def test_runner_reply_topics_are_pairwise_distinct() -> None:
     auto-provisions each at broker start, but a collision would still cross-wire
     reply delivery between processes — pin distinctness so a copy-paste can't.
     """
-    from calfcord.mcp.runner import _REPLY_TOPIC as MCP
     from calfcord.router.runner import _REPLY_TOPIC as ROUTER
     from calfcord.tools.runner import _REPLY_TOPIC as TOOLS
 
     # bridge's _REPLY_TOPIC is "discord.outbox" (the outbox consumer's inbox).
-    assert len({ROUTER, TOOLS, MCP, "discord.outbox"}) == 4
+    assert len({ROUTER, TOOLS, "discord.outbox"}) == 3
 
 
 async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch) -> None:

@@ -1,6 +1,6 @@
 """Shared worker-lifetime helper: run a :class:`Worker` until a signal.
 
-Every roster runner (agents / tools / router / MCP bridge) shares one
+Every roster runner (agents / tools / router) shares one
 shutdown contract: bring the worker up, wait for either it to fail or a
 SIGINT/SIGTERM, and treat *any* worker exit that is **not** preceded by a
 shutdown signal as a crash worth surfacing to the process supervisor. This
@@ -151,7 +151,7 @@ async def run_worker_until_signal(worker: Worker, *, drain_label: str = "worker"
         drain_label: Human-readable label for the worker, used in the
             "shutdown signal received, draining {drain_label}" log line so
             a multi-process deployment's logs identify which worker is
-            draining (e.g. ``"tools worker"``, ``"mcp bridge worker"``).
+            draining (e.g. ``"tools worker"``, ``"router worker"``).
 
     Raises:
         BaseException: Whatever :meth:`Worker.start` raised, if boot crashed; or

@@ -7,10 +7,7 @@ so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
 (``init`` / ``doctor`` / ``agent`` / ``router`` / ``tools``) to dispatch them here.
 The ``run`` / ``auth`` verbs are translated to console scripts in the shim itself,
-not here. ``mcp`` is SPLIT in the shim: its singleton-host *lifecycle*
-(``mcp start|stop``) dispatches here like the other component verbs, while its
-*config* verbs (``mcp add`` / ``mcp codegen``) stay separate console scripts —
-keeping the lifecycle path off the bridge-only MCP-secrets loader.
+not here.
 """
 
 from __future__ import annotations
@@ -160,34 +157,30 @@ def _build_parser() -> argparse.ArgumentParser:
     # it dispatches to the same one-shot ambient-router wizard it always has.
     router_sub.add_parser("setup", help="Deprecated alias of `router edit`.")
 
-    # ``tools`` and ``mcp`` are SINGLETON roster components: one declared Process
-    # Compose slot per role, clocking in/out of the running office. Unlike the
-    # router they have NO config surface here (tools needs none; ``mcp add`` /
-    # ``mcp codegen`` are separate console scripts routed by the shim, never
-    # through this argparse entry point), so each is a ``start|stop`` group whose
-    # whole veneer is the dispatch to the generic ``component_start/stop`` with the
-    # slot name. ``required=True`` makes a bare ``calfcord tools`` / ``calfcord
-    # mcp`` print help + exit non-zero rather than silently no-op, so the groups
-    # can grow further verbs later.
-    # Each is a ``start|stop|restart`` group. ``--all`` is a forward-compatible
-    # SYNONYM for the bare verb here: a singleton is one process per host, so
-    # ``--all`` targets that one instance — it dispatches to the same singular
-    # component handler, accepted only so the roster verbs read uniformly.
-    for _component in ("tools", "mcp"):
-        component_p = sub.add_parser(_component, help=f"Manage the {_component} host.")
-        component_sub = component_p.add_subparsers(dest=f"{_component}_command", required=True)
-        for _verb, _help in (
-            ("start", f"Bring the {_component} host online."),
-            ("stop", f"Take the {_component} host offline."),
-            ("restart", f"Reload the running {_component} host."),
-        ):
-            _cp = component_sub.add_parser(_verb, help=_help)
-            _cp.add_argument(
-                "--all",
-                dest="all",
-                action="store_true",
-                help=f"Synonym for the bare verb (acts on this host's {_component}).",
-            )
+    # ``tools`` is a SINGLETON roster component: one declared Process Compose slot,
+    # clocking in/out of the running office. Unlike the router it has NO config
+    # surface here, so it is a ``start|stop|restart`` group whose whole veneer is
+    # the dispatch to the generic ``component_start/stop`` with the slot name.
+    # ``required=True`` makes a bare ``calfcord tools`` print help + exit non-zero
+    # rather than silently no-op, so the group can grow further verbs later.
+    # ``--all`` is a forward-compatible SYNONYM for the bare verb here: a singleton
+    # is one process per host, so ``--all`` targets that one instance — it
+    # dispatches to the same singular component handler, accepted only so the
+    # roster verbs read uniformly.
+    tools_p = sub.add_parser("tools", help="Manage the tools host.")
+    tools_sub = tools_p.add_subparsers(dest="tools_command", required=True)
+    for _verb, _help in (
+        ("start", "Bring the tools host online."),
+        ("stop", "Take the tools host offline."),
+        ("restart", "Reload the running tools host."),
+    ):
+        _cp = tools_sub.add_parser(_verb, help=_help)
+        _cp.add_argument(
+            "--all",
+            dest="all",
+            action="store_true",
+            help="Synonym for the bare verb (acts on this host's tools).",
+        )
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
     # bridge) up detached, close it, and glance at the org board. These are thin
@@ -566,11 +559,11 @@ def _run_router(args: argparse.Namespace) -> int:
 
 
 def _run_component(name: str, verb: str) -> int:
-    """Dispatch a singleton-component lifecycle verb (``tools|mcp start|stop``).
+    """Dispatch a singleton-component lifecycle verb (``tools start|stop``).
 
-    ``tools`` and ``mcp`` are SINGLETON roster components, so — unlike the router,
-    which carries an editable LLM config — their lifecycle is the *entire* surface
-    and a thin veneer over the generic
+    ``tools`` is a SINGLETON roster component, so — unlike the router, which
+    carries an editable LLM config — its lifecycle is the *entire* surface and a
+    thin veneer over the generic
     :func:`calfcord.supervisor.component.component_start` /
     :func:`~calfcord.supervisor.component.component_stop`. The slot ``name`` is the
     component's declared Process Compose process (see
@@ -586,13 +579,6 @@ def _run_component(name: str, verb: str) -> int:
     ``os.fspath(None)`` downstream. No broker URL is consulted: component lifecycle
     does not probe the broker. The component coroutine's exit code is propagated
     unchanged.
-
-    ``mcp start`` deliberately runs NO config pre-check: the only ``mcp.json``
-    readers are the bridge-only secrets loader
-    (:func:`calfcord.mcp.config.load_mcp_servers`, forbidden on the CLI path by the
-    decoupling invariant) and the ``mcp add`` writer's private parser (which pulls
-    in the whole add machinery), so a light, clean reuse is not available — per
-    design §12.4 the veneer is just ``component_start``.
 
     ``verb`` is one of ``start|stop|restart``. ``--all`` (behavior #1, decision B)
     is a forward-compatible SYNONYM here: a singleton runs one process per host, so
@@ -695,10 +681,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "router":
         return _run_router(args)
 
-    # ``tools`` / ``mcp`` are singleton-component verb groups; the per-group dest
-    # (``tools_command`` / ``mcp_command``) carries the start/stop verb.
-    if args.command in ("tools", "mcp"):
-        return _run_component(args.command, getattr(args, f"{args.command}_command"))
+    # ``tools`` is a singleton-component verb group; ``tools_command`` carries
+    # the start/stop/restart verb.
+    if args.command == "tools":
+        return _run_component("tools", args.tools_command)
 
     if args.command == "explain":
         return explain.run(args.explain_command)

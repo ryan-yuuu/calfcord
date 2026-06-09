@@ -193,60 +193,51 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
     """Rewrite the ``tools`` frontmatter list in ``md_path`` to ``tools``.
 
     Every token is validated *before* the shared write path runs, so an
-    unknown builtin or a malformed ``mcp/`` selector raises a precise
+    unknown builtin or an unsupported ``mcp/`` selector raises a precise
     :class:`ValueError` (naming the offending token) with the on-disk file
-    untouched, rather than surfacing as a generic pydantic error. The two
-    token classes are checked against the same authorities the rest of the
-    system uses, so the editor can never write a list the loader would later
-    reject:
+    untouched, rather than surfacing as a generic pydantic error:
 
+    * an ``mcp/...`` token is rejected outright via the shared
+      :func:`~calfcord.agents._mcp_guard.mcp_unsupported_error` (MCP is no
+      longer supported — calfkit dropped the adaptor in 0.7.0), mirroring the
+      frontmatter validator so the editor can never write a list the loader
+      would later reject;
     * a *builtin* token must be a key of
-      :data:`calfcord.tools.TOOL_REGISTRY`;
-    * an *MCP selector* (``mcp/...`` —
-      :func:`calfcord.mcp.selector.is_mcp_selector`) must be *syntactically*
-      well-formed (:func:`~calfcord.mcp.selector.parse_mcp_selector`).
-      Whether the referenced server/tool actually exists in the catalog is a
-      deployment concern resolved later (and not knowable from a host with
-      no MCP schemas), so it is deliberately not checked here — mirroring the
-      syntax-only stance of the frontmatter validator.
+      :data:`calfcord.tools.TOOL_REGISTRY`.
 
     The writer always persists an *explicit* list (``tools: []`` when
     ``tools`` is empty), which is what lets the editor convert the implicit
     "tools omitted → all builtins" default into an unambiguous on-disk state
     on first save.
 
-    The ``TOOL_REGISTRY`` / selector imports are deferred to here (rather
-    than module scope) so :func:`update_thinking_effort`'s path stays light:
-    importing ``TOOL_REGISTRY`` eagerly walks every builtin tool module,
-    which the thinking-effort slash command has no reason to pay for.
+    The ``TOOL_REGISTRY`` import is deferred to here (rather than module
+    scope) so :func:`update_thinking_effort`'s path stays light: importing
+    ``TOOL_REGISTRY`` eagerly walks every builtin tool module, which the
+    thinking-effort slash command has no reason to pay for.
 
     Raises:
         FileNotFoundError: ``md_path`` does not exist.
-        ValueError: an unknown builtin token, a malformed ``mcp/`` selector,
+        ValueError: an unknown builtin token, an unsupported ``mcp/`` selector,
             or a post-mutation :class:`AgentDefinition` validation failure.
             The on-disk file is unchanged.
         OSError: a filesystem error during the atomic write. The on-disk
             file is unchanged.
     """
-    from calfcord.mcp.selector import is_mcp_selector, parse_mcp_selector
+    from calfcord.agents._mcp_guard import is_mcp_tool, mcp_unsupported_error
     from calfcord.tools import TOOL_REGISTRY
 
     for token in tools:
-        # ``is_mcp_selector`` reaches for ``token.startswith`` — a non-str token
+        # ``is_mcp_tool`` reaches for ``token.startswith`` — a non-str token
         # would surface as an ``AttributeError`` instead of the ``ValueError`` this
         # seam documents, so reject it up front with the contract-honoring error.
         if not isinstance(token, str):
             raise ValueError(f"invalid tool {token!r}: expected a string")
-        if is_mcp_selector(token):
-            # Syntactic check only — catalog existence is a deployment
-            # concern, deferred exactly as the frontmatter validator does.
-            parse_mcp_selector(token)
-            continue
+        if is_mcp_tool(token):
+            raise mcp_unsupported_error(token)
         if token not in TOOL_REGISTRY:
             valid = ", ".join(sorted(TOOL_REGISTRY)) or "(none registered)"
             raise ValueError(
-                f"unknown tool {token!r}; expected a builtin ({valid}) or an MCP "
-                f"selector (mcp/<server> or mcp/<server>/<tool>)"
+                f"unknown tool {token!r}; expected a builtin ({valid})"
             )
 
     return _update_fields(md_path, {"tools": list(tools)})

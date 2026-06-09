@@ -20,8 +20,7 @@ set ``calfkit-agent`` would run. An individual ``.md`` that fails to parse is
 *noted* rather than fatal: one malformed file must not blank the whole listing.
 
 This module imports only the lightweight ``calfcord.agents`` / ``calfcord.cli``
-seams (no provider SDK, no ``calfcord.mcp.servers``), so it stays importable from
-the argparse entry point.
+seams (no provider SDK), so it stays importable from the argparse entry point.
 """
 
 from __future__ import annotations

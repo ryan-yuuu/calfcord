@@ -16,8 +16,6 @@ sleeps.
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -309,40 +307,3 @@ async def test_run_refresher_threads_status_through_to_the_beat(tmp_path: Path) 
     beat = read_beat(tmp_path, "bridge")
     assert beat is not None
     assert beat.status == "connected"
-
-
-# The refresher runs inside every long-lived runner (incl. the agent/tools hosts),
-# so importing it must never pull in the bridge-only MCP loader
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets from mcp.json — design §12.3).
-# A fresh interpreter gives a clean ``sys.modules`` to assert against; mirrors
-# ``tests/health/test_heartbeat.py``.
-_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.health.refresher  # noqa: F401
-
-leaked = "calfcord.mcp.config" in sys.modules
-assert not leaked, (
-    "health.refresher transitively imported the bridge-only MCP loader "
-    "(all calfcord.mcp.*: "
-    + repr([m for m in sys.modules if m.startswith("calfcord.mcp")])
-    + ")"
-)
-print("ISOLATION_OK")
-"""
-
-
-def test_refresher_does_not_import_mcp_config() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", _ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

@@ -416,7 +416,7 @@ async def _run_worker(worker: Worker) -> None:
     publish presence/departure events at precise lifecycle points. Those are
     now :func:`Worker.after_startup` / :func:`Worker.on_shutdown` hooks (see
     :func:`_register_lifecycle_hooks`), so the agents runner joins the shared
-    managed-lifecycle path used by tools/mcp/router — the embedded
+    managed-lifecycle path used by tools/router — the embedded
     ``Worker.start()`` surface driven by :func:`run_worker_until_signal`.
     """
     await run_worker_until_signal(worker, drain_label="agents worker")

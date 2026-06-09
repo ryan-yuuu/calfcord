@@ -53,10 +53,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # without compose.
 COPY agents ./agents
 
-# The MCP bridge reads mcp.json at boot (transport + $VAR credential refs).
-# Plain data like agents/ — copied last so edits sit in a cheap leaf layer.
-COPY mcp.json ./
-
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime

@@ -1,9 +1,8 @@
 """Readiness logic for the ``calfcord _healthcheck <component>`` exec probe.
 
 Process Compose runs this probe ON THE AGENT/TOOLS HOSTS to gate readiness
-(design §12.1 / §13.2), so this module must stay **light** and must never
-transitively import ``calfcord.mcp.config`` (the bridge-only secrets loader): a
-readiness probe carries no secrets and no heavy broker deps at import time. The
+(design §12.1 / §13.2), so this module must stay **light**: a readiness probe
+carries no secrets and no heavy broker deps at import time. The
 broker-reachability default lazy-imports its admin client *inside* the function
 that needs it, keeping ``import calfcord.health.check`` pure-filesystem.
 
@@ -19,7 +18,7 @@ Only **two** components carry a readiness signal, so only two are probeable
   ``bridge/gateway.py``'s ``_on_ready``), so a fresh bridge beat means
   "Discord-connected"; a stale or missing beat means "not ready".
 
-The roster runners (agents, ``tools``, ``router``, ``mcp``) deliberately have NO
+The roster runners (agents, ``tools``, ``router``) deliberately have NO
 readiness signal: they run via ``run_worker_until_signal`` and never beat, and
 Process Compose attaches a readiness probe only to the broker and the bridge (see
 ``supervisor/compose.py``). Probing any other component is therefore a

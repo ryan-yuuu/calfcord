@@ -437,7 +437,7 @@ usage:
   calfcord deploy <systemd|k8s|docker> [-o PATH]
                                  generate deployment manifests (advanced)
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
-  calfcord run <bridge|agent|router|tools|mcp>
+  calfcord run <bridge|agent|router|tools>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
@@ -447,10 +447,6 @@ usage:
                                  configure / run the optional ambient-message router
   calfcord tools <start|stop|restart> [--all]
                                  bring the tools host online / offline / reload
-  calfcord mcp <start|stop|restart> [--all]
-                                 bring the MCP host online / offline / reload
-  calfcord mcp <add|codegen> [args]
-                                 add an MCP server / generate its tool schema
   calfcord auth [args]           Codex (ChatGPT subscription) login
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
@@ -503,34 +499,17 @@ case "${1:-}" in
   # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
   # they don't fall through to the `uv run` passthrough (which would try to exec
   # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
-  # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`); `mcp` is
-  # SPLIT below (lifecycle -> calfcord-cli, add/codegen -> their own scripts), so
-  # it is NOT matched here. The graduation-tier verbs (`explain` / `logs` /
+  # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`).
+  # The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
   # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
   init|agent|router|tools|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
-      bridge|agent|router|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
+      bridge|agent|router|tools) set -- "calfkit-$1" "${@:2}" ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
-    esac ;;
-  mcp)
-    # `mcp` is SPLIT by subverb: the singleton MCP-host lifecycle (start|stop|
-    # restart) routes to the calfcord-cli argparse entry point (keeping `mcp` as the
-    # leading arg so it dispatches the `mcp` verb group there), while the config
-    # subverbs (add|codegen) keep routing to their dedicated console scripts. The
-    # lifecycle path stays off the bridge-only MCP-secrets loader (it just clocks the
-    # pre-declared `mcp` process in/out via the supervisor). Unlike agent/tools/
-    # router (which ride the top-level alternation arm and get `restart`/`--all` for
-    # free), `mcp`'s per-subverb case must list each lifecycle verb explicitly.
-    case "${2:-}" in
-      start|stop|restart) set -- calfcord-cli "$@" ;;
-      add)        set -- calfcord-mcp-add "${@:3}" ;;
-      codegen)    set -- calfcord-mcp-codegen "${@:3}" ;;
-      -h|--help)  usage; exit 0 ;;
-      *)          usage >&2; exit 2 ;;
     esac ;;
   auth) shift; set -- calfkit-auth "$@" ;;
 esac

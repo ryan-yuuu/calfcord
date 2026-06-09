@@ -11,7 +11,7 @@ The shape is the §13.2 Phase-0 contract, pinned against Process Compose
 ``v1.110.0`` (config schema ``version: "0.5"``):
 
 * **Substrate** (``broker``, ``bridge``) autostarts under ``calfcord start``;
-  **roster** (every agent + ``tools`` / ``router`` / ``mcp``) is declared
+  **roster** (every agent + ``tools`` / ``router``) is declared
   ``disabled`` and waits for an explicit ``... start`` (a ``POST /process/start``).
   "Nothing runs that the user did not start" is a trust property, so the split is
   encoded here, not left to the launcher.
@@ -24,7 +24,7 @@ The shape is the §13.2 Phase-0 contract, pinned against Process Compose
   (``process_healthy``); readiness is an ``exec`` probe (the bridge has no HTTP
   server) calling ``<launcher> _healthcheck <component>``.
 * ``restart: always`` for the substrate (``broker``, ``bridge``); ``on_failure``
-  for the whole roster — every agent *and* ``tools`` / ``router`` / ``mcp`` — which
+  for the whole roster — every agent *and* ``tools`` / ``router`` — which
   now all run via ``run_worker_until_signal`` and therefore force a non-zero exit
   on any uncommanded exit (a crash *or* a clean signal-less return), while an
   operator-commanded ``stop`` is suppressed from restart by Process Compose
@@ -84,13 +84,13 @@ _HEALTHY = "process_healthy"
 # drift: lifecycle reconstructs the filename as ``SUPERVISOR_LOG_STEM + ".log"``,
 # and ``cli.logs`` passes the stem to ``_log_location`` (which appends ``.log``).
 # Homed here because both consumers already import ``compose`` and ``compose`` is
-# import-light (no MCP secrets loader), keeping the logs CLI's decoupling intact.
+# import-light, keeping the logs CLI's decoupling intact.
 SUPERVISOR_LOG_STEM = "process-compose"
 
 # Process names owned by the substrate + non-agent components. An agent id equal
 # to one of these would silently overwrite that process's entry in the shared
 # `processes` dict (corrupting the substrate), so the generator rejects it.
-_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools", "router", "mcp"})
+_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools", "router"})
 
 
 def _log_location(home: str, name: str) -> str:
@@ -198,7 +198,7 @@ def build_compose_project(
 
     # Roster — declared disabled; each member clocks in on an explicit start and
     # gates on the broker being healthy. Every roster member (agents *and*
-    # tools/router/mcp) runs via run_worker_until_signal, which forces a non-zero
+    # tools/router) runs via run_worker_until_signal, which forces a non-zero
     # exit on any uncommanded exit, so on_failure restarts a crash while an
     # operator-commanded stop is suppressed from restart by Process Compose.
     for agent_id in agent_ids:
@@ -211,7 +211,7 @@ def build_compose_project(
             depends_on={"broker": _HEALTHY},
         )
 
-    for component in ("tools", "router", "mcp"):
+    for component in ("tools", "router"):
         processes[component] = _process(
             command=f"{launcher} run {component}",
             home=home,

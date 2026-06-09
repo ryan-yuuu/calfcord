@@ -18,13 +18,9 @@ The skip rules in :func:`detect_agents` mirror the loader's
 ``*.template.md`` reference templates are not live agents, so the names returned
 here match exactly what ``calfkit-agent`` would run.
 
-Decoupling invariant: this module must NOT pull ``calfcord.mcp.servers`` (MCP
-transport + secrets) at import time — that wiring is bridge-only. (It does
-transitively import a provider SDK via ``calfcord.agents``'s package init, so
-the import graph is not provider-free; the invariant that holds and matters is
-the ``mcp.servers`` one.) :func:`pick_tools` still defers its ``TOOL_REGISTRY``
-/ ``discover_mcp_catalog`` imports into the function body so enumeration goes
-through schema-only seams that never touch MCP transport or secrets.
+:func:`pick_tools` defers its ``TOOL_REGISTRY`` import into the function body so
+the rest of the module (e.g. :func:`detect_agents`) stays light — importing the
+registry eagerly walks every builtin tool module.
 """
 
 from __future__ import annotations
@@ -274,18 +270,13 @@ def pick_tools(prompter: Prompter, name: str) -> list[str]:
 
     Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
     pre-checked so the default is the same "all builtins" set a frontmatter that
-    omits ``tools:`` would expand to; MCP selectors discovered from the committed
-    schemas are offered *un*-checked (opt-in). Enumeration uses only the
-    schema-only seams — ``TOOL_REGISTRY`` and ``discover_mcp_catalog`` — and
-    never touches ``calfcord.mcp.servers`` (transport/secrets), so this works on
-    a host that holds no MCP credentials. If a write/shell tool ends up selected
-    we print the security caution, because anyone who can @mention the agent can
-    then drive it.
+    omits ``tools:`` would expand to. Enumeration uses only the schema-only
+    ``TOOL_REGISTRY`` seam (no transport, no secrets). If a write/shell tool
+    ends up selected we print the security caution, because anyone who can
+    @mention the agent can then drive it.
     """
     from calfcord.cli._prompts import Choice
     from calfcord.cli.agent_tools import first_line
-    from calfcord.mcp import schemas as schemas_pkg
-    from calfcord.mcp.discovery import discover_mcp_catalog
     from calfcord.tools import TOOL_REGISTRY
 
     choices: list[Choice] = []
@@ -293,26 +284,6 @@ def pick_tools(prompter: Prompter, name: str) -> list[str]:
         summary = first_line(TOOL_REGISTRY[tool_name].tool_schema.description)
         label = f"{tool_name} — {summary}" if summary else tool_name
         choices.append(Choice(tool_name, label, True))
-
-    try:
-        catalog = discover_mcp_catalog(schemas_pkg)
-    except Exception as e:
-        # A broken generated schema must not brick setup: degrade to builtins
-        # only, loudly, so the operator sees the cause. Broad on purpose — a
-        # corrupt generated module can raise SyntaxError / AttributeError too,
-        # not just ImportError / ValueError, and none of them should abort setup.
-        print(f"warning: MCP catalog failed to load, showing builtins only: {e}")
-        catalog = {}
-
-    for server in sorted(catalog):
-        tools = catalog[server]
-        all_selector = f"mcp/{server}"
-        choices.append(Choice(all_selector, f"{all_selector} — all {len(tools)} tools", False))
-        for tool in tools:
-            selector = f"mcp/{server}/{tool.name}"
-            summary = first_line(getattr(tool, "description", None))
-            label = f"{selector} — {summary}" if summary else selector
-            choices.append(Choice(selector, label, False))
 
     selected = prompter.checkbox(
         f"Tools for {name} (all selected — deselect any you don't want):",

@@ -8,9 +8,8 @@ chances to drift (a different hint string, a different wire-shape tolerance), so
 they live here once and the surfaces re-export thin aliases for the names their
 tests reference. This is a pure refactor — no behavior change.
 
-Kept off the bridge-only secrets path (no ``calfcord.mcp.config`` import) like the
-rest of :mod:`calfcord.supervisor`, so every CLI-side surface that consumes it
-stays importable on a host with no MCP credentials.
+Import-light like the rest of :mod:`calfcord.supervisor`, so every CLI-side
+surface that consumes it stays cheap to import.
 """
 
 from __future__ import annotations

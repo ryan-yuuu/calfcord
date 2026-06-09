@@ -197,7 +197,7 @@ def test_tools_checkbox_offers_all_builtins_prechecked(tmp_path: Path) -> None:
     prompter = _fresh_run_prompter(name="scribe", description="d")
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
 
-    builtin_rows = {c.value: c.checked for c in prompter.last_checkbox_choices if not c.value.startswith("mcp/")}
+    builtin_rows = {c.value: c.checked for c in prompter.last_checkbox_choices}
     # Every builtin is offered, and every builtin row is pre-checked.
     assert set(builtin_rows) == set(TOOL_REGISTRY)
     assert all(builtin_rows.values())

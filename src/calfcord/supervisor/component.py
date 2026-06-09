@@ -1,9 +1,9 @@
 """Generic component lifecycle: a named SINGLETON roster process clocking in/out.
 
-The router, the tools host, and the MCP host are each a single declared Process
-Compose slot — unlike agents (of which a host runs many, and which can collide
-org-wide), a component is exactly one process per role per host. Their start/stop
-flow is therefore the same workspace-check-then-REST shape as
+The router and the tools host are each a single declared Process Compose slot —
+unlike agents (of which a host runs many, and which can collide org-wide), a
+component is exactly one process per role per host. Their start/stop flow is
+therefore the same workspace-check-then-REST shape as
 :mod:`calfcord.supervisor.roster`, *minus* the agent-only pieces:
 
 * **No broker-wide duplicate guard.** ``agent_start`` probes the org for a name
@@ -12,16 +12,15 @@ flow is therefore the same workspace-check-then-REST shape as
   so a probe would be dead work. The role-specific veneer above (``router_start``)
   owns any *cross-host* policy; this base stays minimal.
 * **No not-declared reload path.** Components are always pre-declared in the
-  generated project (substrate + the three fixed roster slots), so a
+  generated project (substrate + the fixed roster slots), so a
   ``start_process`` failure here is a genuine REST/infra fault, not "a brand-new
   agent authored after ``start``" — it is left to propagate (a loud raise) rather
   than mistranslated into the agent-only reload hint.
 
-This is the DRY base ``router start|stop``, ``tools start|stop``, and
-``mcp start|stop`` all build on, so the workspace-check + the REST call site live
-in exactly one place. Like the rest of :mod:`calfcord.supervisor`, it is kept off
-the bridge-only secrets path (no ``calfcord.mcp.config`` import) so it stays
-importable from the CLI entry point and on a host with no MCP credentials.
+This is the DRY base ``router start|stop`` and ``tools start|stop`` both build on,
+so the workspace-check + the REST call site live in exactly one place. Like the
+rest of :mod:`calfcord.supervisor`, it is import-light so it stays importable from
+the CLI entry point.
 """
 
 from __future__ import annotations
@@ -154,7 +153,7 @@ async def component_restart(
     """Reload the singleton component ``name`` after a config edit (``POST`` restart).
 
     The node bakes its config at construction, so a restart is how a ``router
-    set`` / ``router edit`` (or a tools/mcp config change) takes effect on a
+    set`` / ``router edit`` (or a tools config change) takes effect on a
     *running* singleton. Workspace check first (the not-running hint + return ``1``
     if the office isn't open); otherwise ``POST /process/restart/{name}``, print
     ``<name> restarted``, return ``0``.

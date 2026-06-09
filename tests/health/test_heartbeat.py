@@ -11,8 +11,6 @@ the readiness probe.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -193,40 +191,3 @@ def test_is_fresh_default_ttl_is_ten_seconds(tmp_path: Path) -> None:
     )
     assert is_fresh(beat, now=_NOW + timedelta(seconds=10)) is True
     assert is_fresh(beat, now=_NOW + timedelta(seconds=11)) is False
-
-
-# The heartbeat runs as a Process Compose readiness probe on the agent/tools
-# hosts, so importing it must never pull in the bridge-only MCP loader
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets from mcp.json — design §12.3).
-# A fresh interpreter gives a clean ``sys.modules`` to assert against; mirrors
-# ``tests/supervisor/test_compose.py``.
-_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.health.heartbeat  # noqa: F401
-
-leaked = "calfcord.mcp.config" in sys.modules
-assert not leaked, (
-    "health.heartbeat transitively imported the bridge-only MCP loader "
-    "(all calfcord.mcp.*: "
-    + repr([m for m in sys.modules if m.startswith("calfcord.mcp")])
-    + ")"
-)
-print("ISOLATION_OK")
-"""
-
-
-def test_heartbeat_does_not_import_mcp_config() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", _ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

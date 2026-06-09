@@ -20,7 +20,7 @@ Three targets, each with a different honesty posture (§11.6):
   still headed as a reference because per-host paths/users vary.
 * **k8s** — *reference* manifests (clearly annotated): a broker workload, a
   ConfigMap with the shared ``CALF_HOST_URL``, and one Deployment per process type
-  (bridge / router / tools / mcp) plus one per *defined* agent, all on the shipped
+  (bridge / router / tools) plus one per *defined* agent, all on the shipped
   calfcord image running the ``calfkit-*`` console scripts the compose uses. NOT
   ``calfcord start`` (there is no in-pod supervisor); each process type is its own
   workload dialing the shared broker — the Altitude-3 distributed shape. Secrets
@@ -33,8 +33,7 @@ Three targets, each with a different honesty posture (§11.6):
 
 Decoupling invariant (§12.3): this module renders text from a roster + paths and
 inlines **no secret literal**; it imports only :func:`detect_agents` /
-:func:`read_env` (schema/path-only seams) and never
-:mod:`calfcord.mcp.config` (the bridge-only ``$VAR`` secrets loader). ``deploy``
+:func:`read_env` (schema/path-only seams). ``deploy``
 reads the install's agents + ``.env`` off disk and never talks to the running
 supervisor — so it needs no REST probe and no running supervisor to render. It
 does, however, require a native install (``CALFCORD_HOME``): the emitted manifests
@@ -123,7 +122,6 @@ _PROCESS_COMMANDS = {
     "bridge": "calfkit-bridge",
     "router": "calfkit-router",
     "tools": "calfkit-tools",
-    "mcp": "calfkit-mcp",
 }
 
 _VALID_TARGETS = ("systemd", "k8s", "docker")
@@ -237,7 +235,7 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
     ``CALF_HOST_URL`` (an external ``server_urls`` flows through verbatim; a
     localhost-ish one is rewritten to the bundled broker Service so pods don't dial
     their own loopback), a broker Service + Deployment, and one Deployment per
-    process type (bridge / router / tools / mcp) plus one per *defined* agent —
+    process type (bridge / router / tools) plus one per *defined* agent —
     each running a ``calfkit-*`` console script on the shipped image, dialing the
     shared broker. This is the Altitude-3 distributed shape, NOT ``calfcord start``
     (no in-pod supervisor). The roster is sorted so the document order never

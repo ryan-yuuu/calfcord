@@ -10,8 +10,7 @@ It is deliberately **pure**: no supervisor, no broker, no install home. A dev ru
 (``uv run calfcord-cli explain topology``) and a native install must print the
 *same* screen, so this module reads nothing from the environment and touches no
 filesystem — there is no native-install guard. That purity is also why it stays
-import-light (stdlib only) and clear of the bridge-only ``calfcord.mcp.config``
-loader (decoupling invariant, design §12.3).
+import-light (stdlib only).
 
 The surface is a **topic dispatch** so the screen catalogue can grow: ``topology``
 is the only topic that ships today, registered in :data:`TOPICS`. A future topic
@@ -104,9 +103,6 @@ Roster members join the *running* workspace on demand and leave when stopped:
              todos, and the agent-to-agent private_chat tool.
   - router   the receptionist (calfkit-router): decides which agent, if any,
              answers an un-@mentioned message in a watched channel. Optional.
-  - mcp      the MCP host: serves Model Context Protocol tools. It is the only
-             process that holds MCP secrets, so it stays a roster member apart
-             from the agents and tools.
 
   `calfcord agent start <name>` brings a teammate online; `calfcord status`
   shows who is in the office; `calfcord stop` closes it.

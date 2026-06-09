@@ -15,9 +15,7 @@ getter that only resolves once the gateway is ready. The clock and ``sleep`` are
 injected too, so the loop is fully unit-testable with no wall-clock waits.
 
 Kept import-light on purpose (heartbeat + stdlib + asyncio only): this runs inside
-every runner, including the agent/tools hosts, and must never transitively pull in
-the bridge-only secrets loader (``calfcord.mcp.config`` — see the package
-docstring).
+every runner, including the agent/tools hosts (see the package docstring).
 """
 
 from __future__ import annotations

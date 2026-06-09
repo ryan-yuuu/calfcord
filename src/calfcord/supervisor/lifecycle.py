@@ -25,8 +25,7 @@ The hard-won contract from the Phase-0 spike (design §13) lives here:
   short-circuits if the office is already open, and ``stop`` is a no-op if nothing
   is running.
 
-Kept off the bridge-only secrets path (no ``calfcord.mcp.config`` import) like the
-rest of this package.
+Import-light like the rest of this package.
 """
 
 from __future__ import annotations

@@ -25,9 +25,8 @@ Two kinds of field live here:
   *not* written through :func:`write_simple_field`; they appear in :data:`FIELDS`
   only so the menu and ``show`` can list and render them.
 
-The module imports only :mod:`calfcord.agents` seams — no provider SDK, no
-``calfcord.mcp.servers`` — so it stays importable from the lightweight CLI entry
-point.
+The module imports only :mod:`calfcord.agents` seams — no provider SDK — so it
+stays importable from the lightweight CLI entry point.
 """
 
 from __future__ import annotations

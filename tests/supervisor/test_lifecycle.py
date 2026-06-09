@@ -863,28 +863,22 @@ def test_lockfile_path_is_under_state(tmp_path) -> None:
 # --- import isolation -------------------------------------------------------
 
 # The lifecycle now imports ``calfcord.health.check`` for the broker fast-fail
-# precondition (§13.2). That import must stay off the bridge-only secrets path
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets — design §12.3) and must keep
-# aiokafka lazy (it loads only inside ``default_broker_probe``'s coroutine), so
-# importing the supervisor stays pure-filesystem. A fresh interpreter gives a
-# clean ``sys.modules`` to assert against; mirrors ``tests/health/test_check.py``.
+# precondition (§13.2). That import must keep aiokafka lazy (it loads only inside
+# ``default_broker_probe``'s coroutine), so importing the supervisor stays
+# pure-filesystem. A fresh interpreter gives a clean ``sys.modules`` to assert
+# against; mirrors ``tests/health/test_check.py``.
 _ISOLATION_SCRIPT = """
 import sys
 
 import calfcord.supervisor.lifecycle  # noqa: F401
 
-mcp_leaked = "calfcord.mcp.config" in sys.modules
-assert not mcp_leaked, (
-    "supervisor.lifecycle transitively imported the bridge-only MCP loader (all "
-    "calfcord.mcp.*: " + repr([m for m in sys.modules if m.startswith("calfcord.mcp")]) + ")"
-)
 aiokafka_leaked = any(m == "aiokafka" or m.startswith("aiokafka.") for m in sys.modules)
 assert not aiokafka_leaked, "supervisor.lifecycle eagerly imported aiokafka (must be lazy in the probe)"
 print("ISOLATION_OK")
 """
 
 
-def test_lifecycle_does_not_import_mcp_config_or_aiokafka() -> None:
+def test_lifecycle_does_not_import_aiokafka() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _ISOLATION_SCRIPT],
         capture_output=True,

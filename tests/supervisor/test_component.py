@@ -1,7 +1,7 @@
 """Unit tests for the GENERIC component lifecycle (design §2 / §12.0).
 
 ``component_start`` / ``component_stop`` / ``component_restart`` are the DRY base
-every named SINGLETON roster process (``router`` / ``tools`` / ``mcp``) clocks
+every named SINGLETON roster process (``router`` / ``tools``) clocks
 in/out through — the same workspace-check-then-REST shape as the agent roster ops,
 but deliberately WITHOUT the agent-only broker-wide duplicate guard (a component
 is a single declared slot, so a same-host duplicate is impossible and a broker
@@ -258,46 +258,3 @@ def test_component_defaults_to_per_home_process_compose_client(tmp_path):
     assert isinstance(client, ProcessComposeClient)
     expected = ProcessComposeClient(port=pc_port_for(home))
     assert client._base_url == expected._base_url
-
-
-# --- import-lightness (decoupling invariant) --------------------------------
-
-# Must run in a *subprocess* (the ``test_import_isolation.py`` pattern): other
-# tests in the full suite import ``calfcord.mcp.config`` in-process, which would
-# pollute ``sys.modules`` and make an in-process assertion vacuously false.
-_COMPONENT_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.supervisor.component  # noqa: F401
-
-leaked = [m for m in sys.modules if m == "calfcord.mcp.config"]
-assert not leaked, (
-    "component import pulled in the bridge-only MCP secrets loader: "
-    + repr(leaked)
-)
-print("COMPONENT_ISOLATION_OK")
-"""
-
-
-def test_component_module_does_not_import_mcp_config():
-    """component.py must stay off the bridge-only MCP-secrets path (CLAUDE.md, §12.3).
-
-    It will be reused by the ``mcp start/stop`` veneer, which must remain
-    importable on a host that holds no MCP credentials.
-    """
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-c", _COMPONENT_ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "COMPONENT_ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

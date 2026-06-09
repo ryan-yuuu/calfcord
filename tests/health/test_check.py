@@ -16,7 +16,7 @@ isolated and injected so the tests stay offline and deterministic:
 * the bridge is judged by heartbeat freshness against an injected ``now`` and a
   tmp home, so freshness boundaries are exact.
 
-Any other component (an agent id, ``tools``, ``router``, ``mcp``) has no
+Any other component (an agent id, ``tools``, ``router``) has no
 readiness signal — those roster runners never beat — so probing one is a
 programming/config bug, and the probe raises rather than fabricating a verdict.
 """
@@ -92,7 +92,7 @@ async def test_bridge_component_unhealthy_when_beat_missing(tmp_path: Path) -> N
 
 async def test_unrecognized_component_raises_with_context(tmp_path: Path) -> None:
     # Only the broker and the bridge carry a readiness signal; the roster runners
-    # (agents, tools, router, mcp) go through run_worker_until_signal and never
+    # (agents, tools, router) go through run_worker_until_signal and never
     # beat, so they have no heartbeat to read. Probing one is a programming/config
     # bug — Process Compose only ever generates broker/bridge probes — so the
     # function must RAISE with the offending component (the error convention's
@@ -183,22 +183,14 @@ async def test_default_broker_probe_uses_real_aiokafka_client_and_degrades() -> 
     assert await probe() is False
 
 
-# The exec probe runs on the agent/tools hosts, so importing the healthcheck
-# logic must never pull in the bridge-only MCP secrets loader
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets — design §12.3), and the
-# admin client (aiokafka) must stay lazy so the import is pure-filesystem. A
-# fresh interpreter gives a clean ``sys.modules`` to assert against; mirrors
-# ``tests/health/test_heartbeat.py``.
+# The exec probe runs on the agent/tools hosts, so the admin client (aiokafka)
+# must stay lazy so the import is pure-filesystem. A fresh interpreter gives a
+# clean ``sys.modules`` to assert against; mirrors ``tests/health/test_heartbeat.py``.
 _ISOLATION_SCRIPT = """
 import sys
 
 import calfcord.health.check  # noqa: F401
 
-mcp_leaked = "calfcord.mcp.config" in sys.modules
-assert not mcp_leaked, (
-    "health.check transitively imported the bridge-only MCP loader (all "
-    "calfcord.mcp.*: " + repr([m for m in sys.modules if m.startswith("calfcord.mcp")]) + ")"
-)
 # aiokafka must be lazy-imported inside the broker probe, not at module load.
 aiokafka_leaked = any(m == "aiokafka" or m.startswith("aiokafka.") for m in sys.modules)
 assert not aiokafka_leaked, "health.check eagerly imported aiokafka (must be lazy in the probe)"
@@ -206,7 +198,7 @@ print("ISOLATION_OK")
 """
 
 
-def test_check_does_not_import_mcp_config_or_aiokafka() -> None:
+def test_check_does_not_import_aiokafka() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _ISOLATION_SCRIPT],
         capture_output=True,

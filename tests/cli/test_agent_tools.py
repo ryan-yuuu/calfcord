@@ -95,11 +95,6 @@ def _checked(choices: list[Choice]) -> set[str]:
     return {c.value for c in choices if c.checked}
 
 
-def _values(choices: list[Choice]) -> set[str]:
-    """Return every choice VALUE from a captured choices list (checked or not)."""
-    return {c.value for c in choices}
-
-
 # ---------------------------------------------------------------- pre-selection ---
 
 
@@ -109,8 +104,7 @@ def test_omitted_tools_prechecks_all_builtins(tmp_path: Path) -> None:
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
     assert fake.last_checkbox_choices is not None
-    # ``tools:`` omitted ⇒ every builtin pre-checked (and only builtins —
-    # there are no MCP schemas in this repo, so no selectors appear anyway).
+    # ``tools:`` omitted ⇒ every builtin pre-checked.
     assert _checked(fake.last_checkbox_choices) == BUILTIN_NAMES
 
 
@@ -184,79 +178,7 @@ def test_unknown_named_agent_returns_1(tmp_path: Path, capsys) -> None:
     assert "ghost" in capsys.readouterr().out
 
 
-# --------------------------------------------------- preserving unknown tokens ---
-
-
-def test_configured_mcp_selectors_kept_when_catalog_empty(tmp_path: Path) -> None:
-    """An agent's existing ``mcp/...`` selectors must survive an empty catalog.
-
-    This repo ships no MCP schemas, so ``discover_mcp_catalog`` returns ``{}``
-    and the selectors aren't enumerable. They must still appear as PRE-CHECKED
-    "kept" rows so confirming the checkbox never silently drops them.
-    """
-    _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
-    fake = FakePrompter(checkbox_result=[])
-    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
-
-    assert fake.last_checkbox_choices is not None
-    values = _values(fake.last_checkbox_choices)
-    checked = _checked(fake.last_checkbox_choices)
-    # The unenumerable MCP selectors are present AND pre-checked.
-    assert {"mcp/gmail", "mcp/gmail/search"} <= values
-    assert {"mcp/gmail", "mcp/gmail/search"} <= checked
-    # The builtin is enumerated and pre-checked too.
-    assert "read_file" in checked
-
-
-def test_keeping_prechecked_kept_tokens_writes_all_tokens(tmp_path: Path) -> None:
-    """Confirming with the kept MCP tokens still checked preserves every token."""
-    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
-    # The operator confirms without unchecking anything: returns the full set.
-    fake = FakePrompter(checkbox_result=["read_file", "mcp/gmail", "mcp/gmail/search"])
-    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
-
-    # Nothing dropped: all three tokens still on disk after the round-trip.
-    assert parse_agent_md(md_path).tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
-
-
-def test_unchecking_kept_mcp_token_removes_it(tmp_path: Path) -> None:
-    """Unchecking a kept MCP token drops exactly that token and keeps the rest."""
-    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file, mcp/gmail, mcp/gmail/search]")
-    # Operator unticks ``mcp/gmail`` only.
-    fake = FakePrompter(checkbox_result=["read_file", "mcp/gmail/search"])
-    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
-
-    assert parse_agent_md(md_path).tools == ("read_file", "mcp/gmail/search")
-
-
 # ------------------------------------------------------------- error handling ---
-
-
-def test_corrupt_mcp_schema_degrades_to_builtins_with_warning(tmp_path: Path, capsys, monkeypatch) -> None:
-    """A generated MCP schema that raises a non-Import/Value error must not brick
-    the editor: ``_build_choices`` catches it broadly, warns, and degrades to
-    builtins-only (a ``SyntaxError``/``AttributeError`` from a malformed module
-    can escape ``discover_mcp_catalog`` just like ``ImportError``/``ValueError``).
-    """
-    import calfcord.mcp.discovery as discovery
-
-    def _boom(_package: object) -> dict[str, object]:
-        raise AttributeError("corrupt generated schema module")
-
-    # ``_build_choices`` imports ``discover_mcp_catalog`` from this module at call
-    # time, so patching the attribute here is what the lookup resolves to.
-    monkeypatch.setattr(discovery, "discover_mcp_catalog", _boom)
-
-    _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
-    fake = FakePrompter(checkbox_result=[])
-    # The run must complete (no raised exception) despite the corrupt schema.
-    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
-
-    out = capsys.readouterr().out
-    assert "warning: MCP catalog failed to load" in out
-    # Degraded to builtins-only: every builtin is still offered as a row.
-    assert fake.last_checkbox_choices is not None
-    assert _values(fake.last_checkbox_choices) >= BUILTIN_NAMES
 
 
 def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> None:

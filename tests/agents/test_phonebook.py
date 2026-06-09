@@ -56,19 +56,9 @@ class TestFromRegistry:
         result = phonebook_from_registry(registry)
         assert [e.agent_id for e in result] == ["zeta", "alpha", "mu"]
 
-    def test_strips_mcp_selectors_keeping_only_builtins(self) -> None:
-        """A spec whose ``tools`` mixes bare builtins and ``mcp/...`` selectors
-        projects only the builtins into the phonebook — MCP tools are not
-        A2A peers, so downstream consumers (persona lookup, peer rosters)
-        never need to see them."""
-        registry = AgentRegistry(
-            [
-                _agent(
-                    "alice",
-                    tools=("private_chat", "mcp/gmail", "shell", "mcp/cal/list"),
-                )
-            ]
-        )
+    def test_builtin_tools_pass_through(self) -> None:
+        """A spec's builtin ``tools`` project verbatim into the phonebook entry."""
+        registry = AgentRegistry([_agent("alice", tools=("private_chat", "shell"))])
         result = phonebook_from_registry(registry)
         assert result[0].tools == ("private_chat", "shell")
 

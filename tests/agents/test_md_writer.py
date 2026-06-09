@@ -304,17 +304,6 @@ def test_update_tools_empty_writes_empty_list(tmp_path: Path) -> None:
     assert frontmatter.load(md_path).metadata["tools"] == []
 
 
-def test_update_tools_accepts_well_formed_mcp_selector(tmp_path: Path) -> None:
-    """A syntactically valid ``mcp/...`` selector passes even with no catalog.
-
-    Catalog existence is a deployment concern the writer deliberately does not
-    check — mirroring the frontmatter validator's syntax-only stance.
-    """
-    md_path = _seed_md(tmp_path)
-    updated = update_tools(md_path, ["read_file", "mcp/gmail", "mcp/gmail/search"])
-    assert updated.tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
-
-
 def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> None:
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")
@@ -326,13 +315,15 @@ def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> 
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
-def test_update_tools_malformed_mcp_selector_raises_and_leaves_file(tmp_path: Path) -> None:
+def test_update_tools_rejects_mcp_token_and_leaves_file(tmp_path: Path) -> None:
+    """MCP is no longer supported: an ``mcp/...`` token is rejected at write
+    time with the canonical message, and the on-disk file is untouched —
+    mirroring the parse-time frontmatter gate."""
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")
 
-    # ``mcp/a/b/c`` has too many segments — rejected by parse_mcp_selector.
-    with pytest.raises(ValueError, match="mcp/a/b/c"):
-        update_tools(md_path, ["mcp/a/b/c"])
+    with pytest.raises(ValueError, match="MCP tools are not currently supported"):
+        update_tools(md_path, ["read_file", "mcp/gmail"])
 
     assert md_path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob(".*.tmp")) == []

@@ -267,7 +267,7 @@ def _edit_field(
 
     if field.kind == "tools":
         # Reuse the existing checkbox editor wholesale — it owns the
-        # builtin/MCP enumeration, pre-checking, and validated write.
+        # builtin-tool enumeration, pre-checking, and validated write.
         agent_tools.run(prompter, agents_dir=agents_dir, name=name)
         return True
 

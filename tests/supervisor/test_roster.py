@@ -311,14 +311,13 @@ class _RaisingProbe:
 
 async def test_agent_ps_physical_excludes_all_non_agent_processes(tmp_path, capsys):
     """The physical half of `ps` lists only AGENTS — not the substrate
-    (broker/bridge) and not the other non-agent processes (tools/router/mcp)."""
+    (broker/bridge) and not the other non-agent processes (tools/router)."""
     client = _StubClient(
         list_processes_result=[
             {"name": "broker", "status": "Running"},
             {"name": "bridge", "status": "Running"},
             {"name": "tools", "status": "Running"},
             {"name": "router", "status": "Running"},
-            {"name": "mcp", "status": "Running"},
             {"name": "assistant", "status": "Running"},
         ]
     )
@@ -331,7 +330,7 @@ async def test_agent_ps_physical_excludes_all_non_agent_processes(tmp_path, caps
     assert rc == 0
     out = capsys.readouterr().out
     assert "assistant" in out
-    for non_agent in ("broker", "bridge", "tools", "router", "mcp"):
+    for non_agent in ("broker", "bridge", "tools", "router"):
         assert non_agent not in out
 
 
@@ -562,7 +561,7 @@ async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys)
     """`start --all` must NEVER touch a reserved (substrate/singleton) process.
 
     The caller (main.py) passes the RAW ``.md`` stems from ``detect_agents``,
-    unfiltered — and a creatable ``tools.md`` / ``router.md`` / ``mcp.md`` /
+    unfiltered — and a creatable ``tools.md`` / ``router.md`` /
     ``broker.md`` / ``bridge.md`` is not rejected by the id pattern (only
     ``calfcord start``'s ``build_compose_project`` rejects them). So if a reserved
     name leaks into ``agent_ids`` the sweep must drop it rather than ``start`` /
@@ -606,7 +605,7 @@ async def test_agent_start_all_all_reserved_is_clean_no_op(tmp_path, capsys):
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
-        agent_ids=["tools", "router", "mcp", "broker", "bridge"],
+        agent_ids=["tools", "router", "broker", "bridge"],
         server_urls=_SERVERS,
         client=client,
         probe=probe,
@@ -622,7 +621,7 @@ async def test_agent_start_all_all_reserved_is_clean_no_op(tmp_path, capsys):
 async def test_agent_start_single_op_refuses_reserved_name(tmp_path, capsys):
     """A single ``agent start tools`` is refused at the chokepoint: error + exit 1.
 
-    Reserved names (substrate + the tools/router/mcp singletons) are owned by
+    Reserved names (substrate + the tools/router singletons) are owned by
     ``calfcord start`` and their own component verbs, never the agent roster. The
     single-op guard at the top of ``agent_start`` closes the ``agent start tools``
     exposure before any workspace check / probe / start runs.
@@ -817,7 +816,7 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
     """`stop --all` stops every Running local AGENT — never the substrate/singletons.
 
     The target set is the same physical filter `ps` uses: Running processes whose
-    name is not a reserved (substrate/tools/router/mcp) process. A Stopped agent is
+    name is not a reserved (substrate/tools/router) process. A Stopped agent is
     not a target. An all-success sweep returns 0.
     """
     client = _StubClient(
@@ -825,7 +824,6 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
             {"name": "broker", "status": "Running"},  # substrate — never
             {"name": "tools", "status": "Running"},  # singleton — never
             {"name": "router", "status": "Running"},  # singleton — never
-            {"name": "mcp", "status": "Running"},  # singleton — never
             {"name": "assistant", "status": "Running"},  # agent → stop
             {"name": "scheduler", "status": "Running"},  # agent → stop
             # PC v1.110.0 reports an operator-stopped slot as "Completed" (never
@@ -838,7 +836,7 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
 
     assert rc == 0
     assert sorted(client.stop_calls) == ["assistant", "scheduler"]
-    for never in ("broker", "tools", "router", "mcp", "dormant"):
+    for never in ("broker", "tools", "router", "dormant"):
         assert never not in client.stop_calls
     # The summary pins the count math (2 targets, 0 failed) + wording.
     assert "stop --all: 2 agent(s) processed, 0 failed." in capsys.readouterr().out
@@ -1119,49 +1117,3 @@ async def test_default_probe_delegates_to_probe_live_roster(monkeypatch):
 
     assert seen["server_urls"] == _SERVERS
     assert [d.agent_id for d in result] == ["assistant"]
-
-
-# --- import-lightness (decoupling invariant) --------------------------------
-
-# Must run in a *subprocess* (the ``test_import_isolation.py`` pattern): other
-# tests in the full suite import ``calfcord.mcp.config`` in-process, which would
-# pollute ``sys.modules`` and make an in-process assertion vacuously false. A
-# fresh interpreter gives a clean ``sys.modules`` to assert against.
-_ROSTER_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.supervisor.roster  # noqa: F401
-
-leaked = [m for m in sys.modules if m == "calfcord.mcp.config"]
-assert not leaked, (
-    "roster import pulled in the bridge-only MCP secrets loader: "
-    + repr(leaked)
-)
-print("ROSTER_ISOLATION_OK")
-"""
-
-
-def test_roster_module_does_not_import_mcp_config():
-    """roster.py must stay off the bridge-only MCP-secrets path (CLAUDE.md, §12.3).
-
-    Importing ``calfcord.supervisor.roster`` must not drag in
-    ``calfcord.mcp.config`` (transport + ``$VAR`` secrets), preserving the
-    CLI/agent-side import isolation so the roster ops stay importable on a host
-    that holds no MCP credentials.
-    """
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-c", _ROSTER_ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ROSTER_ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

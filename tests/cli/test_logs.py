@@ -374,28 +374,3 @@ def test_logs_uses_the_shared_supervisor_log_stem() -> None:
     from calfcord.supervisor import compose
 
     assert logs_mod._SUPERVISOR_LOG_NAME == compose.SUPERVISOR_LOG_STEM
-
-
-# --- decoupling invariant --------------------------------------------------
-
-
-def test_logs_does_not_import_mcp_config() -> None:
-    import subprocess
-    import sys
-
-    script = (
-        "import sys\n"
-        "import calfcord.cli.logs  # noqa: F401\n"
-        'assert "calfcord.mcp.config" not in sys.modules, '
-        '"logs transitively imported the bridge-only MCP loader: " '
-        '+ repr([m for m in sys.modules if m.startswith("calfcord.mcp")])\n'
-        'print("ISOLATION_OK")\n'
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ISOLATION_OK" in result.stdout

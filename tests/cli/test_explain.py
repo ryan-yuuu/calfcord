@@ -2,14 +2,10 @@
 
 ``explain`` is a pure teaching command: no supervisor, no broker, no install
 home. These tests pin the *content contract* (it must name the substrate, the
-roster, the four(+MCP) process types, and the distributed graduation) through an
-injected output sink, and assert — by importing it in a fresh interpreter — that
-it stays clear of the bridge-only MCP loader (the decoupling invariant).
+roster, the four process types, and the distributed graduation) through an
+injected output sink.
 """
 from __future__ import annotations
-
-import subprocess
-import sys
 
 import pytest
 
@@ -33,10 +29,10 @@ def test_topology_names_the_substrate() -> None:
 
 
 def test_topology_names_the_roster() -> None:
-    # Teammates that clock in/out on demand: agents, tools, router, mcp.
+    # Teammates that clock in/out on demand: agents, tools, router.
     text = explain.render_topology().lower()
     assert "roster" in text
-    for member in ("agent", "tools", "router", "mcp"):
+    for member in ("agent", "tools", "router"):
         assert member in text, f"topology omits roster member {member!r}"
 
 
@@ -102,42 +98,3 @@ def test_explain_needs_no_install_home(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[str] = []
     assert explain.run_topology(out=captured.append) == 0
     assert captured and captured[0].strip()
-
-
-# --------------------------------------------------------------------- isolation
-
-
-# Importing the teaching screen must never pull in the bridge-only MCP loader
-# (``calfcord.mcp.config`` expands ``$VAR`` secrets from mcp.json — design §12.3).
-# A fresh interpreter gives a clean ``sys.modules`` to assert against; mirrors
-# ``tests/supervisor/test_compose.py``.
-_ISOLATION_SCRIPT = """
-import sys
-
-import calfcord.cli.explain  # noqa: F401
-
-leaked = "calfcord.mcp.config" in sys.modules
-assert not leaked, (
-    "cli.explain transitively imported the bridge-only MCP loader "
-    "(all calfcord.mcp.*: "
-    + repr([m for m in sys.modules if m.startswith("calfcord.mcp")])
-    + ")"
-)
-print("ISOLATION_OK")
-"""
-
-
-def test_explain_does_not_import_mcp_config() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", _ISOLATION_SCRIPT],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"isolation subprocess failed (exit={result.returncode})\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "ISOLATION_OK" in result.stdout, (
-        "isolation subprocess exited 0 but did not run to completion "
-        f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )

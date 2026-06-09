@@ -5,7 +5,6 @@ Each long-lived calfcord process refreshes a small JSON heartbeat under
 exec probe Process Compose runs on the *agent/tools hosts* reads it to decide
 readiness. This package is therefore deliberately light and dependency-free at
 its core: :mod:`calfcord.health.heartbeat` is pure filesystem with no broker and
-no config, so it can be imported on a host that has no shared filesystem and must
-never transitively pull in ``calfcord.mcp.config`` (the bridge-only secrets
-loader) — a readiness probe must not carry secrets or heavy deps.
+no config, so it can be imported on a host that has no shared filesystem — a
+readiness probe must not carry secrets or heavy deps.
 """

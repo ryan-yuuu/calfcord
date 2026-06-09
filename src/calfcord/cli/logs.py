@@ -20,10 +20,8 @@ seams the generator uses: the reserved substrate/component names
 agent ids (:func:`calfcord.cli._agents.detect_agents`, the seam ``start`` and
 ``agent list`` consume), plus the supervisor's own ``process-compose`` log.
 
-Decoupling invariant: like the rest of the supervisor-facing CLI surface, this
-module must NOT pull in the bridge-only MCP secrets loader
-(``calfcord.mcp.config``). It imports only ``_agents.detect_agents`` and the
-``compose`` log-path / name-set seams, both of which are import-light.
+This module imports only ``_agents.detect_agents`` and the ``compose``
+log-path / name-set seams, both of which are import-light.
 
 The native-install guard (a dev run has no ``$CALFCORD_HOME`` and therefore no
 state/logs dir) lives in the ``main.py`` veneer, alongside every other
@@ -69,7 +67,7 @@ def _known_names(agents_dir: Path) -> list[str]:
     # ``_RESERVED_PROCESS_NAMES`` is a frozenset; pin a stable, readable order
     # (substrate then the fixed components) rather than its hash order.
     ordered_reserved = [
-        name for name in ("broker", "bridge", "tools", "router", "mcp")
+        name for name in ("broker", "bridge", "tools", "router")
         if name in _RESERVED_PROCESS_NAMES
     ]
     return [*ordered_reserved, *detect_agents(agents_dir), _SUPERVISOR_LOG_NAME]
