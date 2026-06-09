@@ -538,11 +538,10 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "authlib" },
-    { name = "calfkit", extra = ["mcp-codegen"] },
+    { name = "calfkit" },
     { name = "discord-py" },
     { name = "httpx" },
     { name = "inquirerpy" },
-    { name = "jsonschema" },
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
     { name = "pydantic-settings" },
@@ -563,11 +562,10 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", extras = ["mcp-codegen"], specifier = "~=0.6.0" },
+    { name = "calfkit", specifier = "~=0.7.0" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
-    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
     { name = "openhands-tools", specifier = ">=1.23.1" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
@@ -586,7 +584,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -595,7 +593,6 @@ dependencies = [
     { name = "genai-prices" },
     { name = "griffe" },
     { name = "httpx" },
-    { name = "mcp" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
@@ -605,15 +602,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/e2/5a26bb9251ffad07b316314b56da3bcfb77ac0782f15a7ffddd77939f850/calfkit-0.6.0.tar.gz", hash = "sha256:44fbd8fa61658d89042edef6374dfe5ff6316b8e36922f441dc5813b3898665e", size = 864235, upload-time = "2026-06-06T06:15:46.585Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/ef/a6c7aa2acb716f75ffe80f1b86a668713bd04cb019d1a5aa89d6fc78feb4/calfkit-0.7.0.tar.gz", hash = "sha256:877f40ac5e7d5eb9db722655ca45253816a508f69680fc5cb8a1283069744451", size = 780012, upload-time = "2026-06-09T00:01:05.973Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/a9/d801361a102c6c7259a4c1c2fe60e2fd538a2de61652d81c7bed1346be0e/calfkit-0.6.0-py3-none-any.whl", hash = "sha256:bbf8517b36cddaf5280c1e4127f0f115e970f606958786030c34713da1dcddc6", size = 680716, upload-time = "2026-06-06T06:15:45.026Z" },
-]
-
-[package.optional-dependencies]
-mcp-codegen = [
-    { name = "typer" },
-    { name = "watchfiles" },
+    { url = "https://files.pythonhosted.org/packages/1f/88/32c71fcf0f0949422ece601a764fa04c27a328a0c2d831ba1688cead4346/calfkit-0.7.0-py3-none-any.whl", hash = "sha256:bac12e9f634f7e6e66664ee144975c99b3d53c3fa961da49413270561c68e7de", size = 637002, upload-time = "2026-06-09T00:01:04.348Z" },
 ]
 
 [[package]]
