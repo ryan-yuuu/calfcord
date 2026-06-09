@@ -14,7 +14,7 @@
 
 
 # ── builder ──────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Copy the static ``uv`` binary from the upstream image rather than
 # ``curl | sh``; keeps the build hermetic and version-pinnable.
@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY agents ./agents
 
 # ── runtime ──────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # OS packages the calfcord tools need at runtime. Strictly minimal — no
 # build toolchain leaks past the builder stage.
