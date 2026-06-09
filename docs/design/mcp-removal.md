@@ -1,6 +1,7 @@
 # Plan: remove MCP support & bump calfkit to 0.7.0
 
-**Status:** approved — open questions resolved (§8); ready for review then implementation
+**Status:** shipped on `main` (commits `refactor!: remove deprecated MCP support`,
+`chore(deps): bump calfkit 0.6.0 -> 0.7.0`, `docs: drop MCP references`); reviewed.
 **Author:** scoped 2026-06-08
 **Trigger:** calfkit **0.7.0** removes the MCP adaptor entirely. calfcord must delete its
 use of the deprecated MCP API and bump the pin. calfkit will ship a *v2* MCP later;
@@ -72,7 +73,11 @@ Two architectural consequences of removal:
   `tests/supervisor/test_lifecycle.py` — they also assert `aiokafka` stays lazy, a still-valid
   invariant). A `/simplify` follow-up should then ask whether the lazy-import scaffolding those
   guards protected (e.g. deferred `from calfcord.tools import TOOL_REGISTRY`) still earns its
-  keep now the invariant is gone.
+  keep now the invariant is gone. **Note (post-review):** the deferred `TOOL_REGISTRY` imports
+  guard a *real* bridge↔tools import cycle + a per-import perf cost, not the (now-gone) mcp.config
+  boundary, so they stay. But the codebase now has **no** test guarding the host-agnostic/bridge
+  decoupling invariant (CLAUDE.md §12.3) — **when calfkit v2 MCP returns with a credentialed
+  bridge-only loader, restore an import-isolation guard for it.**
 - calfcord returns to **four process types** (bridge / agent / tools / router), matching
   `CLAUDE.md`; `architecture.md`'s "five, not four" note is deleted.
 

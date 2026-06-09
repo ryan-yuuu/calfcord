@@ -196,6 +196,21 @@ def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> Non
     assert "broken" in out
 
 
+def test_mcp_entry_in_md_reports_error_not_traceback(tmp_path: Path, capsys) -> None:
+    """A committed ``.md`` still carrying an ``mcp/...`` tool no longer parses
+    (the parse-time gate rejects it), so the editor reports an operator-
+    recoverable error naming the agent and exits 1 — never a raw traceback. This
+    is the read-path the editor's docstring promises handles such a file."""
+    agents_dir = tmp_path
+    _seed_agent(agents_dir, "legacy", tools_line="[shell, mcp/gmail]")
+    fake = FakePrompter()
+    assert agent_tools.run(fake, agents_dir=agents_dir, name="legacy") == 1
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "legacy" in out
+    assert "MCP tools are not currently supported" in out
+
+
 # -------------------------------------------------------------- first_line ---
 
 

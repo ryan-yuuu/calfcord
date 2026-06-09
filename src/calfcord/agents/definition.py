@@ -245,7 +245,8 @@ class AgentDefinition(BaseModel):
         Bare names (anything not starting with ``mcp/`` — ``shell``,
         ``calendar``, …) pass through **untouched**. Whether a bare name
         actually resolves to a registered builtin is checked later, by
-        :meth:`AgentFactory._resolve_tools` against ``TOOL_REGISTRY``; rejecting
+        :meth:`AgentFactory._resolve_tools` against the factory's tool registry
+        (defaults to :data:`~calfcord.tools.TOOL_REGISTRY`); rejecting
         arbitrary bare names here would couple this leaf schema to the tool
         registry and break code-built definitions that name tools the local
         registry doesn't (yet) hold.

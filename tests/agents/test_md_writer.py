@@ -329,6 +329,15 @@ def test_update_tools_rejects_mcp_token_and_leaves_file(tmp_path: Path) -> None:
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
+def test_update_tools_mcp_token_rejected_before_unknown_builtin(tmp_path: Path) -> None:
+    """The MCP gate wins precedence over the unknown-builtin check: a list with
+    BOTH an ``mcp/...`` token and a bogus builtin raises the MCP message, not the
+    generic 'unknown tool' one — so the actionable error can't regress."""
+    md_path = _seed_md(tmp_path)
+    with pytest.raises(ValueError, match="MCP tools are not currently supported"):
+        update_tools(md_path, ["mcp/gmail", "definitely_not_a_builtin"])
+
+
 def test_update_tools_non_string_token_raises_valueerror_and_leaves_file(tmp_path: Path) -> None:
     """A non-string token surfaces as ``ValueError`` (the documented seam), not
     an ``AttributeError`` from the selector check reaching for ``.startswith``.

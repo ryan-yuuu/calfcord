@@ -17,8 +17,10 @@ def test_is_mcp_tool_true(entry: str) -> None:
     assert is_mcp_tool(entry) is True
 
 
-@pytest.mark.parametrize("entry", ["shell", "read_file", "calendar", "mcpserver"])
+@pytest.mark.parametrize("entry", ["shell", "read_file", "calendar", "mcpserver", "mcp", ""])
 def test_is_mcp_tool_false(entry: str) -> None:
+    # ``mcp`` (no slash) and the empty string are NOT selectors — the guard is a
+    # ``mcp/`` prefix check, not a substring/name match.
     assert is_mcp_tool(entry) is False
 
 
