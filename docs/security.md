@@ -121,6 +121,13 @@ manifest, no allowlist — the discovery loader picks up every
 operational: review every PR that touches `tools/builtin/`, including
 the function bodies and their imports.
 
+The same trust assumption extends to **MCP servers**: a server in `mcp.json`
+is external code (a command this host launches, or a remote endpoint) that
+receives whatever arguments the agent's LLM passes its tools. Vet a server
+before adding it the way you would a builtin, and scope its credentials to the
+minimum the integration needs — the `mcp-<server>` process holds them. See
+[`mcp-tools.md`](./mcp-tools.md).
+
 ### 2.4 Not in scope
 
 - **Sandbox escape from the `calfkit-tools` container itself.** If an
@@ -321,6 +328,15 @@ matters in practice.
   (`calfcord stop` then `calfcord start`).
 - **Rotate provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
   on suspected compromise.** These have billing implications.
+- **Keep MCP credentials in `config/.env`, not in `mcp.json`.** MCP server
+  entries may carry literal secrets (the file is `0600`, like `.env`), but
+  prefer a `$VAR` reference in `mcp.json` whose value lives in `config/.env`
+  so the registry file holds no secret. `mcp.json` and its expanded secrets
+  are read **only** by the `calfkit-mcp` server processes (and the
+  `calfcord mcp` CLI) — agents resolve MCP tools from the broker's capability
+  view, never the config — so on a distributed deploy the credentials live on
+  the MCP host alone and never reach agent hosts. See
+  [`mcp-tools.md`](./mcp-tools.md).
 
 ### 5.2 Discord scoping
 

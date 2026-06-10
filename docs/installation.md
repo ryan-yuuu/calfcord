@@ -204,6 +204,12 @@ The tools host's workspace defaults to **the directory you launch the workspace
 Claude Code works. Mind the trust implications before pointing it at sensitive
 files: [`security.md`](security.md#33-tools-native-broker--others-in-docker).
 
+The installer also seeds an empty MCP server registry at
+`~/.calfcord/config/mcp.json` (mode `0600`, never clobbered on update). It stays
+empty until you add a server with `calfcord mcp add` — that's how agents reach
+external [MCP](https://modelcontextprotocol.io) tools. See
+[`mcp-tools.md`](mcp-tools.md).
+
 ## Going to production
 
 Running the same agents across machines is a deployment change, not a rewrite:

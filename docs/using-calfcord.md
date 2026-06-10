@@ -167,6 +167,32 @@ calfcord tools stop
 
 → What each tool does and how to write your own: [authoring-tools.md](authoring-tools.md).
 
+## Give agents external tools over MCP
+
+Want your agents to call a GitHub server, a docs endpoint, or any other Model
+Context Protocol (MCP) server? Add it to `mcp.json` and calfcord runs it as its
+own roster process that advertises its tools on the bus:
+
+```bash
+calfcord mcp add                    # interactive wizard (name → transport → command/URL → env)
+calfcord mcp list                   # configured servers + best-effort running state
+calfcord mcp start github           # bring one online (start of a running slot = restart in place)
+calfcord mcp start --all            # re-pick up mcp.json: (re)start every configured server
+calfcord mcp stop github            # take it offline
+calfcord mcp restart github         # reload after editing its mcp.json entry
+calfcord mcp remove github          # delete the entry (--force to skip the confirm)
+```
+
+A server you add *after* `calfcord start` isn't a declared supervisor slot yet,
+so reload the workspace once (`calfcord stop && calfcord start`) before starting
+it — `calfcord mcp start` prints this hint when it applies. Then grant the tools
+to an agent by adding an `mcp/<server>` (or `mcp/<server>/<tool>`) entry to its
+`tools:` list — `calfcord agent tools <name>` offers those rows — and restart
+the agent to apply.
+
+→ The full end-to-end walkthrough, `mcp.json` schema, and selector grammar:
+[mcp-tools.md](mcp-tools.md).
+
 ## Use your ChatGPT subscription as the model
 
 Don't want to pay per token? Sign in with a ChatGPT Plus/Pro account (Codex) — a device-code flow
@@ -231,6 +257,7 @@ calfcord run bridge        # the Discord gateway
 calfcord run agent <name>  # one agent in the foreground
 calfcord run router        # the ambient router
 calfcord run tools         # the built-in tools host
+calfcord run mcp <server>  # one MCP server's toolbox (from mcp.json)
 calfcord broker            # the bundled native broker, standalone
 ```
 

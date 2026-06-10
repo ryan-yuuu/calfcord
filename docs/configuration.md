@@ -86,6 +86,23 @@ another host (see [`distributed-deployment.md`](./distributed-deployment.md)).
 | `CALFCORD_WORKSPACE_DIR` | optional | Host path the filesystem/search/shell tools resolve against. Native install: the `calfcord` shim defaults it to **the directory the workspace (`calfcord start`) was launched from** (`$PWD`, the Claude-Code model — not a hidden dir). Bare `uv run` keeps the CWD-relative `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md) § 3.3. |
 | `CALFCORD_SHELL_BACKEND` | optional | Force the `shell` tool backend: `tmux` \| `subprocess` \| `powershell`. Default auto-detects (tmux if installed, else subprocess). |
 
+## MCP servers (`mcp.json`)
+
+MCP servers are configured in a **separate file**, `mcp.json` — not in `.env`.
+Only the `calfkit-mcp` processes (and the `calfcord mcp` CLI) read it; agents
+resolve their MCP tools from the broker, so an agent host needs no `mcp.json`.
+Manage it with `calfcord mcp add|list|remove` and the per-server lifecycle
+verbs — see [`mcp-tools.md`](./mcp-tools.md) for the full schema and workflow.
+
+The file lives at `$CALFCORD_HOME/config/mcp.json` (next to `config/.env`),
+seeded empty (`{"mcpServers": {}}`, mode `0600`) by the installer and never
+clobbered. Secret values inside `mcp.json` should be `$VAR` references whose
+values you set in `config/.env`; they are expanded when a server starts.
+
+| Variable | Required | Description |
+|---|---|---|
+| `CALFCORD_MCP_CONFIG` | optional | Absolute path to the `mcp.json` an MCP process / the `mcp` CLI reads, overriding the default. Resolution: this var → `$CALFCORD_HOME/config/mcp.json` → `./mcp.json` (dev fallback). |
+
 ## Supervisor (Process Compose)
 
 On a native install, `calfcord start` runs the substrate under a small process
@@ -163,3 +180,5 @@ Which restart depends on which process reads the value you changed:
 - [`architecture.md`](./architecture.md) — which process needs which variable.
 - [`authoring-agents.md`](./authoring-agents.md) — per-agent frontmatter (the
   `.md` config that complements these env vars).
+- [`mcp-tools.md`](./mcp-tools.md) — the `mcp.json` MCP-server registry and the
+  `calfcord mcp` CLI.

@@ -127,21 +127,24 @@ What each target renders:
 - **`k8s`** — **reference** manifests (clearly annotated as such): a
   bundled broker workload + Service, a ConfigMap with the shared
   `CALF_HOST_URL`, and one Deployment per process type (bridge / router /
-  tools) plus one per *defined* agent — each running a `calfkit-*`
-  console script on the shipped image, dialing the shared broker. This is
-  the Altitude-3 distributed shape, **not** `calfcord start` (there is no
-  in-pod supervisor; each process type is its own workload). Secrets
-  arrive via a `Secret` you create out of band
-  (`kubectl create secret generic calfcord-secrets --from-env-file=.env`),
-  never inlined. Tune replicas, resource limits, ingress, and durable
-  broker storage per cluster.
+  tools) plus one per *defined* agent **and one per configured MCP server**
+  (`calfkit-mcp <server>`) — each running a `calfkit-*` console script on the
+  shipped image, dialing the shared broker. This is the Altitude-3 distributed
+  shape, **not** `calfcord start` (there is no in-pod supervisor; each process
+  type is its own workload). Secrets arrive via a `Secret` you create out of
+  band (`kubectl create secret generic calfcord-secrets --from-env-file=.env`),
+  never inlined. Tune replicas, resource limits, ingress, and durable broker
+  storage per cluster.
 - **`docker`** — the shipped `docker-compose.yml` is hand-tuned (Codex
   auth mounts, the A2A channel override, `depends_on` healthchecks), so
   regenerating it would lose that nuance. `deploy docker` therefore
   *points at the real file* and, when you have agents, emits an optional
   `compose.override.yml` snippet that splits the single all-in-one `agent`
   service into one `calfkit-agent <name>` service per agent (crash
-  isolation), each inheriting the base build/env via `extends`.
+  isolation), each inheriting the base build/env via `extends`. The Docker
+  path does **not** yet cover MCP servers — run those on a native or systemd
+  host alongside the Docker broker, or add `calfkit-mcp <server>` services to
+  your compose file by hand.
 
 `deploy` reads the install off disk and never talks to the running
 supervisor, so it works whether or not the workspace is up. It does
@@ -331,6 +334,43 @@ deployments don't need it — the all-in-one `calfkit-agent` Worker hosts
 every agent in one process without trouble. If you do split, list each
 agent's image as its own compose service with `restart: unless-stopped`
 so the supervisor recovers them independently.
+
+## 4a. Running MCP servers on a separate host
+
+MCP servers split cleanly because of their **secrets boundary**: only the
+`mcp-<server>` processes read `mcp.json` and hold the credentials. Agents
+resolve their `mcp/...` selectors from the broker's `mcp.capabilities` view, so
+an agent host needs **no `mcp.json` and no MCP secrets** — just the selector
+string in the agent's `.md`. A common shape is one host that owns all the MCP
+servers (and their tokens) and agents anywhere else.
+
+**MCP host** — where `mcp.json` and its secrets live:
+
+```bash
+calfcord self set-broker laptop:9092
+calfcord start                                  # this host can be the substrate, or just dial the shared broker
+calfcord mcp add github \
+  --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
+calfcord stop && calfcord start                 # declare the new mcp-github slot (added after start)
+calfcord mcp start github                       # toolbox connects + advertises on the bus
+```
+
+Set `GITHUB_TOKEN` in *this* host's `config/.env` only. The toolbox advertises
+the github server's tools onto `mcp.capabilities`, reachable org-wide.
+
+**Agent host** — no `mcp.json`, no `GITHUB_TOKEN`:
+
+```bash
+# scribe.md already declares  tools: [..., mcp/github]
+calfcord agent restart scribe                   # picks the tools up from the advertisement
+```
+
+Because the capability view is org-wide, `calfcord agent tools` on the agent
+host still surfaces the github server's live per-tool rows even though this host
+runs no MCP server. The toolbox is an ordinary calfkit node, so running the same
+server on two hosts makes them competing consumers on one dispatch topic — a
+legitimate scale-out, not the agent split-brain the duplicate-name guard
+prevents. See [`mcp-tools.md`](./mcp-tools.md) for the full MCP story.
 
 ## 5. Worked example: remote shell tool
 

@@ -1,5 +1,10 @@
 # Plan: remove MCP support & bump calfkit to 0.7.0
 
+> **Superseded.** MCP support was **reintroduced** on calfkit 0.9.0 — see
+> [`mcp-reintroduction.md`](./mcp-reintroduction.md). This document is kept as
+> the history of the removal (and the rationale that informed the redesign);
+> for current behavior read [`../mcp-tools.md`](../mcp-tools.md).
+
 **Status:** shipped on `main` (commits `refactor!: remove deprecated MCP support`,
 `chore(deps): bump calfkit 0.6.0 -> 0.7.0`, `docs: drop MCP references`); reviewed.
 **Author:** scoped 2026-06-08

@@ -82,10 +82,14 @@ model: claude-sonnet-4-5
 
 # ----------------------------------------------------------------------------
 # Tools (optional). Each entry is a builtin name resolved at boot against
-# TOOL_REGISTRY; an unknown builtin fails fast with an error listing the valid
-# alternatives. (MCP tools are not currently supported — calfkit removed the
-# MCP adaptor in 0.7.0; v2 MCP support is planned. An `mcp/...` entry is
-# rejected at parse time.)
+# TOOL_REGISTRY (an unknown builtin fails fast, listing the valid alternatives),
+# OR an `mcp/...` selector for tools hosted by an MCP server in mcp.json:
+#   - mcp/<server>         every tool that server advertises
+#   - mcp/<server>/<tool>  exactly that one tool
+# MCP selectors are validated for syntax here; the agent resolves them per turn
+# against the live capability advertisement, so a server's tool list can change
+# with no agent restart (but editing these lines DOES need a restart, like a
+# builtin). See docs/mcp-tools.md.
 # ----------------------------------------------------------------------------
 
 # Available builtins (see src/calfcord/tools/builtin/ for source):
@@ -102,12 +106,14 @@ model: claude-sonnet-4-5
 #   - todo_write     replace the agent's task list
 #
 # Semantics of the `tools:` line:
-#   - omitted entirely  → agent gets EVERY registered builtin. Convenient, but
-#                         means a new agent ships with shell/write_file/edit_file
-#                         access to the shared workspace — narrow the list if the
-#                         agent takes input from untrusted users.
+#   - omitted entirely  → agent gets EVERY registered builtin (but NO MCP tools;
+#                         MCP grants are always explicit). Convenient, but means a
+#                         new agent ships with shell/write_file/edit_file access
+#                         to the shared workspace — narrow the list if the agent
+#                         takes input from untrusted users.
 #   - tools: []         → agent gets NO tools (text-only).
-#   - tools: [a, b]     → exactly those builtins.
+#   - tools: [a, b]     → exactly those builtins (and/or mcp/... selectors), e.g.
+#                         tools: [read_file, mcp/github, mcp/docs/search]
 #
 # Filesystem/shell tools share one workspace on the calfkit-tools host
 # (CALFCORD_WORKSPACE_DIR, default state/workspace/). Every agent that

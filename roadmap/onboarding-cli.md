@@ -34,8 +34,10 @@ onboarding default.
 ## Shipped so far ([PR #34](https://github.com/ryan-yuuu/calfcord/pull/34))
 
 - **Top-level help** — `calfcord -h` / `--help` / `help` all print usage.
-- **Friendly run verbs** — `calfcord run <bridge|agent|router|tools>`, with `calfcord calfkit-*`
+- **Friendly run verbs** — `calfcord run <bridge|agent|router|tools|mcp>`, with `calfcord calfkit-*`
   kept as hidden aliases (resolves the "agent" overload and stops leaking the internal `calfkit-` name).
+  (`run mcp <server>` hosts one MCP server's toolbox; MCP support was removed on calfkit 0.7.0 and
+  reintroduced on 0.9.0 — see [`docs/mcp-tools.md`](../docs/mcp-tools.md).)
 - **Surfaced commands** — `calfcord auth` is first-class, not passthrough-only.
 - **`calfcord doctor`** — a config preflight (config file, broker reachability, Discord token + app id,
   agents parse) with a ✓/⚠/✗ report and a non-zero exit on failure.

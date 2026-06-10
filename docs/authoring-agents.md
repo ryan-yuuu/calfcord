@@ -35,14 +35,16 @@ agent also needs a bridge restart — `calfcord stop && calfcord start`**
 — the registry scan and the calfkit `Worker.register_handlers` are both
 one-shot at startup.
 
-calfcord runs as four processes (`calfkit-bridge`, `calfkit-agent`,
-`calfkit-router`, `calfkit-tools`). The bridge owns Discord I/O and the
+calfcord runs as five processes (`calfkit-bridge`, `calfkit-agent`,
+`calfkit-router`, `calfkit-tools`, and one `calfkit-mcp` per configured
+MCP server). The bridge owns Discord I/O and the
 slash-command tree; the agent-runner process loads each agent's
 definition, constructs the calfkit `Agent` node, and dispatches LLM
-calls. Tools advertised in the agent's frontmatter execute in the
+calls. Builtin tools advertised in the agent's frontmatter execute in the
 `calfkit-tools` process — the agent process only carries the tool's
-schema. Read `README.md` for the architecture diagram before going
-further.
+schema — while `mcp/...` tools dispatch to a `calfkit-mcp` toolbox (see
+[`mcp-tools.md`](mcp-tools.md)). Read `README.md` for the architecture diagram
+before going further.
 
 ## 2. Quick example: a minimal agent
 
@@ -169,12 +171,49 @@ entirely is the opposite** — it grants every registered builtin
 (including `shell` / `write_file` / `edit_file`), per the security note
 above.
 
+#### MCP-server tools
+
+The `tools:` list can also include tools from [MCP](https://modelcontextprotocol.io)
+servers you've configured in `mcp.json`, using an `mcp/` selector in the *same*
+list as builtins:
+
+```yaml
+tools: [read_file, mcp/github, mcp/docs/search]
+```
+
+| Selector | Grants |
+|---|---|
+| `mcp/<server>` | Every tool the named server currently advertises (a wildcard — a server that later advertises a new tool enlarges the agent's surface). |
+| `mcp/<server>/<tool>` | Exactly that one tool. |
+
+The `<server>` segment matches `[a-z0-9_]{1,64}` (it doubles as a Kafka topic
+segment) and `<tool>` matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own
+name). The LLM sees each tool under the name the server advertises — no rename.
+
+Two rules to remember:
+
+- **MCP is never part of the "all builtins" default.** Omitting `tools:` grants
+  every builtin but *no* MCP tools — MCP grants are always explicit.
+- **Validation here is syntax-only.** Whether the server is configured or
+  running is a runtime concern: the agent resolves selectors against the live
+  capability advertisement per turn, so there's no static catalog to check
+  against (a down server simply degrades that turn). A server's tool list can
+  therefore change with no agent restart — but a change to the agent's *own
+  `mcp/...` lines* still needs a restart (the `tools:` list is baked in at
+  boot, like builtins).
+
+The full MCP workflow — `mcp.json` schema, `calfcord mcp add`, lifecycle — is in
+[`mcp-tools.md`](mcp-tools.md).
+
+#### Editing the tool list
+
 Besides hand-editing this array, you can edit a deployed agent's tool
 list interactively with `calfcord agent tools [<name>]` (an
-InquirerPy multi-select over the builtin tool universe; omit
-`<name>` to pick from a list). It writes an explicit `tools:` list back
-to the `.md`. The same checkbox is reachable as the *Tools* row of
-`calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
+InquirerPy multi-select over the builtin tool universe — plus `mcp/<server>`
+rows from `mcp.json` and live `mcp/<server>/<tool>` rows from the broker when
+it's reachable; omit `<name>` to pick from a list). It writes an explicit
+`tools:` list back to the `.md`. The same checkbox is reachable as the *Tools*
+row of `calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
 sets the list non-interactively — see §9. Because the tool set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
 `calfcord agent restart <name>` — there is no live reload.

@@ -11,7 +11,7 @@ a **roster** of teammates that clock in and out. The
 the process list and decoupling invariants that follow are what is actually
 running underneath.
 
-## The four processes
+## The five processes
 
 - **`calfkit-bridge`** — the single Discord gateway. Loads the agent registry
   from `agents/*.md`, normalizes inbound Discord events to a wire format,
@@ -30,6 +30,14 @@ running underneath.
 - **`calfkit-tools`** — runs the A2A `private_chat` tool plus the built-in
   filesystem / shell / search / web / todo tools. Intentionally decoupled from
   the bridge (see below).
+- **`calfkit-mcp`** — one MCP server's toolbox. Each server in
+  `mcp.json` becomes its own process (slot `mcp-<server>`) that connects to that
+  external [Model Context Protocol](https://modelcontextprotocol.io) server,
+  lists its tools, and advertises them on the compacted `mcp.capabilities`
+  topic. One process per server is deliberate: a toolbox whose server is
+  unreachable fails its own worker at boot, so one bad entry can't take down
+  sibling servers. Agents pick the tools up from the advertisement, never the
+  config — see [`mcp-tools.md`](./mcp-tools.md).
 
 The only Discord-touching processes are the bridge (gateway + outbox) and the
 tools runner (projection of A2A exchanges to a per-conversation thread under the
@@ -44,19 +52,22 @@ flowchart LR
     Kafka <--> Agents[calfkit-agent]
     Kafka <--> Router[calfkit-router]
     Kafka <--> Tools[calfkit-tools]
+    Kafka <--> Mcp[calfkit-mcp]
+    Mcp <--> External(("MCP servers"))
     Tools <--> Discord
 ```
 
 ## Decoupled deployment
 
-The four processes have intentionally different access requirements:
+The five processes have intentionally different access requirements:
 
-| Resource                              | Bridge | Agent           | Router | Tools |
-|---------------------------------------|:------:|:---------------:|:------:|:-----:|
-| `agents/*.md` (local files)           |   no   | yes (own only)  |   no   |  no   |
-| Discord bot token (env var)           |   yes  | yes             |  yes   |  yes  |
-| Kafka broker                          |   yes  | yes             |  yes   |  yes  |
-| LLM provider API key                  |   —    | yes             |  yes   |  —    |
+| Resource                              | Bridge | Agent           | Router | Tools | MCP |
+|---------------------------------------|:------:|:---------------:|:------:|:-----:|:---:|
+| `agents/*.md` (local files)           |   no   | yes (own only)  |   no   |  no   | no  |
+| `mcp.json` + MCP secrets              |   no   | no              |   no   |  no   | yes |
+| Discord bot token (env var)           |   yes  | yes             |  yes   |  yes  | no  |
+| Kafka broker                          |   yes  | yes             |  yes   |  yes  | yes |
+| LLM provider API key                  |   —    | yes             |  yes   |  —    | —   |
 
 The tools deployment is **registry-free by design**. It has no read access to
 `agents/*.md`. Agent identities (display name, avatar, description, tools)
@@ -73,6 +84,26 @@ consequences:
 For splitting tools and agents across multiple hosts (slim per-tool images via
 `calfcord-package-tools`, the multi-host `--rename` pattern, and broker
 auth/TLS), see [`distributed-deployment.md`](./distributed-deployment.md).
+
+### The MCP secrets boundary
+
+`calfkit-mcp` extends the same decoupling to external tools, and adds a secrets
+boundary the table above shows: **only the `mcp-<server>` processes read
+`mcp.json`** (the commands, URLs, and credentials). Each toolbox advertises its
+tools — names, JSON schemas, and a dispatch topic — onto the compacted
+`mcp.capabilities` control-plane topic. Agents resolve their `mcp/...`
+selectors against that capability view **per turn**, never against the config
+file, so:
+
+- agent hosts need no `mcp.json` and hold no MCP secrets — the credentials stay
+  on the host running the server;
+- a server's tool list can change with no agent restart (runtime discovery);
+- a down server degrades the affected turn with a warning instead of blocking
+  the agent (selection is non-strict).
+
+See [`mcp-tools.md`](./mcp-tools.md) for the full lifecycle and selector
+grammar, and [`design/mcp-reintroduction.md`](./design/mcp-reintroduction.md)
+for the rationale.
 
 ## Runtime model: substrate + roster
 
@@ -209,6 +240,7 @@ uv run calfkit-agent                                 # all agents on one Worker
 #   uv run calfkit-agent scribe
 uv run calfkit-router
 uv run calfkit-tools
+uv run calfkit-mcp <server>                          # one MCP server from mcp.json (dev: ./mcp.json)
 ```
 
 `localhost:9092` is the default Kafka port the native Tansu broker listens on.
@@ -218,7 +250,7 @@ broker restart and calfcord re-creates the topics it needs on startup. Writing
 the value to `.env` rather than `export`ing it means every `uv run` terminal
 picks it up via `python-dotenv` without a per-shell re-export.
 
-> The `calfcord broker` and `calfcord run <bridge|agent|router|tools>` shim
+> The `calfcord broker` and `calfcord run <bridge|agent|router|tools|mcp>` shim
 > verbs are the same low-level escape hatches surfaced for when you want one
 > process in the foreground without the supervisor. The supervised native path
 > above is what most installs use.
@@ -301,13 +333,17 @@ src/calfcord/
 │                  # settings, messages, retry_feedback)
 ├── router/        # ambient-channel routing agent (definition, runner,
 │                  # roster, fanout, prompt)
-└── tools/
-    ├── builtin/   # shipped tools — fs, search, shell, web, todos,
-    │              # private_chat, plus _observation / workspace helpers
-    ├── discovery.py  # auto-discovery loader (walks builtin/ at import)
-    └── runner.py     # calfkit-tools entry point
+├── tools/
+│   ├── builtin/   # shipped tools — fs, search, shell, web, todos,
+│   │              # private_chat, plus _observation / workspace helpers
+│   ├── discovery.py  # auto-discovery loader (walks builtin/ at import)
+│   └── runner.py     # calfkit-tools entry point
+└── mcp/           # MCP integration: selector (frontmatter grammar),
+                   # agent_select (per-turn resolution), config (mcp.json
+                   # loader), runner (calfkit-mcp entry point)
 
 agents/                 # agent .md definitions (live)
+config/mcp.json         # MCP server registry (native install; 0600)
 state/agents/           # per-agent runtime state (channel subscriptions)
 docs/                   # authoring guides + security model + design archive
 .github/                # CI/CD workflows + Dependabot + issue/PR templates

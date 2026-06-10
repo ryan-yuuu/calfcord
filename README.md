@@ -20,6 +20,7 @@ Distributed by design: agents and tools are independently deployable anywhere. H
 - 🤝 **Agents seamlessly collaborate.** Agents chat with each other through private chats, and every exchange is recorded in a Discord thread.
 - 🧠 **Bring your own model.** Anthropic, OpenAI, other OpenAI-compatible APIs, or use your ChatGPT Plus/Pro subscription (via Codex) — set it per agent.
 - 🛠️ **Built-in tools.** Agents can get task-tracking, computer filesystem access, and web search tools by default.
+- 🔌 **Plug in MCP servers.** Point agents at any [Model Context Protocol](https://modelcontextprotocol.io) server (GitHub, docs, your own) with one line of config — credentials stay on the host running the server.
 
 ## Quick start
 
@@ -168,6 +169,8 @@ plumbing:
   - **`calfkit-router`** — decides who answers un-mentioned ambient messages.
     `calfcord router start`.
   - **`calfkit-tools`** — runs the tool(s). `calfcord tools start`.
+  - **`calfkit-mcp`** — hosts one MCP server from `mcp.json` and advertises its
+    tools on the bus, one process per server. `calfcord mcp start <server>`.
 
 Every one of these is an independent microservice talking over the broker, so
 any of them can run on any host. Move the roster onto other machines and point
@@ -189,6 +192,7 @@ environment-variable reference.
 - [`docs/discord-setup.md`](./docs/discord-setup.md) — create the Discord app (~5 min).
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — every agent frontmatter field.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — add a built-in tool.
+- [`docs/mcp-tools.md`](./docs/mcp-tools.md) — give agents external tools via MCP servers.
 - [`docs/architecture.md`](./docs/architecture.md) — the substrate/roster model, the worker process types, deployment matrix, run modes.
 - [`docs/configuration.md`](./docs/configuration.md) — full environment-variable reference.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
