@@ -41,6 +41,7 @@ from calfcord.supervisor.compose import (
     _RESERVED_PROCESS_NAMES,
     SUPERVISOR_LOG_STEM,
     _log_location,
+    mcp_slot_name,
 )
 
 # The supervisor's own log (``process-compose up -L ...``) sits beside the
@@ -76,7 +77,7 @@ def _known_names(agents_dir: Path) -> list[str]:
     # logs command down with it ("always show what the broker said before it
     # died") — the strict readers (start, mcp start) surface the config error.
     try:
-        mcp_slots = [f"mcp-{s}" for s in list_server_names(resolve_config_path())]
+        mcp_slots = [mcp_slot_name(s) for s in list_server_names(resolve_config_path())]
     except McpConfigError:
         mcp_slots = []
     return [

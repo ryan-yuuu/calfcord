@@ -23,6 +23,8 @@ Contracts pinned:
 
 from __future__ import annotations
 
+import pytest
+
 from calfcord.supervisor import mcp_roster
 from calfcord.supervisor.client import ProcessComposeError
 
@@ -230,3 +232,64 @@ async def test_restart_all_restarts_only_running_mcp_slots(tmp_path, capsys):
     rc = await mcp_roster.mcp_restart_all(_home(tmp_path), client=client)
     assert rc == 0
     assert client.restart_calls == ["mcp-alpha"]
+
+
+# ----------------------------------------------------- workspace-down uniformity
+
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, h: mcp_roster.mcp_stop(h, server="x", client=c),
+        lambda c, h: mcp_roster.mcp_restart(h, server="x", client=c),
+        lambda c, h: mcp_roster.mcp_start_all(h, servers=["x"], client=c),
+        lambda c, h: mcp_roster.mcp_stop_all(h, client=c),
+        lambda c, h: mcp_roster.mcp_restart_all(h, client=c),
+    ],
+    ids=["stop", "restart", "start_all", "stop_all", "restart_all"],
+)
+async def test_workspace_down_hints_and_exits_1(tmp_path, capsys, call):
+    """Every verb (not just start) checks the workspace before any REST call
+    and prints the one shared not-running hint."""
+    client = _StubClient(workspace_up=False)
+    rc = await call(client, _home(tmp_path))
+    assert rc == 1
+    assert "calfcord start" in capsys.readouterr().out
+    assert client.start_calls == client.stop_calls == client.restart_calls == []
+
+
+async def test_restart_5xx_propagates_loudly(tmp_path):
+    """mcp_restart mirrors mcp_start's not-declared-vs-genuine-fault split:
+    a 5xx is infra, never mistranslated into the reload hint."""
+    err = ProcessComposeError("boom", status_code=500)
+    client = _StubClient(fail_restart={"mcp-github": err})
+    with pytest.raises(RuntimeError, match="github"):
+        await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=client)
+
+
+async def test_running_servers_returns_bare_names(tmp_path):
+    """The public read strips the slot prefix so callers (mcp list) never
+    learn the mcp- convention."""
+    client = _StubClient(running={"mcp-github", "mcp-docs", "assistant"})
+    assert await mcp_roster.running_servers(client) == {"github", "docs"}
+
+
+async def test_start_all_reads_process_list_once(tmp_path):
+    """The sweep reads the supervisor's process list once for N servers (no
+    N+1 REST chatter) — pinned by counting list_processes calls."""
+    client = _StubClient(running={"mcp-alpha"})
+    calls = {"n": 0}
+    original = client.list_processes
+
+    async def _counting():
+        calls["n"] += 1
+        return await original()
+
+    client.list_processes = _counting
+    rc = await mcp_roster.mcp_start_all(
+        _home(tmp_path), servers=["alpha", "beta", "gamma"], client=client
+    )
+    assert rc == 0
+    assert calls["n"] == 1
+

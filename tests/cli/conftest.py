@@ -10,10 +10,13 @@ def _offline_mcp_enumeration_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the tool-checkbox surfaces (agent tools editor, create wizard's
     pick_tools) off the network in unit tests: the default MCP enumeration
     reads mcp.json and probes the broker's capability topic, which a unit
-    test must never do. Tests exercising MCP rows inject their own
-    ``mcp_servers_fn`` / ``live_tools_fn`` (or re-patch these defaults).
+    test must never do. The snapshot is stubbed at the capability_read seam
+    (an empty-but-successful view) so ``_default_live_tools``'s own logic
+    still runs; tests exercising MCP rows inject their own
+    ``mcp_servers_fn`` / ``live_tools_fn`` or re-patch these seams.
     """
     from calfcord.cli import agent_tools
+    from calfcord.mcp import capability_read
 
     monkeypatch.setattr(agent_tools, "_default_mcp_servers", lambda: [])
-    monkeypatch.setattr(agent_tools, "_default_live_tools", lambda: {})
+    monkeypatch.setattr(capability_read, "snapshot_capability_tools", lambda *a, **k: {})

@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -265,7 +266,13 @@ def write_agent(
     return target
 
 
-def pick_tools(prompter: Prompter, name: str) -> list[str]:
+def pick_tools(
+    prompter: Prompter,
+    name: str,
+    *,
+    mcp_servers_fn: Callable[[], list[str]] | None = None,
+    live_tools_fn: Callable[[], dict[str, list[str]]] | None = None,
+) -> list[str]:
     """Prompt for the agent's tools and return the selected tokens.
 
     Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
@@ -287,8 +294,8 @@ def pick_tools(prompter: Prompter, name: str) -> list[str]:
 
     choices = _build_choices(
         set(TOOL_REGISTRY),  # builtins pre-checked; MCP rows start unchecked
-        mcp_servers=_default_mcp_servers(),
-        live_tools=_default_live_tools(),
+        mcp_servers=(mcp_servers_fn or _default_mcp_servers)(),
+        live_tools=(live_tools_fn or _default_live_tools)(),
     )
 
     selected = prompter.checkbox(

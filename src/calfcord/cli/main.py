@@ -35,9 +35,10 @@ from calfcord.cli import (
 )
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
+from calfcord.cli._mcp import configured_mcp_servers_or_none
 from calfcord.cli._prompts import make_prompter
 from calfcord.health.check import default_broker_probe, healthcheck
-from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
+from calfcord.mcp.config import resolve_config_path
 from calfcord.supervisor import component, lifecycle, mcp_roster, roster
 
 
@@ -518,17 +519,6 @@ def _run_healthcheck(component: str) -> int:
 
 
 
-def _configured_mcp_servers() -> list[str] | None:
-    """Server names from mcp.json via the no-secrets reader, or ``None`` after
-    printing the actionable error (an *invalid* config should fail every verb
-    that consults it, not just the server's own boot)."""
-    try:
-        return list_server_names(resolve_config_path())
-    except McpConfigError as exc:
-        print(f"error: {exc}")
-        return None
-
-
 def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Dispatch a ``calfcord mcp <verb>`` lifecycle command.
 
@@ -596,7 +586,7 @@ def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return asyncio.run(mcp_roster.mcp_restart(home, server=args.server))
 
     if args.all:
-        servers = _configured_mcp_servers()
+        servers = configured_mcp_servers_or_none()
         if servers is None:
             return 1
         return asyncio.run(mcp_roster.mcp_start_all(home, servers=servers))
@@ -637,7 +627,7 @@ def _run_lifecycle(command: str) -> int:
     # so the generated project declares one disabled mcp-<server> slot each. An
     # invalid mcp.json fails the whole start actionably rather than rendering a
     # project that silently lacks the servers.
-    mcp_servers = _configured_mcp_servers()
+    mcp_servers = configured_mcp_servers_or_none()
     if mcp_servers is None:
         return 1
     return asyncio.run(

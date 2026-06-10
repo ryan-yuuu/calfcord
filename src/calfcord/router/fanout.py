@@ -8,7 +8,7 @@ output, this consumer:
 2. Recovers the original :class:`WireMessage`, the publisher's phonebook
    snapshot, and the channel history from ``result.deps`` — the same
    ``deps`` dict the bridge ingress passed to ``invoke_node``, carried
-   forward through the router run to the consumer (calfkit ≥ 0.4.0
+   forward through the router run to the consumer (calfkit's ``ConsumerContext``
    exposes inbound producer deps on ``ConsumerContext.deps``).
 3. For the chosen ``agent_id`` (after defensive self-filter and
    phonebook validation), synthesizes a fresh wire with ``kind="slash"``

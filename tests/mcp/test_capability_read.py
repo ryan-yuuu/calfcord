@@ -13,10 +13,13 @@ import time
 from calfcord.mcp.capability_read import snapshot_capability_tools
 
 
-def test_unreachable_broker_degrades_to_empty_quickly() -> None:
+def test_unreachable_broker_degrades_to_none_quickly() -> None:
+    """Failure is ``None`` (NOT ``{}``): callers must be able to tell "the
+    view was unreachable" apart from "the view answered and is empty" so
+    the editor can say which one happened."""
     started = time.monotonic()
     # An unroutable port on localhost: connection refused, not a hang.
     result = snapshot_capability_tools("localhost:1", timeout=0.5)
     elapsed = time.monotonic() - started
-    assert result == {}
+    assert result is None
     assert elapsed < 10  # bounded — never the editor hanging on a dead broker

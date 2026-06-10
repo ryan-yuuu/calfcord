@@ -66,7 +66,8 @@ def selectors_from_entries(entries: Iterable[str]) -> list[McpToolSelector]:
         ValueError: For a non-MCP or malformed entry (message names the
             entry verbatim, via :func:`parse_mcp_selector`).
     """
-    selected: dict[str, set[str] | None] = {}
+    wildcard: set[str] = set()
+    explicit: dict[str, set[str]] = {}
     for entry in entries:
         if not is_mcp_selector(entry):
             raise ValueError(
@@ -74,12 +75,14 @@ def selectors_from_entries(entries: Iterable[str]) -> list[McpToolSelector]:
             )
         server, tool = parse_mcp_selector(entry)
         if tool is None:
-            selected[server] = None  # wildcard subsumes any explicit picks
-        elif server not in selected:
-            selected[server] = {tool}
-        elif selected[server] is not None:
-            selected[server].add(tool)  # type: ignore[union-attr]
+            wildcard.add(server)
+        else:
+            explicit.setdefault(server, set()).add(tool)
     return [
-        McpToolSelector(server, include=None if tools is None else tuple(sorted(tools)))
-        for server, tools in sorted(selected.items())
+        # A bare mcp/<server> wildcard subsumes that server's explicit picks.
+        McpToolSelector(
+            server,
+            include=None if server in wildcard else tuple(sorted(explicit[server])),
+        )
+        for server in sorted(wildcard | set(explicit))
     ]

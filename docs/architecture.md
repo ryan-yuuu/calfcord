@@ -164,10 +164,10 @@ calfcord would otherwise hand-roll:
   by the *same* signal: an exec readiness probe that runs
   `calfcord _healthcheck <component>` against the per-component heartbeat files
   under `$CALFCORD_HOME/state/health/`.
-- **Autorestart** — the bridge and agents exit 0 on a clean return, so they use
-  `restart: always`; tools and router run on the
-  [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper that
-  forces a non-zero exit on a clean, signal-less return, so they use
+- **Autorestart** — the broker and bridge exit 0 on a clean return, so they use
+  `restart: always`; the whole roster (agents, tools, router, MCP servers) runs
+  on the [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper
+  that forces a non-zero exit on a clean, signal-less return, so it uses
   `restart: on_failure`. An intentional `stop` does not trigger a restart.
 - **Per-process log capture** — each component's stdout/stderr lands at
   `$CALFCORD_HOME/state/logs/<component>.log` (what `calfcord logs` tails).

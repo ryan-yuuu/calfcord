@@ -145,12 +145,26 @@ def _default_mcp_servers() -> list[str]:
 
 
 def _default_live_tools() -> dict[str, list[str]]:
-    """Per-server tool names from the live capability view; {} offline."""
+    """Per-server tool names from the live capability view.
+
+    An *unreachable* view (broker down, workspace closed) prints a one-line
+    note and degrades to server-level rows — otherwise it would be
+    indistinguishable from "no server advertises anything", and a wrong
+    ``CALF_HOST_URL`` would silently hide every per-tool row.
+    """
     import os
 
     from calfcord.mcp.capability_read import snapshot_capability_tools
 
-    return snapshot_capability_tools(os.getenv("CALF_HOST_URL") or "localhost")
+    server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    live = snapshot_capability_tools(server_urls)
+    if live is None:
+        print(
+            f"note: live MCP tool view unavailable (broker {server_urls} unreachable?) "
+            "— showing server-level mcp/ rows only."
+        )
+        return {}
+    return live
 
 
 def run(

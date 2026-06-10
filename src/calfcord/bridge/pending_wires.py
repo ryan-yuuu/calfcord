@@ -3,13 +3,17 @@
 The bridge's ingress (:class:`BridgeIngress`) records inbound wires
 before publishing to Kafka; the outbox consumer
 (:func:`build_outbox_consumer`) reads them back when an agent reply
-lands. The map exists because calfkit's :class:`~calfkit.models.ConsumerContext` does not
-carry the inbound ``Envelope.context.deps`` — the consumer sees
-``output``, ``state``, ``correlation_id``, and ``emitter_*`` but not
-the original ``deps={"discord": wire}`` we sent on the way in. Rather
-than subclass the consumer to peel the dep off the envelope, we keep
-the wire locally in the bridge process since the consumer is colocated
-with the ingress.
+lands. The map exists because the outbox needs **bridge-computed
+per-invocation context that does not ride on the envelope's deps**:
+the projected/replay-hydrated ``message_history`` snapshot, its
+``initial_message_history_length`` cursor (the this-turn transcript
+slice), and the per-call ``temp_instructions`` / ``model_settings`` —
+all needed to rebuild a faithful retry envelope when a Discord post
+fails. (The inbound wire itself IS available on
+``ConsumerContext.deps["discord"]`` — calfkit carries producer deps
+forward onto the ReturnCall — but the snapshot fields above are not,
+so the bridge keeps them locally, colocated with the ingress that
+computed them.)
 
 **What's in a `PendingEntry`** (beyond the bare wire):
 

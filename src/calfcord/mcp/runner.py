@@ -26,16 +26,14 @@ import argparse
 import asyncio
 import logging
 import os
-from pathlib import Path
 
 from calfkit.client import Client
-from calfkit.mcp.mcp_toolbox import MCPToolbox
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
-from calfcord.mcp.config import McpConfigError, load_mcp_servers, resolve_config_path
+from calfcord.mcp.config import McpConfigError, load_one_server, resolve_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -54,38 +52,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _select_toolbox(
-    servers: dict[str, MCPToolbox], name: str, config_path: Path
-) -> MCPToolbox:
-    """Pick ``name``'s toolbox, failing fast with operator-grade messages.
-
-    Both failure shapes exit before any broker connection: an empty registry
-    points at ``calfcord mcp add`` (the config exists but declares nothing),
-    and an unknown name lists what IS configured so a typo'd supervisor slot
-    or CLI invocation is a one-look fix.
-    """
-    if not servers:
-        raise SystemExit(
-            f"no MCP servers configured in {config_path}; add one with 'calfcord mcp add'"
-        )
-    toolbox = servers.get(name)
-    if toolbox is None:
-        configured = ", ".join(servers)
-        raise SystemExit(
-            f"no MCP server named {name!r} in {config_path}; configured: {configured}"
-        )
-    return toolbox
-
-
 async def _amain(server_name: str) -> None:
     config_path = resolve_config_path()
     try:
-        servers = load_mcp_servers(config_path)
+        # Expands only THIS server's $VAR references: a sibling entry's unset
+        # secret must not fail an unrelated server's boot (per-server
+        # isolation). Empty-registry and unknown-name failures carry their
+        # own operator-grade messages from the loader.
+        toolbox = load_one_server(config_path, server_name)
     except McpConfigError as exc:
         # Operator-recoverable config problems get a clean exit + message,
         # not a traceback — and no broker connection is ever attempted.
-        raise SystemExit(f"failed to load MCP servers: {exc}") from exc
-    toolbox = _select_toolbox(servers, server_name, config_path)
+        raise SystemExit(f"failed to load MCP server {server_name!r}: {exc}") from exc
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     async with Client.connect(

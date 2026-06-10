@@ -374,12 +374,15 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
     """The create wizard's tool checkbox includes ``mcp/<server>`` (and live
     per-tool) rows alongside the pre-checked builtins — unchecked, because
     MCP is an explicit grant that never rides the all-builtins default."""
-    from calfcord.cli import _agents, agent_tools
+    from calfcord.cli import _agents
 
-    monkeypatch.setattr(agent_tools, "_default_mcp_servers", lambda: ["github"])
-    monkeypatch.setattr(agent_tools, "_default_live_tools", lambda: {"github": ["search"]})
     prompter = FakePrompter(checkboxes=[["shell"]])
-    selected = _agents.pick_tools(prompter, "helper")
+    selected = _agents.pick_tools(
+        prompter,
+        "helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {"github": ["search"]},
+    )
     assert selected == ["shell"]
     by_value = {c.value: c for c in prompter.last_checkbox_choices}
     assert by_value["mcp/github"].checked is False

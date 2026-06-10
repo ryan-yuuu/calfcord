@@ -87,13 +87,26 @@ def resolve_config_path() -> Path:
     return Path("mcp.json")
 
 
+def references_var(value: str) -> bool:
+    """True iff ``value`` contains a real ``$VAR`` / ``${VAR}`` reference.
+
+    A match counts unless it is the ``$$`` escape (a literal ``$``). Shared
+    with the CLI's literal-secret nudge so the nudge and the expander can
+    never disagree about what counts as a reference.
+    """
+    return any(m.group(0) != "$$" for m in _VAR_PATTERN.finditer(value))
+
+
 def expand_vars(value: str, env: Mapping[str, str]) -> str:
     """Expand ``$VAR`` / ``${VAR}`` references in ``value`` against ``env``.
 
     ``$$`` collapses to a literal ``$``. Raises :class:`McpConfigError` for
     an unset reference (naming the variable) or an unbalanced ``${``.
     """
-    if _UNBALANCED_BRACE.search(value):
+    # Strip ``$$`` escapes before the unbalanced check: a literal ``$`` next
+    # to ``{`` (the value ``$${``) is legal and must not be misread as a
+    # half-reference.
+    if _UNBALANCED_BRACE.search(value.replace("$$", "")):
         raise McpConfigError(
             f"unbalanced '${{' in {value!r}: use ${{VAR}} with a closing brace, or $$ for a literal $"
         )
@@ -156,6 +169,36 @@ def load_mcp_servers(path: Path) -> dict[str, MCPToolbox]:
     return servers
 
 
+def load_one_server(path: Path, name: str) -> MCPToolbox:
+    """Parse ``mcp.json`` and build ONLY server ``name``'s toolbox.
+
+    The whole file is still shape-validated (a broken sibling entry should
+    fail every reader), but ``$VAR`` expansion — the secrets-touching step —
+    runs only for the selected entry: server processes are isolated by
+    design, so another server's unset secret must not fail this one's boot.
+
+    Raises :class:`McpConfigError` for a missing/invalid file, an empty
+    registry (pointing at ``calfcord mcp add``), or an unknown name (listing
+    what IS configured).
+    """
+    if not path.exists():
+        raise McpConfigError(
+            f"MCP config not found at {path} — create it (or run 'calfcord mcp add') first"
+        )
+    entries = dict(_validated_entries(path))
+    if not entries:
+        raise McpConfigError(
+            f"no MCP servers configured in {path}; add one with 'calfcord mcp add'"
+        )
+    entry = entries.get(name)
+    if entry is None:
+        configured = ", ".join(entries)
+        raise McpConfigError(
+            f"no MCP server named {name!r} in {path}; configured: {configured}"
+        )
+    return MCPToolbox(name, connection_params=_build_params(name, entry))
+
+
 def _validated_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
     """Read + shape-validate ``mcp.json`` without expanding any values."""
     try:
@@ -183,13 +226,18 @@ def _validated_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
             )
         if not isinstance(entry, dict):
             raise McpConfigError(f"server {name!r} in {path} must be an object")
-        _validate_entry_shape(name, entry, path)
+        validate_entry_shape(name, entry, path)
         entries.append((name, entry))
     return entries
 
 
-def _validate_entry_shape(name: str, entry: dict[str, Any], path: Path) -> None:
-    """Reject malformed entries with the server + key named."""
+def validate_entry_shape(name: str, entry: dict[str, Any], path: Path) -> None:
+    """Reject malformed entries with the server + key named.
+
+    Public on purpose: :mod:`calfcord.mcp.config_write` validates with the
+    loader's own validator before writing, so the writer can never produce
+    a file this loader would reject.
+    """
     entry_type = entry.get("type")
     has_command = "command" in entry
     has_url = "url" in entry

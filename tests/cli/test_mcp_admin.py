@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from calfcord.cli import mcp_admin
 from calfcord.cli._prompts import Choice, Prompter
 
@@ -406,3 +408,212 @@ def test_remove_unknown_errors_actionably(tmp_path: Path, capsys) -> None:
     assert rc == 1
     out = capsys.readouterr().out
     assert "nope" in out and "docs" in out
+
+
+# ------------------------------------------------------- flags cross-validation
+
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"command": "x", "url": "https://y"}, "mutually exclusive"),
+        ({"url": "https://y", "env": ["A=B"]}, "--header with --url"),
+        ({"command": "x", "header": ["A=B"]}, "--env with --command"),
+        ({"url": "https://y", "cwd": "/tmp"}, "--cwd is for stdio"),
+        ({"server": None, "command": "x"}, "give the server name"),
+        ({"command": "   "}, "command must not be empty"),
+        ({"command": "x", "env": ["A=1", "A=2"]}, "duplicate env key"),
+        ({"url": "https://y", "header": ["NoEquals"]}, "expected KEY=VALUE"),
+        ({"command": "x", "env": ["1BAD"]}, "valid"),
+    ],
+)
+def test_add_flags_validation_rejections(
+    tmp_path: Path, capsys, overrides: dict, fragment: str
+) -> None:
+    """Every flag cross-validation guard rejects with rc 1 and an actionable
+    message, leaving the file untouched — re-pinning the contracts the old
+    ``calfcord-mcp-add`` suite held before the removal."""
+    path = _config(tmp_path)
+    original = path.read_text()
+    kwargs: dict = dict(
+        config_path=path,
+        server="github",
+        command=None,
+        env=[],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=False,
+        start=False,
+        home=None,
+    )
+    kwargs.update(overrides)
+    rc = mcp_admin.run_add(FakePrompter(), **kwargs)
+    assert rc == 1
+    assert fragment in capsys.readouterr().out
+    assert path.read_text() == original
+
+
+def test_add_flags_dry_run_still_nudges_literals(tmp_path: Path, capsys) -> None:
+    """The literal-secret nudge fires on --dry-run too — the preview is
+    exactly when an operator inspects what they're about to commit."""
+    path = _config(tmp_path)
+    rc = mcp_admin.run_add(
+        FakePrompter(),
+        config_path=path,
+        server="github",
+        command="srv",
+        env=["TOKEN=literal123"],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=True,
+        start=False,
+        home=None,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "literal" in out and "$" in out
+
+
+# ----------------------------------------------------------- wizard edge paths
+
+
+def test_add_wizard_env_loop_reprompts_on_bad_then_duplicate_token(tmp_path: Path, capsys) -> None:
+    """A malformed env token and a duplicate key each print an error and
+    re-prompt; the loop only ends on the empty line."""
+    path = _config(tmp_path)
+    prompter = FakePrompter(
+        text_results=[
+            "github",
+            "srv",
+            "1BAD",            # invalid bare shorthand -> error + reprompt
+            "TOKEN=$TOKEN",    # ok
+            "TOKEN=$OTHER",    # duplicate key -> error + reprompt
+            "",                 # end loop
+        ],
+        select_results=["stdio"],
+        confirm_results=[True, False],
+    )
+    rc = mcp_admin.run_add(
+        prompter,
+        config_path=path,
+        server=None,
+        command=None,
+        env=[],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=False,
+        start=False,
+        home=None,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1BAD" in out and "duplicate" in out
+    entry = json.loads(path.read_text())["mcpServers"]["github"]
+    assert entry["env"] == {"TOKEN": "$TOKEN"}
+
+
+def test_add_wizard_empty_command_reprompts(tmp_path: Path) -> None:
+    path = _config(tmp_path)
+    prompter = FakePrompter(
+        text_results=["github", "   ", "srv --flag", ""],
+        select_results=["stdio"],
+        confirm_results=[True, False],
+    )
+    rc = mcp_admin.run_add(
+        prompter,
+        config_path=path,
+        server=None,
+        command=None,
+        env=[],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=False,
+        start=False,
+        home=None,
+    )
+    assert rc == 0
+    entry = json.loads(path.read_text())["mcpServers"]["github"]
+    assert entry == {"command": "srv", "args": ["--flag"]}
+
+
+def test_add_wizard_start_now_dispatches_roster(tmp_path: Path, monkeypatch) -> None:
+    """Confirming "Start now?" dispatches mcp_start with the new server —
+    the onboarding-grade add-and-you're-done flow."""
+    from calfcord.supervisor import mcp_roster
+
+    captured: dict = {}
+
+    async def _start(home_arg, *, server, **kwargs):
+        captured.update(home=home_arg, server=server)
+        return 0
+
+    monkeypatch.setattr(mcp_roster, "mcp_start", _start)
+    path = _config(tmp_path)
+    prompter = FakePrompter(
+        text_results=["github", "srv", ""],
+        select_results=["stdio"],
+        confirm_results=[True, True],  # write? yes; start now? yes
+    )
+    rc = mcp_admin.run_add(
+        prompter,
+        config_path=path,
+        server=None,
+        command=None,
+        env=[],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=False,
+        start=False,
+        home=tmp_path,
+    )
+    assert rc == 0
+    assert captured == {"home": tmp_path, "server": "github"}
+
+
+def test_add_start_flag_without_home_prints_dev_hint(tmp_path: Path, capsys) -> None:
+    path = _config(tmp_path)
+    rc = mcp_admin.run_add(
+        FakePrompter(),
+        config_path=path,
+        server="github",
+        command="srv",
+        env=[],
+        url=None,
+        header=[],
+        cwd=None,
+        force=False,
+        dry_run=False,
+        start=True,
+        home=None,
+    )
+    assert rc == 0
+    assert "CALFCORD_HOME" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------- list state column
+
+
+def test_list_marks_running_and_stopped(tmp_path: Path, capsys, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        '{"mcpServers": {"github": {"command": "x"}, "docs": {"type": "http", "url": "https://d"}}}'
+    )
+    monkeypatch.setattr(mcp_admin, "_running_servers", lambda home: {"github"})
+    rc = mcp_admin.run_list(config_path=path, home=tmp_path)
+    assert rc == 0
+    out = capsys.readouterr().out
+    github_line = next(line for line in out.splitlines() if line.startswith("github"))
+    docs_line = next(line for line in out.splitlines() if line.startswith("docs"))
+    assert "[running]" in github_line
+    assert "[stopped]" in docs_line

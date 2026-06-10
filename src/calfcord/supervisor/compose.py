@@ -92,6 +92,17 @@ SUPERVISOR_LOG_STEM = "process-compose"
 # `processes` dict (corrupting the substrate), so the generator rejects it.
 _RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools", "router"})
 
+# The slot-name convention for MCP servers, homed here (like
+# SUPERVISOR_LOG_STEM) because compose declares the slots and the roster
+# drives them — both must agree on the literal, and compose is the
+# import-light module the supervisor package already leans on.
+MCP_SLOT_PREFIX = "mcp-"
+
+
+def mcp_slot_name(server: str) -> str:
+    """The Process Compose slot for MCP server ``server`` (``mcp-<server>``)."""
+    return f"{MCP_SLOT_PREFIX}{server}"
+
 
 def _log_location(home: str, name: str) -> str:
     return os.path.join(home, "state", "logs", f"{name}.log")
@@ -171,7 +182,7 @@ def build_compose_project(
     """
     agent_ids = list(agent_ids)
     mcp_servers = list(mcp_servers)
-    mcp_slots = {f"mcp-{server}": server for server in mcp_servers}
+    mcp_slots = {mcp_slot_name(server): server for server in mcp_servers}
     reserved = sorted(_RESERVED_PROCESS_NAMES.intersection(agent_ids))
     if reserved:
         raise ValueError(
