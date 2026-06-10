@@ -1,6 +1,7 @@
 # MCP reintroduction on calfkit 0.9.0
 
-Status: in progress (June 2026).
+Status: implemented (June 2026); agent-side resolution since moved to calfkit
+0.9.1's public `MCPToolboxRef` — see §D4 History.
 
 calfcord removed its MCP support in `9f81d3f` because calfkit's original MCP
 adaptor was incorrectly designed: it required *manual schema registration*

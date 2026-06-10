@@ -57,13 +57,6 @@ class TestProtocolCompliance:
         assert bindings == []
         assert len(selectors) == 1
 
-    def test_frozen_and_hashable(self) -> None:
-        """Frozen dataclass with a tuple include — usable in sets/dedup."""
-        a = MCPToolboxRef("gmail", include=("search",))
-        b = MCPToolboxRef("gmail", include=("search",))
-        assert a == b
-        assert hash(a) == hash(b)
-
 
 class TestResolveTools:
     def test_bare_selector_resolves_all_advertised_tools(self) -> None:
@@ -88,7 +81,10 @@ class TestResolveTools:
         upstream default is non-strict and ``selectors_from_entries`` never
         overrides it — both pinned here."""
         assert MCPToolboxRef("gmail").resolve_tools({}).strict is False
-        assert all(s.strict is False for s in selectors_from_entries(["mcp/gmail"]))
+        assert all(
+            s.strict is False
+            for s in selectors_from_entries(["mcp/gmail", "mcp/docs/search"])
+        )
 
     def test_missing_included_tool_reported(self) -> None:
         sel = MCPToolboxRef("gmail", include=("search", "nope"))
