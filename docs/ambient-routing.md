@@ -341,7 +341,7 @@ uv run calfkit-tools
 uv run calfkit-router                 # NEW — required for ambient
 ```
 
-All four processes are independently restartable.
+All of these processes are independently restartable.
 
 ### Deploy checklist (production)
 

@@ -14,7 +14,7 @@ Project dependencies are managed with **`uv`**.
 
 ## Architecture
 
-Calfcord is **four independent process types that communicate through Kafka**. Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
+Calfcord is **five independent process types that communicate through Kafka** (bridge, agents, router, tools, MCP servers). Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
 
 ## Conventions
 

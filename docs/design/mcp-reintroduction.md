@@ -156,7 +156,7 @@ class McpToolSelector:          # implements calfkit's ToolSelector protocol
 - The agent runner's `Worker` is built with default `MCPDiscoveryConfig`
   (capability topic `mcp.capabilities`); the view is auto-registered by
   calfkit only when an agent actually declares selectors.
-- An import-isolation test再 guards the boundary: the agent path must never
+- An import-isolation test again guards the boundary: the agent path must never
   import `calfcord.mcp.config`.
 
 ### D5. Runner — `calfkit-mcp <server>`

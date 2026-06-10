@@ -30,8 +30,9 @@ the user. Putting a per-agent private topic at ``[0]`` keeps tool
 returns scoped to the agent that initiated the call; the channel
 topics still live at ``[1:]`` so ambient fan-out is unaffected. The
 name matches calfkit's own :attr:`BaseNodeDef._return_topic`
-attribute so this workaround dovetails with an upstream fix that
-wires the attribute in.
+attribute — which calfkit ≥ 0.9.0 wires into the publish path and
+auto-subscribes — so the explicit placement here is belt-and-
+suspenders agreement with upstream, no longer a workaround.
 
 Tools declared in the agent's ``.md`` frontmatter under ``tools:`` are
 resolved against :data:`calfcord.tools.TOOL_REGISTRY` and
@@ -125,9 +126,9 @@ callback for tool ``Call`` envelopes (and as the ``TailCall`` retry
 target). Only this agent's Worker subscribes to the topic, so a tool
 return cannot leak into a co-tenant agent's handler — see the module
 docstring for the failure mode this prevents. Matches calfkit's own
-:attr:`BaseNodeDef._return_topic` attribute (defined but not yet
-wired into the publish path) for forward compatibility with an
-upstream fix."""
+:attr:`BaseNodeDef._return_topic` attribute, which calfkit ≥ 0.9.0
+wires into the publish path and auto-subscribes — kept in lockstep so
+the two derivations can never disagree."""
 
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str | None] = {
     "anthropic": "claude-sonnet-4-5",

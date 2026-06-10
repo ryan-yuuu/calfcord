@@ -24,7 +24,7 @@ Built as a closure capturing the ingress instance — same structural
 shape as :func:`build_outbox_consumer` in
 :mod:`calfcord.bridge.outbox`. No NodeDef subclass; the fan-out puts
 the synthesized wire and forwarded history on ``deps``, and this
-consumer reads them back from ``result.deps`` (calfkit ≥ 0.4.0 exposes
+consumer reads them back from ``result.deps`` (calfkit's ``ConsumerContext`` exposes
 inbound producer deps on ``ConsumerContext.deps`` — the same dict a tool
 reads as ``ctx.deps["key"]``).
 

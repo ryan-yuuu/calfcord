@@ -87,13 +87,26 @@ def resolve_config_path() -> Path:
     return Path("mcp.json")
 
 
+def references_var(value: str) -> bool:
+    """True iff ``value`` contains a real ``$VAR`` / ``${VAR}`` reference.
+
+    A match counts unless it is the ``$$`` escape (a literal ``$``). Shared
+    with the CLI's literal-secret nudge so the nudge and the expander can
+    never disagree about what counts as a reference.
+    """
+    return any(m.group(0) != "$$" for m in _VAR_PATTERN.finditer(value))
+
+
 def expand_vars(value: str, env: Mapping[str, str]) -> str:
     """Expand ``$VAR`` / ``${VAR}`` references in ``value`` against ``env``.
 
     ``$$`` collapses to a literal ``$``. Raises :class:`McpConfigError` for
     an unset reference (naming the variable) or an unbalanced ``${``.
     """
-    if _UNBALANCED_BRACE.search(value):
+    # Strip ``$$`` escapes before the unbalanced check: a literal ``$`` next
+    # to ``{`` (the value ``$${``) is legal and must not be misread as a
+    # half-reference.
+    if _UNBALANCED_BRACE.search(value.replace("$$", "")):
         raise McpConfigError(
             f"unbalanced '${{' in {value!r}: use ${{VAR}} with a closing brace, or $$ for a literal $"
         )
@@ -183,13 +196,18 @@ def _validated_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
             )
         if not isinstance(entry, dict):
             raise McpConfigError(f"server {name!r} in {path} must be an object")
-        _validate_entry_shape(name, entry, path)
+        validate_entry_shape(name, entry, path)
         entries.append((name, entry))
     return entries
 
 
-def _validate_entry_shape(name: str, entry: dict[str, Any], path: Path) -> None:
-    """Reject malformed entries with the server + key named."""
+def validate_entry_shape(name: str, entry: dict[str, Any], path: Path) -> None:
+    """Reject malformed entries with the server + key named.
+
+    Public on purpose: :mod:`calfcord.mcp.config_write` validates with the
+    loader's own validator before writing, so the writer can never produce
+    a file this loader would reject.
+    """
     entry_type = entry.get("type")
     has_command = "command" in entry
     has_url = "url" in entry

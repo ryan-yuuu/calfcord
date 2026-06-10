@@ -31,13 +31,13 @@ extends ``message_history`` but does not set ``final_output_parts``).
 Without this consumer, the model's running commentary and the tool
 calls themselves are invisible to the user while the agent works.
 
-How the wire is recovered: same pattern as the outbox.
-:class:`ConsumerContext` carries ``state``, ``correlation_id``, and
-``emitter_node_id`` but not the original inbound wire. The bridge's
+How the wire is recovered: same pattern as the outbox. The wire itself
+rides on ``ConsumerContext.deps["discord"]``, but this consumer also
+needs bridge-computed context that does NOT ride on deps; the bridge's
 :class:`~calfcord.bridge.pending_wires.PendingWires` map
-(populated by :class:`BridgeIngress` on the way in) gives us the
-parent Discord ``channel_id`` / ``message_id`` to post against, and
-the pre-invocation ``message_history`` length to seed the
+(populated by :class:`BridgeIngress` on the way in) gives us both in
+one lookup — the parent Discord ``channel_id`` / ``message_id`` to
+post against, and the pre-invocation ``message_history`` length to seed the
 :attr:`StepsEntry.history_cursor` so the channel-history prefix
 projected by :func:`~calfcord.bridge.history.project_history`
 does not get re-counted as fresh steps (a bug class the

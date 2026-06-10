@@ -12,11 +12,14 @@ drop every reply after the first — see
 
 How the wire is recovered: the consumer receives a
 :class:`~calfkit.ConsumerContext`, which carries ``output``, ``state``,
-``correlation_id``, ``emitter_node_id``, and ``emitter_node_kind`` —
-but **not** ``Envelope.context.deps``. So the original
-:class:`WireMessage` (which holds ``channel_id``, ``message_id``, and
-the author info needed for the inline-reply UI) is not on the result.
-We recover it from the bridge-local :class:`PendingWires` map that
+``correlation_id``, ``emitter_node_id``, ``emitter_node_kind``, and the
+inbound producer ``deps`` (so the original :class:`WireMessage` IS
+reachable as ``deps["discord"]``). What it does NOT carry is the
+bridge-computed per-invocation context — the ``message_history``
+snapshot, its this-turn cursor, and the ``temp_instructions`` /
+``model_settings`` needed to rebuild a faithful retry envelope when a
+Discord post fails. We keep all of that (wire included, for one
+consistent lookup) in the bridge-local :class:`PendingWires` map that
 :class:`BridgeIngress` populates on the way in. The map and the
 consumer share a process; this works as long as both live in the
 bridge daemon.

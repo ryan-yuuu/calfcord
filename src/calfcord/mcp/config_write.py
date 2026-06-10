@@ -20,10 +20,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from calfcord.mcp.config import McpConfigError, _validate_entry_shape
+from calfcord.mcp.config import _SERVERS_KEY, McpConfigError, validate_entry_shape
 from calfcord.mcp.selector import is_valid_server_name
-
-_SERVERS_KEY = "mcpServers"
 
 
 def add_server(path: Path, name: str, entry: dict[str, Any], *, force: bool = False) -> None:
@@ -37,7 +35,7 @@ def add_server(path: Path, name: str, entry: dict[str, Any], *, force: bool = Fa
         raise McpConfigError(
             f"invalid MCP server name {name!r}: must match [a-z0-9_]{{1,64}}"
         )
-    _validate_entry_shape(name, entry, path)
+    validate_entry_shape(name, entry, path)
 
     raw = _read_raw(path)
     servers = raw[_SERVERS_KEY]

@@ -106,3 +106,20 @@ class TestRemoveServer:
     def test_missing_file_errors(self, tmp_path: Path) -> None:
         with pytest.raises(McpConfigError):
             remove_server(tmp_path / "mcp.json", "github")
+
+
+class TestReadRawShapes:
+    def test_existing_file_without_wrapper_rejected(self, tmp_path: Path) -> None:
+        """A non-empty document lacking ``mcpServers`` is the loader's error
+        to report — the writer must not silently graft the wrapper onto it."""
+        path = tmp_path / "mcp.json"
+        path.write_text('{"something": "else"}')
+        with pytest.raises(McpConfigError, match="mcpServers"):
+            add_server(path, "github", {"command": "x"})
+        assert path.read_text() == '{"something": "else"}'
+
+    def test_mcpservers_non_object_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "mcp.json"
+        path.write_text('{"mcpServers": []}')
+        with pytest.raises(McpConfigError, match="object"):
+            add_server(path, "github", {"command": "x"})

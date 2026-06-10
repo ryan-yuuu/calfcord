@@ -284,3 +284,50 @@ class TestResolveConfigPath:
         monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
         monkeypatch.delenv("CALFCORD_HOME", raising=False)
         assert resolve_config_path() == Path("mcp.json")
+
+
+class TestLoadShapeRejectionsExtra:
+    """The remaining reachable shape-rejection branches (review round 1)."""
+
+    def test_http_type_without_url_rejected(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {"docs": {"type": "http"}}})
+        with pytest.raises(McpConfigError, match="requires a 'url'"):
+            load_mcp_servers(path)
+
+    def test_headers_values_must_be_strings(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            {"mcpServers": {"docs": {"type": "http", "url": "https://d", "headers": {"N": 1}}}},
+        )
+        with pytest.raises(McpConfigError, match="headers"):
+            load_mcp_servers(path)
+
+    def test_empty_url_rejected(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {"docs": {"type": "http", "url": ""}}})
+        with pytest.raises(McpConfigError, match="url"):
+            load_mcp_servers(path)
+
+    def test_cwd_must_be_string(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {"demo": {"command": "x", "cwd": 7}}})
+        with pytest.raises(McpConfigError, match="cwd"):
+            load_mcp_servers(path)
+
+    def test_servers_map_not_object_rejected(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": ["demo"]})
+        with pytest.raises(McpConfigError, match="object"):
+            load_mcp_servers(path)
+
+    def test_entry_not_object_rejected(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {"demo": "npx demo"}})
+        with pytest.raises(McpConfigError, match="demo"):
+            load_mcp_servers(path)
+
+
+class TestExpandVarsEscapes:
+    def test_double_dollar_before_brace_is_literal(self) -> None:
+        """``$${`` is a literal ``${`` (the ``$$`` escape consumes the dollar),
+        not an unbalanced reference — review round 1 regression pin."""
+        assert expand_vars("$${", {}) == "${"
+
+    def test_double_dollar_before_braced_var_ships_literal_ref(self) -> None:
+        assert expand_vars("$${VAR}", {}) == "${VAR}"

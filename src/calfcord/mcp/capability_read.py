@@ -25,19 +25,21 @@ _DEFAULT_TIMEOUT_SECONDS = 2.5
 
 def snapshot_capability_tools(
     server_urls: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS
-) -> dict[str, list[str]]:
-    """``{server: [tool, ...]}`` from the live capability view, or ``{}``.
+) -> dict[str, list[str]] | None:
+    """``{server: [tool, ...]}`` from the live capability view, or ``None``.
 
     Replays the compacted topic with a ``timeout``-bounded catch-up and
     returns each advertised toolbox's tool names (sorted). Any failure —
-    unreachable broker, missing topic, replay timeout — logs at debug and
-    returns ``{}``.
+    unreachable broker, missing topic, replay timeout — returns ``None``
+    (NOT ``{}``): callers can tell "the view answered and is empty" apart
+    from "the view was unreachable" and tell the operator which one
+    happened.
     """
     try:
         return asyncio.run(_snapshot(server_urls, timeout))
     except Exception as exc:
         logger.debug("capability view unavailable (%s); offline rows only", exc)
-        return {}
+        return None
 
 
 async def _snapshot(server_urls: str, timeout: float) -> dict[str, list[str]]:

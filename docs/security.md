@@ -331,9 +331,9 @@ matters in practice.
 - **Keep MCP credentials in `config/.env`, not in `mcp.json`.** MCP server
   entries may carry literal secrets (the file is `0600`, like `.env`), but
   prefer a `$VAR` reference in `mcp.json` whose value lives in `config/.env`
-  so the registry file holds no secret. `mcp.json` and its expanded secrets
-  are read **only** by the `calfkit-mcp` server processes (and the
-  `calfcord mcp` CLI) — agents resolve MCP tools from the broker's capability
+  so the registry file holds no secret. The expanded secret values are seen
+  **only** by the `calfkit-mcp` server processes (the `calfcord mcp` CLI
+  reads the file but never expands the references) — agents resolve MCP tools from the broker's capability
   view, never the config — so on a distributed deploy the credentials live on
   the MCP host alone and never reach agent hosts. See
   [`mcp-tools.md`](./mcp-tools.md).

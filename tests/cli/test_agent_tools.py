@@ -307,3 +307,18 @@ def test_editor_mcp_enumeration_failure_degrades_to_kept_rows(tmp_path: Path) ->
     assert rc == 0
     by_value = {c.value: c for c in fake.last_checkbox_choices}
     assert by_value["mcp/github"].checked is True
+
+
+def test_default_live_tools_prints_note_when_view_unreachable(monkeypatch, capsys) -> None:
+    """An unreachable capability view (None) prints the one-line note and
+    degrades to {} — distinguishable from an empty-but-successful view,
+    which stays silent."""
+    from calfcord.mcp import capability_read
+
+    monkeypatch.setattr(capability_read, "snapshot_capability_tools", lambda *a, **k: None)
+    assert agent_tools._default_live_tools() == {}
+    assert "unavailable" in capsys.readouterr().out
+
+    monkeypatch.setattr(capability_read, "snapshot_capability_tools", lambda *a, **k: {})
+    assert agent_tools._default_live_tools() == {}
+    assert capsys.readouterr().out == ""

@@ -31,10 +31,11 @@ Two pieces of state cross the ingress→egress boundary:
   ``discord.outbox`` because :meth:`BaseNodeDef._publish_action` carries
   ``envelope.context.deps`` forward.
 * The same wire is also written to a process-local :class:`PendingWires`
-  map keyed on ``correlation_id``. The outbox consumer reads this map
-  to recover the channel id / message id / author info it needs for
-  the Discord post — :class:`~calfkit.models.ConsumerContext` doesn't expose
-  ``Envelope.context.deps``. See :mod:`pending_wires` for the rationale.
+  map keyed on ``correlation_id``, together with the bridge-computed
+  retry context (history snapshot + cursor, temp instructions, model
+  settings) the outbox needs to rebuild a faithful retry envelope —
+  context that does NOT ride on ``ConsumerContext.deps`` the way the
+  wire itself does. See :mod:`pending_wires` for the rationale.
 
 Per-call thinking-effort overrides: when ``wire.slash_target`` is set
 we read the target agent's current ``thinking_effort`` from the
@@ -502,8 +503,9 @@ class BridgeIngress:
         The original wire, the publisher's phonebook snapshot, and the
         channel-history slice all ride on a single ``deps`` dict. The
         router run carries those deps forward, so the fan-out consumer
-        reads them back from ``result.deps`` (calfkit ≥ 0.4.0 exposes
-        inbound producer deps on ``ConsumerContext.deps``). The wire under
+        reads them back from ``result.deps`` (calfkit's ``ConsumerContext``
+        carries the inbound producer deps — the same dict a tool reads as
+        ``ctx.deps``). The wire under
         ``deps["discord"]`` also mirrors how every other publish path
         carries the wire — the synthesized-assistant chain that follows
         re-enters :meth:`handle` with ``kind="slash"`` and reads the

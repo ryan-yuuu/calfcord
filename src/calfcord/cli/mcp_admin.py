@@ -26,27 +26,20 @@ import asyncio
 import json
 import re
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from calfcord.cli._prompts import Choice, Prompter
-from calfcord.mcp.config import McpConfigError
+from calfcord.mcp.config import McpConfigError, references_var
 from calfcord.mcp.config_write import add_server, remove_server
 from calfcord.mcp.selector import is_valid_server_name
 
-# Matches calfkit-style references: the ``$$`` escape first (a literal, not a
-# reference), balanced ``${VAR}``, bare ``$VAR``. Used only for the nudge — a
-# value with no real reference ships literal, which is allowed.
-_VAR_PATTERN = re.compile(r"\$\$|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _references_var(value: str) -> bool:
-    return any(m.group(0) != "$$" for m in _VAR_PATTERN.finditer(value))
-
-
 def _nudge_literals(pairs: dict[str, str], *, kind: str) -> None:
-    literals = sorted(k for k, v in pairs.items() if not _references_var(v))
+    literals = sorted(k for k, v in pairs.items() if not references_var(v))
     if literals:
         print(
             f"note: {kind} value(s) {literals} are literals; consider a $VAR "
@@ -74,7 +67,9 @@ def _parse_header_token(token: str) -> tuple[str, str]:
     return key, value
 
 
-def _pairs(tokens: list[str], parse: Any, *, kind: str) -> dict[str, str]:
+def _pairs(
+    tokens: list[str], parse: Callable[[str], tuple[str, str]], *, kind: str
+) -> dict[str, str]:
     out: dict[str, str] = {}
     for token in tokens:
         key, value = parse(token)
@@ -136,6 +131,11 @@ def run_add(
                 return 1  # operator declined the preview — nothing written
             name, entry = wizard
 
+        # Nudge before any early return: the dry-run preview is exactly the
+        # moment an operator is inspecting what they're about to commit.
+        _nudge_literals(entry.get("env", {}), kind="env")
+        _nudge_literals(entry.get("headers", {}), kind="header")
+
         if dry_run:
             print(_preview(name, entry))
             print("(dry run: nothing written)")
@@ -146,8 +146,6 @@ def run_add(
         print(f"error: {exc}")
         return 1
 
-    _nudge_literals(entry.get("env", {}), kind="env")
-    _nudge_literals(entry.get("headers", {}), kind="header")
     print(f"added MCP server {name!r} to {config_path}")
 
     wants_start = start or (
@@ -194,7 +192,10 @@ def _add_from_flags(
 
     if command is not None:
         return server, _stdio_entry(command, _pairs(env, _parse_env_token, kind="env"), cwd)
-    assert url is not None
+    # The caller dispatches here only when command or url is given, and the
+    # exclusivity check above rejected "both" — so url is set on this branch.
+    if url is None:
+        raise McpConfigError("give --command (stdio) or --url (HTTP)")
     return server, _http_entry(url, _pairs(header, _parse_header_token, kind="header"))
 
 
@@ -246,7 +247,9 @@ def _add_from_wizard(
     return name, entry
 
 
-def _collect_pairs(prompter: Prompter, message: str, parse: Any) -> dict[str, str]:
+def _collect_pairs(
+    prompter: Prompter, message: str, parse: Callable[[str], tuple[str, str]]
+) -> dict[str, str]:
     """Prompt-loop key=value pairs until an empty line; bad input re-prompts."""
     pairs: dict[str, str] = {}
     while True:
@@ -292,8 +295,9 @@ def run_list(*, config_path: Path, home: Path | None) -> int:
 
 
 def _running_servers(home: Path | None) -> set[str] | None:
-    """Names of Running ``mcp-`` slots, or ``None`` when state is unknowable
-    (dev run, or the workspace is closed) — list still works, just stateless."""
+    """Names of Running MCP servers, or ``None`` when state is unknowable
+    (dev run, workspace closed, or the supervisor dropped mid-read) — list
+    still works, just stateless."""
     if home is None:
         return None
     from calfcord.supervisor import mcp_roster
@@ -303,8 +307,12 @@ def _running_servers(home: Path | None) -> set[str] | None:
         client = resolve_client(None, str(home))
         if not await workspace_is_up(client):
             return None
-        slots = await mcp_roster._running_mcp_slots(client)
-        return {slot.removeprefix(mcp_roster.MCP_SLOT_PREFIX) for slot in slots}
+        try:
+            return await mcp_roster.running_servers(client)
+        except RuntimeError:
+            # The workspace probe and this read race a dying supervisor; a
+            # drop in the window degrades to stateless, same as "closed".
+            return None
 
     return asyncio.run(_read())
 
