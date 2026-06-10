@@ -684,6 +684,89 @@ class TestToolsWiring:
         assert "calndar" in str(excinfo.value)
         assert "emial" in str(excinfo.value)
 
+    def test_mcp_selectors_become_deferred_selectors(self) -> None:
+        """``mcp/...`` entries are partitioned out of the builtin resolution
+        and land on the agent as per-server deferred selectors (calfkit's
+        ``_tool_selectors``) — one per server, with explicit tool picks
+        merged into a sorted ``include`` tuple. The deferred side is what
+        makes the Worker auto-register the capability view."""
+        from calfcord.mcp.agent_select import McpToolSelector
+
+        _, model_factory = _model_factory_spy()
+        fake_shell = _fake_tool_node("shell")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"shell": fake_shell},
+        )
+        worker = factory.build(
+            _definition(tools=("shell", "mcp/gmail/send", "mcp/gmail/search", "mcp/docs")),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent = worker._nodes[0]
+        assert agent.tools == list(fake_shell.tool_bindings())
+        assert agent._tool_selectors == [
+            McpToolSelector("docs"),
+            McpToolSelector("gmail", include=("search", "send")),
+        ]
+
+    def test_mcp_only_agent_builds_with_no_builtin_bindings(self) -> None:
+        """An agent may declare only MCP tools; it builds with zero static
+        bindings and resolves everything per turn from the capability view."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+        )
+        worker = factory.build(
+            _definition(tools=("mcp/gmail",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent = worker._nodes[0]
+        assert agent.tools == []
+        assert len(agent._tool_selectors) == 1
+
+    def test_tools_none_grants_builtins_only_never_mcp(self) -> None:
+        """The "tools omitted -> all tools" default expands to every BUILTIN;
+        MCP tools are always explicit, so no selectors appear."""
+        _, model_factory = _model_factory_spy()
+        fake_a = _fake_tool_node("alpha")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"alpha": fake_a},
+        )
+        worker = factory.build(
+            _definition(tools=None),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0]._tool_selectors == []
+
+    def test_unknown_builtin_error_not_confused_by_mcp_entries(self) -> None:
+        """A bogus bare name still raises the aggregate unknown-tool error;
+        the co-declared ``mcp/...`` entry is NOT reported as unknown (it is
+        not a builtin lookup)."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+        )
+        with pytest.raises(ValueError, match=r"\['definitely_not_real'\]"):
+            factory.build(
+                _definition(tools=("definitely_not_real", "mcp/gmail")),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+
     @pytest.mark.parametrize(
         "tool_name",
         [
@@ -957,6 +1040,23 @@ class TestMemoryFlag:
     """``memory: true`` requires the filesystem tools the memory block tells the
     agent to use; the factory's guard enforces this at build time. These tests
     use the real TOOL_REGISTRY (no override) so read_file/write_file resolve."""
+
+    def test_memory_agent_with_only_mcp_fs_lookalikes_rejected(self) -> None:
+        """MCP selectors cannot satisfy the memory guard: their tools resolve
+        at runtime, so the factory cannot prove read_file/write_file exist.
+        memory: true therefore requires the BUILTIN fs tools explicitly."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        with pytest.raises(ValueError, match="memory needs read_file and"):
+            factory.build(
+                _memory_definition(tools=("mcp/files",)),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
 
     def test_memory_agent_with_explicit_fs_tools_builds(self) -> None:
         _, model_factory = _model_factory_spy()

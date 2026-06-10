@@ -69,6 +69,18 @@ class TestFromRegistry:
         result = phonebook_from_registry(registry)
         assert result[0].tools is None
 
+    def test_strips_mcp_selectors_keeping_only_builtins(self) -> None:
+        """A spec whose ``tools`` mixes bare builtins and ``mcp/...`` selectors
+        projects only the builtins into the phonebook — MCP tools are not
+        A2A peers (they are request/response endpoints a toolbox hosts, not
+        agents another agent can ``private_chat``), so downstream consumers
+        (persona lookup, peer rosters) never need to see them."""
+        registry = AgentRegistry(
+            [_agent("alice", tools=("private_chat", "mcp/gmail", "shell", "mcp/cal/list"))]
+        )
+        result = phonebook_from_registry(registry)
+        assert result[0].tools == ("private_chat", "shell")
+
     def test_filters_out_router(self) -> None:
         """The built-in router has no A2A inbox; listing it as a peer
         would invite assistants' LLMs to call private_chat against a

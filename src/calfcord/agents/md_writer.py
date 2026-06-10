@@ -193,15 +193,15 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
     """Rewrite the ``tools`` frontmatter list in ``md_path`` to ``tools``.
 
     Every token is validated *before* the shared write path runs, so an
-    unknown builtin or an unsupported ``mcp/`` selector raises a precise
+    unknown builtin or a malformed ``mcp/`` selector raises a precise
     :class:`ValueError` (naming the offending token) with the on-disk file
     untouched, rather than surfacing as a generic pydantic error:
 
-    * an ``mcp/...`` token is rejected outright via the shared
-      :func:`~calfcord.agents._mcp_guard.mcp_unsupported_error` (MCP is no
-      longer supported — calfkit dropped the adaptor in 0.7.0), mirroring the
-      frontmatter validator so the editor can never write a list the loader
-      would later reject;
+    * an ``mcp/...`` token must be a well-formed selector
+      (:func:`~calfcord.mcp.selector.parse_mcp_selector`) — syntax only,
+      mirroring the frontmatter validator; whether the named server is
+      configured/running is a runtime concern the writer deliberately does
+      not check;
     * a *builtin* token must be a key of
       :data:`calfcord.tools.TOOL_REGISTRY`.
 
@@ -217,27 +217,29 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
 
     Raises:
         FileNotFoundError: ``md_path`` does not exist.
-        ValueError: an unknown builtin token, an unsupported ``mcp/`` selector,
+        ValueError: an unknown builtin token, a malformed ``mcp/`` selector,
             or a post-mutation :class:`AgentDefinition` validation failure.
             The on-disk file is unchanged.
         OSError: a filesystem error during the atomic write. The on-disk
             file is unchanged.
     """
-    from calfcord.agents._mcp_guard import is_mcp_tool, mcp_unsupported_error
+    from calfcord.mcp.selector import is_mcp_selector, parse_mcp_selector
     from calfcord.tools import TOOL_REGISTRY
 
     for token in tools:
-        # ``is_mcp_tool`` reaches for ``token.startswith`` — a non-str token
+        # ``is_mcp_selector`` reaches for ``token.startswith`` — a non-str token
         # would surface as an ``AttributeError`` instead of the ``ValueError`` this
         # seam documents, so reject it up front with the contract-honoring error.
         if not isinstance(token, str):
             raise ValueError(f"invalid tool {token!r}: expected a string")
-        if is_mcp_tool(token):
-            raise mcp_unsupported_error(token)
+        if is_mcp_selector(token):
+            parse_mcp_selector(token)  # syntactic check only; raises naming the token
+            continue
         if token not in TOOL_REGISTRY:
             valid = ", ".join(sorted(TOOL_REGISTRY)) or "(none registered)"
             raise ValueError(
-                f"unknown tool {token!r}; expected a builtin ({valid})"
+                f"unknown tool {token!r}; expected a builtin ({valid}) or an MCP "
+                f"selector (mcp/<server> or mcp/<server>/<tool>)"
             )
 
     return _update_fields(md_path, {"tools": list(tools)})

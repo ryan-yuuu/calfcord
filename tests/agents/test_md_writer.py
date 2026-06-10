@@ -315,27 +315,37 @@ def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> 
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
-def test_update_tools_rejects_mcp_token_and_leaves_file(tmp_path: Path) -> None:
-    """MCP is no longer supported: an ``mcp/...`` token is rejected at write
-    time with the canonical message, and the on-disk file is untouched —
-    mirroring the parse-time frontmatter gate."""
+def test_update_tools_accepts_well_formed_mcp_selector(tmp_path: Path) -> None:
+    """A syntactically valid ``mcp/...`` selector passes even when the server
+    is not configured anywhere — whether it exists/runs is a deployment
+    concern the writer deliberately does not check, mirroring the
+    frontmatter validator's syntax-only stance."""
+    md_path = _seed_md(tmp_path)
+    updated = update_tools(md_path, ["read_file", "mcp/gmail", "mcp/gmail/search"])
+    assert updated.tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
+
+
+def test_update_tools_malformed_mcp_selector_raises_and_leaves_file(tmp_path: Path) -> None:
+    """A malformed selector is rejected naming the entry, and the on-disk
+    file is untouched (validate-before-write)."""
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")
 
-    with pytest.raises(ValueError, match="MCP tools are not currently supported"):
-        update_tools(md_path, ["read_file", "mcp/gmail"])
+    # ``mcp/a/b/c`` has too many segments — rejected by parse_mcp_selector.
+    with pytest.raises(ValueError, match="mcp/a/b/c"):
+        update_tools(md_path, ["mcp/a/b/c"])
 
     assert md_path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
-def test_update_tools_mcp_token_rejected_before_unknown_builtin(tmp_path: Path) -> None:
-    """The MCP gate wins precedence over the unknown-builtin check: a list with
-    BOTH an ``mcp/...`` token and a bogus builtin raises the MCP message, not the
-    generic 'unknown tool' one — so the actionable error can't regress."""
+def test_update_tools_unknown_builtin_error_mentions_mcp_forms(tmp_path: Path) -> None:
+    """The unknown-builtin message teaches both legal shapes — a bare builtin
+    name or an MCP selector — so a user who meant ``mcp/gmail`` but typed
+    ``gmail`` learns the syntax from the error itself."""
     md_path = _seed_md(tmp_path)
-    with pytest.raises(ValueError, match="MCP tools are not currently supported"):
-        update_tools(md_path, ["mcp/gmail", "definitely_not_a_builtin"])
+    with pytest.raises(ValueError, match=r"mcp/<server>"):
+        update_tools(md_path, ["gmail"])
 
 
 def test_update_tools_non_string_token_raises_valueerror_and_leaves_file(tmp_path: Path) -> None:

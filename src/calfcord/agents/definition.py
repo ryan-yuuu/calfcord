@@ -45,8 +45,8 @@ import frontmatter
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from calfcord.agents._mcp_guard import is_mcp_tool, mcp_unsupported_error
 from calfcord.agents.identifier import AGENT_ID_PATTERN
+from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 from calfcord.discord.avatar import dicebear_avatar_url
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
@@ -233,14 +233,17 @@ class AgentDefinition(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, v: tuple[str, ...] | None) -> tuple[str, ...] | None:
-        """Reject ``mcp/...`` tool entries; let bare builtin names through.
+        """Syntax-check ``mcp/...`` tool entries; let bare builtin names through.
 
-        MCP is no longer supported (calfkit dropped the adaptor in 0.7.0), so an
-        ``mcp/...`` entry is rejected here at parse time with the canonical
-        :func:`~calfcord.agents._mcp_guard.mcp_unsupported_error` message naming
-        the offending entry. This is the authoritative gate for every read path:
-        the agent process parses each ``.md`` through here before booting, so a
-        rejected agent never announces state to the bridge.
+        An ``mcp/...`` entry must be a well-formed selector
+        (``mcp/<server>`` or ``mcp/<server>/<tool>``); all malformed entries
+        are aggregated into ONE :class:`ValueError` naming each offending
+        string, so an operator fixes the whole ``tools:`` line in a single
+        pass. Whether the named server is configured or running is a
+        *runtime* concern (the capability view resolves selectors per turn),
+        deliberately not checked here — this is the authoritative syntactic
+        gate for every read path: the agent process parses each ``.md``
+        through here before booting.
 
         Bare names (anything not starting with ``mcp/`` — ``shell``,
         ``calendar``, …) pass through **untouched**. Whether a bare name
@@ -253,9 +256,16 @@ class AgentDefinition(BaseModel):
         """
         if v is None:
             return v
+        bad: list[str] = []
         for entry in v:
-            if is_mcp_tool(entry):
-                raise mcp_unsupported_error(entry)
+            if not is_mcp_selector(entry):
+                continue
+            try:
+                validate_mcp_selector(entry)
+            except ValueError as exc:
+                bad.append(f"{entry!r}: {exc}")
+        if bad:
+            raise ValueError("malformed MCP tool selector(s) in tools: " + "; ".join(bad))
         return v
 
     @model_validator(mode="after")

@@ -93,6 +93,8 @@ from calfcord.agents.memory import memory_instructions
 from calfcord.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 from calfcord.agents.thinking import build_model_settings
+from calfcord.mcp.agent_select import McpToolSelector, selectors_from_entries
+from calfcord.mcp.selector import is_mcp_selector
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
 
@@ -364,7 +366,7 @@ class AgentFactory:
                 f"agent {definition.agent_id!r} has no channels in state; "
                 "an assistant must subscribe to at least one channel"
             )
-        tools = self._resolve_tools(definition)
+        tools, mcp_selectors = self._resolve_tools(definition)
         self._require_memory_tools(definition, tools)
 
         provider = self._resolve_provider(definition)
@@ -393,7 +395,8 @@ class AgentFactory:
             model_name if model_name is not None else "<codex catalog default>",
             subscribe_topics,
             definition.thinking_effort,
-            [t.tool_schema.name for t in tools] if tools else [],
+            [t.tool_schema.name for t in tools]
+            + [f"mcp:{s.server}" for s in mcp_selectors],
         )
 
         # ``publish_topic=AGENT_STEPS_TOPIC`` makes FastStream mirror every
@@ -414,7 +417,7 @@ class AgentFactory:
             publish_topic=AGENT_STEPS_TOPIC,
             model_client=self._model_client_factory(provider, model_name),
             model_settings=model_settings,
-            tools=tools or None,
+            tools=[*tools, *mcp_selectors] or None,
         )
         agent.gate(make_addressable_gate(definition.agent_id))
         agent.gate(make_addressed_to_me_gate(definition.agent_id))
@@ -532,40 +535,50 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _resolve_tools(self, definition: AgentDefinition) -> list[ToolNodeDef]:
-        """Resolve ``definition.tools`` into builtin calfkit tool nodes.
+    def _resolve_tools(
+        self, definition: AgentDefinition
+    ) -> tuple[list[ToolNodeDef], list[McpToolSelector]]:
+        """Resolve ``definition.tools`` into builtin nodes + deferred MCP selectors.
 
-        Every ``tools:`` entry is a bare *builtin* name (``shell``,
-        ``calendar``) resolved against the in-memory tool registry, with an
-        aggregate unknown-name :class:`ValueError` (every unknown name in one
-        message). ``mcp/...`` selectors are no longer supported and are already
-        rejected at parse time by :meth:`AgentDefinition._validate_tools`, so
-        none reach here.
+        The flat ``tools:`` list mixes two kinds of entry, partitioned here:
+
+        * bare *builtin* names (``shell``, ``calendar``) resolve against the
+          in-memory tool registry, with an aggregate unknown-name
+          :class:`ValueError` (every unknown name in one message);
+        * ``mcp/...`` selectors collapse into one
+          :class:`~calfcord.mcp.agent_select.McpToolSelector` per server
+          (:func:`~calfcord.mcp.agent_select.selectors_from_entries`),
+          resolved per turn against the capability view — never against any
+          local registry, so there is nothing further to validate here.
+
+        Name collisions between the two kinds cannot be checked statically
+        (MCP tool names are only known at runtime); calfkit's per-turn
+        resolution drops a toolbox tool that collides with a static binding
+        (static wins, logged), which is the operative policy.
 
         Semantics (mirrors :attr:`AgentDefinition.tools`):
-            - ``None``: tools-by-default — every registered builtin tool.
-              This is the in-memory representation of the "no ``tools:``
-              line in frontmatter" case before the loader normalizes it.
-              The loader normalizes to a concrete tuple, so a ``None``
-              reaching this method usually means a code-built definition
-              bypassed the loader (e.g. a test or the router build path,
-              which doesn't go through this method).
+            - ``None``: tools-by-default — every registered builtin tool and
+              **no** MCP tools (MCP is always an explicit grant). This is
+              the in-memory representation of the "no ``tools:`` line in
+              frontmatter" case before the loader normalizes it.
             - empty tuple ``()``: zero tools (explicit opt-out).
-            - non-empty tuple: exactly those builtins, with unknown-name
-              validation.
+            - non-empty tuple: exactly those entries.
 
         Raises:
             ValueError: if any builtin name is missing from the registry
                 (lists every unknown name in one message).
         """
         if definition.tools is None:
-            return list(self._tool_registry.values())
+            return list(self._tool_registry.values()), []
         if not definition.tools:
-            return []
+            return [], []
 
+        mcp_entries = [e for e in definition.tools if is_mcp_selector(e)]
         nodes: list[ToolNodeDef] = []
         unknown: list[str] = []
         for name in definition.tools:
+            if is_mcp_selector(name):
+                continue
             node = self._tool_registry.get(name)
             if node is None:
                 unknown.append(name)
@@ -578,7 +591,7 @@ class AgentFactory:
                 f"{unknown!r}; known tools: {known or '<none registered>'}"
             )
 
-        return nodes
+        return nodes, selectors_from_entries(mcp_entries)
 
     def _require_memory_tools(self, definition: AgentDefinition, tools: list[ToolNodeDef]) -> None:
         """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.

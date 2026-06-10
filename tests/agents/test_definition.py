@@ -90,20 +90,37 @@ class TestAgentDefinitionValidators:
 
     @pytest.mark.parametrize(
         "selector",
-        ["mcp/gmail", "mcp/gmail/search", "mcp/demo/get-x", "mcp/", "mcp/a/b/c"],
+        ["mcp/gmail", "mcp/gmail/search", "mcp/demo/get-x", "mcp/srv_2"],
     )
-    def test_mcp_tool_selectors_rejected(self, selector: str) -> None:
-        """MCP is no longer supported (calfkit dropped the adaptor in 0.7.0):
-        every ``mcp/...`` entry is rejected uniformly at parse time, with an
-        actionable message, regardless of the old selector grammar."""
-        with pytest.raises(ValidationError, match="MCP tools are not currently supported"):
-            _make_definition(tools=[selector])
+    def test_valid_mcp_selectors_accepted(self, selector: str) -> None:
+        """Well-formed ``mcp/...`` selectors pass the syntactic field check —
+        whether the server is configured/running is a runtime concern (the
+        capability view), not a parse-time one."""
+        d = _make_definition(tools=[selector])
+        assert d.tools == (selector,)
 
-    def test_mcp_rejection_names_offending_entry(self) -> None:
-        """The rejection names the exact entry so an operator can fix the line,
-        and fires even when mixed with valid bare builtin names."""
-        with pytest.raises(ValidationError, match=r"mcp/gmail"):
-            _make_definition(tools=["shell", "mcp/gmail"])
+    def test_mixed_builtins_and_mcp_selectors_accepted(self) -> None:
+        """One flat ``tools:`` list carries both bare builtin names and
+        ``mcp/...`` selectors — both kinds coexist on the same agent."""
+        d = _make_definition(tools=["shell", "mcp/gmail", "mcp/calendar/list-events"])
+        assert d.tools == ("shell", "mcp/gmail", "mcp/calendar/list-events")
+
+    @pytest.mark.parametrize(
+        "bad_selector",
+        ["mcp/", "mcp/a/b/c", "mcp//x", "mcp/Gmail", "mcp/gmail/"],
+    )
+    def test_malformed_mcp_selectors_rejected(self, bad_selector: str) -> None:
+        with pytest.raises(ValidationError, match="malformed MCP tool selector"):
+            _make_definition(tools=[bad_selector])
+
+    def test_multiple_malformed_selectors_aggregated(self) -> None:
+        """All malformed selectors surface in ONE error so an operator fixes
+        the whole ``tools:`` line in a single pass."""
+        with pytest.raises(ValidationError) as exc_info:
+            _make_definition(tools=["mcp/", "mcp/a/b/c"])
+        msg = str(exc_info.value)
+        assert "'mcp/'" in msg
+        assert "'mcp/a/b/c'" in msg
 
     def test_arbitrary_bare_names_still_accepted(self) -> None:
         """Bare (non-``mcp/``) names pass through untouched — existence is
@@ -245,14 +262,21 @@ class TestParseAgentMd:
         with pytest.raises(ValueError, match="does not match filename stem"):
             parse_agent_md(path)
 
-    def test_mcp_tool_in_frontmatter_rejected(self, tmp_path: Path) -> None:
-        """An on-disk ``.md`` whose ``tools:`` still names an ``mcp/...`` entry
-        fails to load — the gate fires on the real read path (the same one the
-        agent process and the bridge registry use), so a stale selector never
-        reaches a running worker."""
+    def test_mcp_tool_in_frontmatter_loads(self, tmp_path: Path) -> None:
+        """An on-disk ``.md`` whose ``tools:`` names an ``mcp/...`` entry loads
+        on the real read path (the same one the agent process and the bridge
+        registry use) — selectors are first-class tool declarations again."""
         path = tmp_path / "scheduler.md"
         self._write_md(path, tools="[shell, mcp/gmail]")
-        with pytest.raises(ValueError, match="MCP tools are not currently supported"):
+        definition = parse_agent_md(path)
+        assert definition.tools == ("shell", "mcp/gmail")
+
+    def test_malformed_mcp_tool_in_frontmatter_rejected(self, tmp_path: Path) -> None:
+        """A malformed selector fails the load with the entry named, so a
+        frontmatter typo never reaches a running worker."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, tools="[shell, mcp/a/b/c]")
+        with pytest.raises(ValueError, match="malformed MCP tool selector"):
             parse_agent_md(path)
 
     def test_missing_frontmatter_rejected(self, tmp_path: Path) -> None:

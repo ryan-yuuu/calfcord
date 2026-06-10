@@ -12,9 +12,9 @@ default-resolving path) so it can distinguish ``tools:`` *omitted* (``None`` →
 implicitly "all builtins") from ``tools: []`` (explicitly none). The
 implicit-all case is converted into explicit checks here, and the write always
 persists an explicit list, so on-disk state stops being ambiguous after the
-first save. (MCP tools are not currently supported — calfkit dropped the
-adaptor in 0.7.0 — so a ``.md`` still carrying an ``mcp/...`` entry fails to
-parse and cannot be opened here until the entry is hand-removed.)
+first save. Entries the editor cannot enumerate (``mcp/...`` selectors and
+other non-builtin tokens already in the ``.md``) are preserved as pre-checked
+rows so an unrelated edit never silently drops them.
 
 Tool edits take effect on the next ``calfcord calfkit-agent`` boot — the node
 bakes its tool list at construction time (see the onboarding plan's "tools are
@@ -86,11 +86,15 @@ def _resolve_agent(prompter: Prompter, *, agents_dir: Path, name: str | None) ->
 def _build_choices(current: set[str]) -> list[Choice]:
     """Build the checkbox :class:`Choice` rows from the builtin tool registry.
 
-    Each builtin ``name`` is a row, checked iff it is in ``current``. Builtins
-    are the only tool universe — anything the operator can tick is something
-    :func:`calfcord.agents.md_writer.update_tools` will accept on write.
+    Each builtin ``name`` is a row, checked iff it is in ``current``.
     Enumeration uses only the schema-only :data:`calfcord.tools.TOOL_REGISTRY`
     seam (no transport, no secrets).
+
+    Anything in ``current`` that is *not* a builtin (``mcp/...`` selectors,
+    or names from a registry this host doesn't carry) is appended as a
+    pre-checked "kept" row: unchecking is an explicit operator decision, and
+    an edit that only touched builtins can never silently drop a selector
+    the editor failed to enumerate.
     """
     from calfcord.tools import TOOL_REGISTRY
 
@@ -99,6 +103,8 @@ def _build_choices(current: set[str]) -> list[Choice]:
         summary = first_line(TOOL_REGISTRY[name].tool_schema.description)
         label = f"{name} — {summary}" if summary else name
         choices.append(Choice(name, label, name in current))
+    for kept in sorted(current - set(TOOL_REGISTRY)):
+        choices.append(Choice(kept, f"{kept} — (kept: configured on this agent)", True))
     return choices
 
 

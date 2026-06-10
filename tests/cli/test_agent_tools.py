@@ -196,19 +196,23 @@ def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> Non
     assert "broken" in out
 
 
-def test_mcp_entry_in_md_reports_error_not_traceback(tmp_path: Path, capsys) -> None:
-    """A committed ``.md`` still carrying an ``mcp/...`` tool no longer parses
-    (the parse-time gate rejects it), so the editor reports an operator-
-    recoverable error naming the agent and exits 1 — never a raw traceback. This
-    is the read-path the editor's docstring promises handles such a file."""
+def test_mcp_entry_in_md_kept_as_prechecked_row(tmp_path: Path) -> None:
+    """An ``.md`` carrying ``mcp/...`` selectors opens in the editor and the
+    selectors appear as pre-checked rows after the builtins — a tool the
+    editor cannot enumerate (no mcp.json on this host, server offline) must
+    never be silently dropped by an unrelated edit."""
     agents_dir = tmp_path
     _seed_agent(agents_dir, "legacy", tools_line="[shell, mcp/gmail]")
-    fake = FakePrompter()
-    assert agent_tools.run(fake, agents_dir=agents_dir, name="legacy") == 1
-    out = capsys.readouterr().out
-    assert "error:" in out
-    assert "legacy" in out
-    assert "MCP tools are not currently supported" in out
+    fake = FakePrompter(checkbox_result=["shell", "mcp/gmail"])
+    assert agent_tools.run(fake, agents_dir=agents_dir, name="legacy") == 0
+
+    assert fake.last_checkbox_choices is not None
+    by_value = {c.value: c for c in fake.last_checkbox_choices}
+    assert by_value["mcp/gmail"].checked is True
+    assert by_value["shell"].checked is True
+
+    # Write-through preserves the selector verbatim.
+    assert parse_agent_md(agents_dir / "legacy.md").tools == ("shell", "mcp/gmail")
 
 
 # -------------------------------------------------------------- first_line ---

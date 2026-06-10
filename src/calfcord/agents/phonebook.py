@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
+from calfcord.mcp.selector import is_mcp_selector
 
 if TYPE_CHECKING:
     # Type-checking-only import; avoids the same package-init cycle that
@@ -112,12 +113,27 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
             display_name=spec.display_name,
             avatar_url=spec.avatar_url,
             description=spec.description,
-            tools=spec.tools,
+            tools=_builtin_tools_only(spec.tools),
             history_turns=spec.history_turns,
         )
         for spec in registry.all()
         if spec.role != "router"
     ]
+
+
+
+def _builtin_tools_only(tools: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Drop ``mcp/...`` selectors, keeping only bare builtin tool names.
+
+    ``None`` (the "all builtins" default-resolution sentinel) passes through
+    unchanged — it carries no selectors to strip and its meaning is "every
+    registered builtin", which the phonebook preserves verbatim. A concrete
+    tuple is filtered to its builtin names (MCP tools aren't A2A peers, so
+    downstream consumers of the phonebook never need to see them).
+    """
+    if tools is None:
+        return None
+    return tuple(t for t in tools if not is_mcp_selector(t))
 
 
 def format_roster_lines(entries: Iterable[PhonebookEntry]) -> str:
