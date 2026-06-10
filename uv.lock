@@ -562,7 +562,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", specifier = "~=0.7.0" },
+    { name = "calfkit", specifier = "~=0.9.0" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
@@ -584,7 +584,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.7.0"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -593,6 +593,8 @@ dependencies = [
     { name = "genai-prices" },
     { name = "griffe" },
     { name = "httpx" },
+    { name = "ktables" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
@@ -602,9 +604,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/ef/a6c7aa2acb716f75ffe80f1b86a668713bd04cb019d1a5aa89d6fc78feb4/calfkit-0.7.0.tar.gz", hash = "sha256:877f40ac5e7d5eb9db722655ca45253816a508f69680fc5cb8a1283069744451", size = 780012, upload-time = "2026-06-09T00:01:05.973Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/61/63451c203aa4ae8d65b6258e4200c36a4cedea55c063512dc00d3f4fba86/calfkit-0.9.0.tar.gz", hash = "sha256:8c0533a071bc3bb0cff9286be35cd682e39c2969c5e9843edb0ca8c11b6e9cc8", size = 848201, upload-time = "2026-06-10T10:24:22.104Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/88/32c71fcf0f0949422ece601a764fa04c27a328a0c2d831ba1688cead4346/calfkit-0.7.0-py3-none-any.whl", hash = "sha256:bac12e9f634f7e6e66664ee144975c99b3d53c3fa961da49413270561c68e7de", size = 637002, upload-time = "2026-06-09T00:01:04.348Z" },
+    { url = "https://files.pythonhosted.org/packages/93/23/de3c2a761ae5e94f82c148e1be36ee5e99bd5a0382b8a8a341540397079a/calfkit-0.9.0-py3-none-any.whl", hash = "sha256:88bff76c35e8d371c0f208bbfa0818c07a7ccd7edf7843c5de1589256256d516", size = 649214, upload-time = "2026-06-10T10:24:20.573Z" },
 ]
 
 [[package]]
@@ -1878,6 +1880,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ktables"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiokafka" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/23/b0/fb814958ab6d97d319e6a2a6cac8817058dab06a22fa10b50c4e40273a76/ktables-0.1.2.tar.gz", hash = "sha256:a62bc10523ff419dee3a2b9e21d06cb965a687ea40ac35cdc76710549742d4e4", size = 40406, upload-time = "2026-06-10T08:56:13.085Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/ad/9bc3ebf3e5e14da0ca5367aadaae746e98337ce79802999496a4643b8595/ktables-0.1.2-py3-none-any.whl", hash = "sha256:aaccc3361cebe17bfb1dfd4b04b7bd1f5525c9cd9c6f70236fa3283fcd48ac2d", size = 13444, upload-time = "2026-06-10T08:56:11.827Z" },
+]
+
+[[package]]
 name = "libtmux"
 version = "0.58.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2254,7 +2268,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.27.1"
+version = "1.27.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2272,9 +2286,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/38/83/d1efe7c2980d8a3afa476f4e3d42d53dd54c0ab94c27bee5d755b45c8b73/mcp-1.27.1.tar.gz", hash = "sha256:0f47e1820f8f8f941466b39749eb1d1839a04caddca2bc60e9d46e8a99914924", size = 608458, upload-time = "2026-05-08T16:50:12.601Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/3c/347cf965d313f5d41764e7d46bea6ffe7d9ef13b983cc429b0340962a082/mcp-1.27.2.tar.gz", hash = "sha256:8e02db104096d1c25b28e64bde29a5c32b31bc241710213e12fd4d84985bdfef", size = 621116, upload-time = "2026-05-29T17:16:04.039Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fd/73/42d9596facebdb533b7f0b86c1b0364ef350d1f8ba78b1052e8a58b48b65/mcp-1.27.1-py3-none-any.whl", hash = "sha256:1af3c4203b329430fde7a87b4fcb6392a041f5cb851fd68fc674016ab4e7c06f", size = 216260, upload-time = "2026-05-08T16:50:10.547Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/11/252c6f971dc4f16af1d98a1c469d8ba523aab00d1bb76b4d3bc1ff32eacc/mcp-1.27.2-py3-none-any.whl", hash = "sha256:d6ff5160c6ca65d93013626efb3fc249de683c30b2d8570755ceddd490344de5", size = 220498, upload-time = "2026-05-29T17:16:02.442Z" },
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 """Unit tests for the outbox consumer built by ``build_outbox_consumer``.
 
-Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
+Drives ``ConsumerNode.handler`` directly with synthetic ``Envelope``s
 so we exercise the gate, the dep lookup against ``PendingWires``, the
 emitter checks, and the persona send — all without Kafka, FastStream,
 discord.py, or an LLM.

@@ -14,7 +14,7 @@ configured to subscribe to:
 
 The agent's identity rides on every outbound publish via calfkit's
 ``x-calf-emitter`` Kafka header, so the bridge egress can resolve the
-responding agent's persona from ``NodeResult.emitter_node_id`` without
+responding agent's persona from ``ConsumerContext.emitter_node_id`` without
 any application-level identity stamping.
 
 **Why the private return topic at index [0]:** calfkit's
@@ -229,7 +229,7 @@ class AgentFactory:
         The constructed :class:`Agent` is unmodified calfkit; calfkit
         stamps ``x-calf-emitter`` / ``x-calf-emitter-kind`` Kafka headers on
         every outbound publish, so the bridge resolves the responding agent
-        via :attr:`NodeResult.emitter_node_id` and looks up the persona in
+        via :attr:`~calfkit.models.ConsumerContext.emitter_node_id` and looks up the persona in
         the :class:`AgentRegistry`.
 
     Provider selection priority (first non-empty wins):

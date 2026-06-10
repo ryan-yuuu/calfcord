@@ -626,14 +626,14 @@ class TestToolsWiring:
             MagicMock(),
         )
         # ``_resolve_tools`` returns ``registry.values()`` for ``tools=None``,
-        # so the wired nodes are exactly the registry's, in insertion order.
-        # (``ToolNodeDef`` is unhashable, so compare the list rather than a
-        # set.)
-        assert worker._nodes[0].tools == [fake_a, fake_b]
+        # so the agent's bindings are exactly the registry nodes' bindings, in
+        # insertion order (calfkit ≥ 0.9 expands ToolNodeDefs to ToolBindings
+        # at Agent construction).
+        assert worker._nodes[0].tools == [*fake_a.tool_bindings(), *fake_b.tool_bindings()]
 
     def test_known_tool_name_is_wired_through_registry(self) -> None:
-        """A name listed in ``tools:`` resolves to the registry's ToolNodeDef
-        and lands in ``Agent.tools``."""
+        """A name listed in ``tools:`` resolves to the registry's ToolNodeDef,
+        whose bindings land in ``Agent.tools``."""
         _, model_factory = _model_factory_spy()
         fake_calendar = _fake_tool_node("calendar")
         factory = AgentFactory(
@@ -647,7 +647,7 @@ class TestToolsWiring:
             AgentRuntimeState(channels=[100]),
             MagicMock(),
         )
-        assert worker._nodes[0].tools == [fake_calendar]
+        assert worker._nodes[0].tools == list(fake_calendar.tool_bindings())
 
     def test_unknown_tool_name_raises_with_known_list(self) -> None:
         """Typo in ``.md`` fails at build, listing every unknown plus
@@ -720,7 +720,7 @@ class TestToolsWiring:
         )
         resolved = worker._nodes[0].tools
         assert resolved is not None and len(resolved) == 1
-        assert resolved[0].tool_schema.name == tool_name
+        assert resolved[0].name == tool_name
 
 
 def _router_definition(

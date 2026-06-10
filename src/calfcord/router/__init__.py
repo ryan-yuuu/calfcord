@@ -15,7 +15,7 @@ Public surface:
       :class:`AgentDefinition` for the router (used by
       :class:`AgentRegistry.from_agents_dir`).
     - :func:`build_fanout_consumer` — the fan-out
-      :class:`ConsumerNodeDef` the ``calfkit-router`` runner registers
+      :class:`ConsumerNode` the ``calfkit-router`` runner registers
       alongside the router agent on a single :class:`Worker`.
     - :func:`build_router_temp_instructions` — per-call agent roster
       injected as ``temp_instructions`` so the LLM sees the available

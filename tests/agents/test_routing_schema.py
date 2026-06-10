@@ -2,7 +2,7 @@
 
 The schema is what the built-in router agent's LLM populates via
 pydantic-ai's ``ToolOutput`` pattern. The fan-out consumer reads it
-off ``NodeResult.output``.
+off ``ConsumerContext.output``.
 """
 
 from __future__ import annotations

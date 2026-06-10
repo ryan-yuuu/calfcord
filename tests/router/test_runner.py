@@ -57,7 +57,7 @@ class TestBuildRouterNodes:
     def test_second_node_is_fanout_consumer(self) -> None:
         nodes = runner._build_router_nodes(self._factory(), MagicMock())
         # The fan-out consumer subscribes to the router's publish_topic.
-        # Stock ConsumerNodeDef stores topics on ``subscribe_topics`` as
+        # Stock ConsumerNode stores topics on ``subscribe_topics`` as
         # a list.
         subscribe_topics = nodes[1].subscribe_topics
         if not isinstance(subscribe_topics, list):

@@ -3,7 +3,7 @@
 The bridge's ingress (:class:`BridgeIngress`) records inbound wires
 before publishing to Kafka; the outbox consumer
 (:func:`build_outbox_consumer`) reads them back when an agent reply
-lands. The map exists because calfkit's :class:`NodeResult` does not
+lands. The map exists because calfkit's :class:`~calfkit.models.ConsumerContext` does not
 carry the inbound ``Envelope.context.deps`` — the consumer sees
 ``output``, ``state``, ``correlation_id``, and ``emitter_*`` but not
 the original ``deps={"discord": wire}`` we sent on the way in. Rather

@@ -1,7 +1,7 @@
 """Discord steps consumer — streams every assistant agent's intermediate
 hops into a single transient in-channel "progress" message.
 
-A long-lived calfkit :class:`ConsumerNodeDef` subscribed to
+A long-lived calfkit :class:`ConsumerNode` subscribed to
 :data:`~calfcord.topics.AGENT_STEPS_TOPIC` (``agent.steps``)
 in its own Kafka consumer group. Every assistant agent's handler hop —
 ``Call`` envelopes (tool dispatch), ``TailCall`` retries, the terminal
@@ -32,7 +32,7 @@ Without this consumer, the model's running commentary and the tool
 calls themselves are invisible to the user while the agent works.
 
 How the wire is recovered: same pattern as the outbox.
-:class:`NodeResult` carries ``state``, ``correlation_id``, and
+:class:`ConsumerContext` carries ``state``, ``correlation_id``, and
 ``emitter_node_id`` but not the original inbound wire. The bridge's
 :class:`~calfcord.bridge.pending_wires.PendingWires` map
 (populated by :class:`BridgeIngress` on the way in) gives us the
@@ -164,7 +164,7 @@ from collections.abc import Awaitable, Sequence
 from typing import Final
 
 import discord
-from calfkit import ConsumerNodeDef, NodeResult
+from calfkit import ConsumerNode
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -173,6 +173,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
+from calfkit.models import ConsumerContext
 
 from calfcord.bridge.pending_wires import PendingWires
 from calfcord.bridge.registry import AgentRegistry
@@ -641,7 +642,7 @@ def build_steps_consumer(
     typing_notifier: TypingNotifier | None = None,
     subscribe_topic: str = AGENT_STEPS_TOPIC,
     node_id: str = DEFAULT_STEPS_CONSUMER_NODE_ID,
-) -> ConsumerNodeDef[str]:
+) -> ConsumerNode[str]:
     """Construct the bridge's steps consumer node.
 
     Args:
@@ -651,7 +652,7 @@ def build_steps_consumer(
             (:meth:`~calfcord.discord.persona.DiscordPersonaSender.send`
             / ``edit_message`` / ``delete_message``).
         registry: Roster of agents. Resolves
-            ``NodeResult.emitter_node_id`` to a :class:`Persona`. An
+            ``ConsumerContext.emitter_node_id`` to a :class:`Persona`. An
             unknown emitter id is logged and skipped.
         pending_wires: Bridge-local store of in-flight inbound wires.
             We read the parent ``channel_id`` / ``message_id`` and the
@@ -673,7 +674,7 @@ def build_steps_consumer(
             does not).
 
     Returns:
-        A :class:`ConsumerNodeDef` ready to register on a
+        A :class:`ConsumerNode` ready to register on a
         :class:`~calfkit.Worker`.
     """
 
@@ -791,7 +792,7 @@ def build_steps_consumer(
         else:
             _schedule_debounced_edit(entry)
 
-    async def _consume(result: NodeResult[str]) -> None:
+    async def _consume(result: ConsumerContext[str]) -> None:
         correlation_id = result.correlation_id
 
         if result.emitter_node_kind != "agent" or not result.emitter_node_id:
@@ -901,9 +902,9 @@ def build_steps_consumer(
 
     # No gate — we want every hop, including gated-out peer mirrors so
     # the cursor stays consistent across all co-tenants.
-    return ConsumerNodeDef[str](
+    return ConsumerNode[str](
         node_id=node_id,
         subscribe_topics=subscribe_topic,
         consume_fn=_consume,
-        output_type=str,
+        agent_output_type=str,
     )

@@ -3,12 +3,12 @@
 The consumer subscribes to ``bridge.synthesized.in`` and feeds every
 synthesized wire (from the router's fan-out) through
 :meth:`BridgeIngress.handle`. Same testing approach as
-``test_outbox.py``: drive ``ConsumerNodeDef.handler`` directly with a
+``test_outbox.py``: drive ``ConsumerNode.handler`` directly with a
 synthetic ``Envelope``.
 
 The synthesized wire and forwarded history ride on the envelope's
 ``context.deps`` and reach the consumer via ``result.deps`` (calfkit
-≥ 0.4.0 exposes inbound producer deps on ``NodeResult.deps``).
+≥ 0.4.0 exposes inbound producer deps on ``ConsumerContext.deps``).
 """
 
 from __future__ import annotations

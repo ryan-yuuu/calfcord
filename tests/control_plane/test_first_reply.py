@@ -5,7 +5,7 @@ emitted by the agent it just started, to prove the org is live end-to-end. The
 replying agent's identity is NOT in the envelope JSON — it rides the Kafka
 headers (``x-calf-emitter`` / ``x-calf-emitter-kind``) and is recoverable only
 through a calfkit consumer handler's ``_stamp_transport`` (mirrors the bridge's
-own outbox consumer). So the detector is a :class:`ConsumerNodeDef`, and these
+own outbox consumer). So the detector is a :class:`ConsumerNode`, and these
 tests drive its ``handler`` directly with synthetic envelopes — exercising the
 gate, the emitter-kind / emitter-id match, and the empty-output skip without a
 broker, FastStream, or an LLM.

@@ -25,7 +25,7 @@ shape as :func:`build_outbox_consumer` in
 :mod:`calfcord.bridge.outbox`. No NodeDef subclass; the fan-out puts
 the synthesized wire and forwarded history on ``deps``, and this
 consumer reads them back from ``result.deps`` (calfkit ≥ 0.4.0 exposes
-inbound producer deps on ``NodeResult.deps`` — the same dict a tool
+inbound producer deps on ``ConsumerContext.deps`` — the same dict a tool
 reads as ``ctx.deps["key"]``).
 
 ``output_type`` is left auto-detect (``_UNSET``) because we don't use
@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import logging
 
-from calfkit import ConsumerNodeDef, NodeResult
+from calfkit import ConsumerNode
+from calfkit.models import ConsumerContext
 from calfkit.nodes.consumer import consumer
 from pydantic import ValidationError
 
@@ -60,7 +61,7 @@ def build_synthesized_consumer(
     *,
     subscribe_topic: str = SYNTHESIZED_INGRESS_TOPIC,
     node_id: str = DEFAULT_SYNTHESIZED_NODE_ID,
-) -> ConsumerNodeDef:
+) -> ConsumerNode:
     """Construct the bridge's synthesized-wire consumer.
 
     Args:
@@ -75,7 +76,7 @@ def build_synthesized_consumer(
             avoid that topology, but it's not catastrophic.
 
     Returns:
-        A :class:`ConsumerNodeDef` ready to register on the bridge's
+        A :class:`ConsumerNode` ready to register on the bridge's
         :class:`Worker` alongside the outbox consumer. The consumer
         does NOT install the ``final_output_parts`` gate: a fan-out
         publish's envelope carries the wire on ``deps`` but
@@ -88,7 +89,7 @@ def build_synthesized_consumer(
         subscribe_topics=subscribe_topic,
         node_id=node_id,
     )
-    async def _ingest_synthesized(result: NodeResult) -> None:
+    async def _ingest_synthesized(result: ConsumerContext) -> None:
         deps = result.deps
         try:
             wire = WireMessage.model_validate(deps.get("discord"))

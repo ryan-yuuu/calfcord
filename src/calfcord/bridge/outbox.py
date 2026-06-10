@@ -1,6 +1,6 @@
 """Discord outbox consumer — posts every agent reply landing on the outbox.
 
-A long-lived calfkit :class:`ConsumerNodeDef` subscribed to
+A long-lived calfkit :class:`ConsumerNode` subscribed to
 ``discord.outbox`` in its own Kafka consumer group. Every agent
 :class:`ReturnCall` landing on the outbox topic produces one invocation
 of :func:`build_outbox_consumer`'s closure, so multi-agent flows
@@ -11,7 +11,7 @@ drop every reply after the first — see
 ``calfkit.client.reply_dispatcher._ReplyDispatcher``).
 
 How the wire is recovered: the consumer receives a
-:class:`~calfkit.NodeResult`, which carries ``output``, ``state``,
+:class:`~calfkit.ConsumerContext`, which carries ``output``, ``state``,
 ``correlation_id``, ``emitter_node_id``, and ``emitter_node_kind`` —
 but **not** ``Envelope.context.deps``. So the original
 :class:`WireMessage` (which holds ``channel_id``, ``message_id``, and
@@ -33,9 +33,9 @@ path, not a defect.
 Gate semantics: a single ``final_output_parts`` non-emptiness gate
 filters out intermediate hops (tool completions, mid-loop state
 transitions) — calfkit's consumer-node docstring recommends this
-exact idiom (see ``calfkit.nodes.consumer.ConsumerNodeDef``). Other
+exact idiom (see ``calfkit.nodes.consumer.ConsumerNode``). Other
 filtering (non-agent emitter, unknown agent_id, empty output) happens
-inside the closure since those checks need :class:`NodeResult`
+inside the closure since those checks need :class:`ConsumerContext`
 fields, not just ``ctx``.
 """
 
@@ -47,10 +47,10 @@ import time
 from typing import Any, Final
 
 import discord
-from calfkit import ConsumerNodeDef, NodeResult
+from calfkit import ConsumerNode
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from calfkit.client import Client
-from calfkit.models import SessionRunContext
+from calfkit.models import ConsumerContext, SessionRunContext
 
 from calfcord.agents.memory import memory_prompt_deps_for_registry
 from calfcord.agents.phonebook import (
@@ -110,7 +110,7 @@ def build_outbox_consumer(
     transcript_store: TranscriptStoreLike,
     subscribe_topic: str = DEFAULT_OUTBOX_TOPIC,
     node_id: str = DEFAULT_CONSUMER_NODE_ID,
-) -> ConsumerNodeDef[str]:
+) -> ConsumerNode[str]:
     """Construct the bridge's outbox consumer node.
 
     Args:
@@ -118,7 +118,7 @@ def build_outbox_consumer(
             post the reply under the responding agent's persona via
             its per-channel webhook.
         registry: Roster of agents. Resolves
-            ``NodeResult.emitter_node_id`` to a :class:`Persona`. An
+            ``ConsumerContext.emitter_node_id`` to a :class:`Persona`. An
             unknown emitter id is logged and skipped (defensive — the
             bridge is the only producer to ``discord.channel.*.in``,
             so this should only fire if an agent's ``node_id`` drifts
@@ -151,7 +151,7 @@ def build_outbox_consumer(
             recommended but not catastrophic.
 
     Returns:
-        A :class:`ConsumerNodeDef` ready to register on a
+        A :class:`ConsumerNode` ready to register on a
         :class:`~calfkit.Worker`. The Worker subscribes it with
         FastStream's default ``auto_offset_reset="latest"`` — the
         consumer ignores any backlog that pre-dates its boot, which
@@ -160,10 +160,10 @@ def build_outbox_consumer(
 
     def _final_output_parts_gate(ctx: SessionRunContext) -> bool:
         # Skip intermediate hops (mid-loop transitions, tool completions).
-        # See ``calfkit.nodes.consumer.ConsumerNodeDef`` docstring.
+        # See ``calfkit.nodes.consumer.ConsumerNode`` docstring.
         return bool(ctx.state.final_output_parts)
 
-    async def _post_reply(result: NodeResult[str]) -> None:
+    async def _post_reply(result: ConsumerContext[str]) -> None:
         entry = pending_wires.get(result.correlation_id)
         if entry is None:
             # Foreign producer on the topic, or a reply landed after the
@@ -323,11 +323,11 @@ def build_outbox_consumer(
                 wire.channel_id,
             )
 
-    return ConsumerNodeDef[str](
+    return ConsumerNode[str](
         node_id=node_id,
         subscribe_topics=subscribe_topic,
         consume_fn=_post_reply,
-        output_type=str,
+        agent_output_type=str,
         gates=[_final_output_parts_gate],
     )
 
@@ -397,7 +397,7 @@ async def _send_with_one_retry_on_outage(
     )
 
 
-def _turn_delta(result: NodeResult[str], entry: PendingEntry) -> list[ModelMessage]:
+def _turn_delta(result: ConsumerContext[str], entry: PendingEntry) -> list[ModelMessage]:
     """Return THIS turn's structured slice of the cumulative history.
 
     The terminal ``message_history`` is cumulative (append-only). The

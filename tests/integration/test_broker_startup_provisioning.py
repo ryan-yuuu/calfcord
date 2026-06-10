@@ -67,7 +67,7 @@ def _build_worker(client: Any, inbox: str) -> Any:
     hand-rolled runner's pre-start state (register_handlers, no Worker.run())."""
 
     @consumer(subscribe_topics=inbox)
-    def sink(_result: Any) -> None:  # NodeResult
+    def sink(_result: Any) -> None:  # ConsumerContext
         pass
 
     worker = Worker(client, [sink])

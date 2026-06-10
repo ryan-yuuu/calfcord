@@ -9,7 +9,7 @@ output, this consumer:
    snapshot, and the channel history from ``result.deps`` — the same
    ``deps`` dict the bridge ingress passed to ``invoke_node``, carried
    forward through the router run to the consumer (calfkit ≥ 0.4.0
-   exposes inbound producer deps on ``NodeResult.deps``).
+   exposes inbound producer deps on ``ConsumerContext.deps``).
 3. For the chosen ``agent_id`` (after defensive self-filter and
    phonebook validation), synthesizes a fresh wire with ``kind="slash"``
    and ``slash_target=<agent_id>`` plus a fresh ``event_id``, and
@@ -34,7 +34,7 @@ Built as a closure that captures ``client`` and ``router_agent_id`` —
 same shape as :func:`build_outbox_consumer` in
 :mod:`calfcord.bridge.outbox`. Use the ``@consumer``
 decorator (calfkit's preferred sugar) rather than constructing
-:class:`ConsumerNodeDef` directly.
+:class:`ConsumerNode` directly.
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ from __future__ import annotations
 import logging
 
 import uuid_utils
-from calfkit import ConsumerNodeDef, NodeResult
+from calfkit import ConsumerNode
 from calfkit.client import Client
-from calfkit.models import SessionRunContext
+from calfkit.models import ConsumerContext, SessionRunContext
 from calfkit.nodes.consumer import consumer
 from pydantic import ValidationError
 
@@ -66,7 +66,7 @@ def build_fanout_consumer(
     *,
     subscribe_topic: str = "routing.decisions",
     node_id: str = DEFAULT_FANOUT_NODE_ID,
-) -> ConsumerNodeDef[RoutingDecision]:
+) -> ConsumerNode[RoutingDecision]:
     """Construct the router's fan-out consumer node.
 
     Args:
@@ -88,7 +88,7 @@ def build_fanout_consumer(
             per process) but not catastrophic.
 
     Returns:
-        A :class:`ConsumerNodeDef` ready to register on the
+        A :class:`ConsumerNode` ready to register on the
         ``calfkit-router`` :class:`Worker`. Gate filters out
         intermediate hops via the same ``final_output_parts``
         non-emptiness idiom that :mod:`bridge.outbox` uses.
@@ -104,11 +104,11 @@ def build_fanout_consumer(
 
     @consumer(
         subscribe_topics=subscribe_topic,
-        output_type=RoutingDecision,
+        agent_output_type=RoutingDecision,
         node_id=node_id,
         gates=[_final_output_parts_gate],
     )
-    async def _fan_out(result: NodeResult[RoutingDecision]) -> None:
+    async def _fan_out(result: ConsumerContext[RoutingDecision]) -> None:
         decision = result.output
         if decision is None:
             # Gate should prevent this: a ``final_output_parts``

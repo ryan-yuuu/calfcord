@@ -1,6 +1,6 @@
 """Unit tests for the steps consumer built by ``build_steps_consumer``.
 
-Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
+Drives ``ConsumerNode.handler`` directly with synthetic ``Envelope``s
 that carry a hand-rolled ``state.message_history`` representing the
 agent's running pydantic_ai conversation. The consumer's sink is a single
 transient in-channel "progress" message (the live trace itself — model text /

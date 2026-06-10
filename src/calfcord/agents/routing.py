@@ -4,7 +4,7 @@ The built-in router agent's LLM emits exactly one
 ``{ROUTER_OUTPUT_TOOL_NAME}(...)`` tool call via pydantic-ai's
 :class:`~pydantic_ai.output.ToolOutput` pattern, which terminates the
 agent loop without running a tool body. The tool's args are parsed
-against this model and surfaced as ``NodeResult.output``. The
+against this model and surfaced as ``ConsumerContext.output``. The
 router's fan-out consumer (in the ``calfkit-router`` process) reads
 the decision from there.
 

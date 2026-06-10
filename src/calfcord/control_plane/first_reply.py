@@ -16,8 +16,8 @@ the consumer handler's ``_stamp_transport`` and explicitly excluded from
 serialization. A raw ``broker.subscriber`` that only decodes the body therefore
 *cannot* recover which agent replied. So — exactly like the bridge's own outbox
 consumer (:func:`calfcord.bridge.outbox.build_outbox_consumer`) — we register a
-:class:`~calfkit.ConsumerNodeDef`, whose handler reads the headers and projects a
-:class:`~calfkit.NodeResult` with ``emitter_node_id`` / ``emitter_node_kind``
+:class:`~calfkit.ConsumerNode`, whose handler reads the headers and projects a
+:class:`~calfkit.ConsumerContext` with ``emitter_node_id`` / ``emitter_node_kind``
 populated.
 
 The match field (mirrors the bridge's gate set): ``emitter_node_kind == "agent"``
@@ -36,7 +36,7 @@ after it joins, which is precisely the reply to the user's ``@<agent> hello``.
 Separation of concerns
 ----------------------
 :func:`make_first_reply_node` is the pure, stateless matcher (a
-``ConsumerNodeDef`` factory) — unit-testable by driving its handler directly,
+``ConsumerNode`` factory) — unit-testable by driving its handler directly,
 no broker. :func:`wait_for_first_reply` is the thin orchestrator that wires the
 node onto a transient managed Worker (whose start ensurer provisions the node's
 ``discord.outbox`` subscribe topic for it) and bounds the wait. One-shot
@@ -50,9 +50,9 @@ import asyncio
 import uuid
 from collections.abc import Callable
 
-from calfkit import ConsumerNodeDef, NodeResult
+from calfkit import ConsumerNode
 from calfkit.client import Client
-from calfkit.models import SessionRunContext
+from calfkit.models import ConsumerContext, SessionRunContext
 from calfkit.worker import Worker
 
 from calfcord._provisioning import PROVISIONING
@@ -61,7 +61,7 @@ from calfcord.topics import DISCORD_OUTBOX_TOPIC
 _DEFAULT_REPLY_TIMEOUT_S = 60.0
 
 _AGENT_EMITTER_KIND = "agent"
-"""``NodeResult.emitter_node_kind`` value for an agent reply (== ``NodeKind``
+"""``ConsumerContext.emitter_node_kind`` value for an agent reply (== ``NodeKind``
 ``"agent"``); the bridge's outbox consumer gates on the same literal."""
 
 
@@ -71,7 +71,7 @@ def make_first_reply_node(
     on_match: Callable[[], None],
     on_match_correlation: Callable[[str], None] | None = None,
     node_id: str | None = None,
-) -> ConsumerNodeDef[str]:
+) -> ConsumerNode[str]:
     """Build the consumer node that fires ``on_match`` on the target agent's reply.
 
     Pure and stateless: it carries no "have I matched yet" flag — every envelope
@@ -83,7 +83,7 @@ def make_first_reply_node(
     Args:
         agent_id: The agent whose reply we are watching for. An agent's
             ``node_id`` equals its ``agent_id`` equals its ``.md`` ``name``, so
-            this is matched directly against ``NodeResult.emitter_node_id``.
+            this is matched directly against ``ConsumerContext.emitter_node_id``.
         on_match: Invoked (no args) when a reply from ``agent_id`` lands. Kept
             argument-free so the common case (set an Event) is trivial.
         on_match_correlation: Optional secondary callback receiving the matching
@@ -95,7 +95,7 @@ def make_first_reply_node(
             own group at ``latest`` and never disturbs the bridge's outbox group.
 
     Returns:
-        A :class:`ConsumerNodeDef` ready to register on a :class:`Worker`.
+        A :class:`ConsumerNode` ready to register on a :class:`Worker`.
     """
 
     def _final_output_parts_gate(ctx: SessionRunContext) -> bool:
@@ -103,7 +103,7 @@ def make_first_reply_node(
         # completions, mid-loop transitions) that carry no final output.
         return bool(ctx.state.final_output_parts)
 
-    def _consume(result: NodeResult[str]) -> None:
+    def _consume(result: ConsumerContext[str]) -> None:
         # Identity lives in the Kafka headers, recovered by the consumer handler
         # into these fields — a non-agent emitter (tool/client) or a different
         # agent (multi-agent org) is not the reply we're confirming.
@@ -115,11 +115,11 @@ def make_first_reply_node(
         if on_match_correlation is not None:
             on_match_correlation(result.correlation_id)
 
-    return ConsumerNodeDef[str](
+    return ConsumerNode[str](
         node_id=node_id or f"calfcord-firstreply-{uuid.uuid4().hex}",
         subscribe_topics=DISCORD_OUTBOX_TOPIC,
         consume_fn=_consume,
-        output_type=str,
+        agent_output_type=str,
         gates=[_final_output_parts_gate],
     )
 

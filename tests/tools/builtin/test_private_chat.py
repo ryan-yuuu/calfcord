@@ -243,7 +243,7 @@ def _a2a(deps: dict[str, Any]) -> pc._A2A:
 
 
 def _result(text: str | None) -> Any:
-    """A minimal stand-in for ``NodeResult`` carrying only the fields the
+    """A minimal stand-in for the client's ``NodeResult`` carrying only the fields the
     tool reads. The real type has many more fields irrelevant here."""
     r = MagicMock()
     r.output = text

@@ -1,13 +1,13 @@
 """Unit tests for the fan-out consumer built by :func:`build_fanout_consumer`.
 
-Drives ``ConsumerNodeDef.handler`` directly with synthetic ``Envelope``s
+Drives ``ConsumerNode.handler`` directly with synthetic ``Envelope``s
 so we exercise the gate, the deps lookup, the router-self-filter, and
 the per-target ``invoke_node`` publish — all without Kafka, FastStream,
 or an LLM.
 
 The original :class:`WireMessage`, phonebook, and history ride on the
 envelope's ``context.deps`` and reach the consumer via ``result.deps``
-(calfkit ≥ 0.4.0 exposes inbound producer deps on ``NodeResult.deps``).
+(calfkit ≥ 0.4.0 exposes inbound producer deps on ``ConsumerContext.deps``).
 """
 
 from __future__ import annotations

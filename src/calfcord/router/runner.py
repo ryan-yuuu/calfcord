@@ -10,7 +10,7 @@ Two nodes co-tenant on this Worker:
 * The router :class:`~calfkit.nodes.Agent` (subscribed to
   ``discord.ambient.in``, publishes :class:`RoutingDecision` to
   ``routing.decisions``).
-* The fan-out :class:`~calfkit.nodes.ConsumerNodeDef` (subscribed to
+* The fan-out :class:`~calfkit.nodes.ConsumerNode` (subscribed to
   ``routing.decisions``, publishes synthesized wires to
   ``bridge.synthesized.in``).
 

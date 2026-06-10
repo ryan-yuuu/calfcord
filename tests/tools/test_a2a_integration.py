@@ -77,8 +77,11 @@ class TestAgentToToolRegistryConsistency:
             MagicMock(),
         )
         agent_tools = worker._nodes[0].tools
-        assert agent_tools == [private_chat_tool]
-        assert agent_tools[0] is private_chat_tool
+        assert agent_tools == list(private_chat_tool.tool_bindings())
+        # calfkit ≥ 0.9 expands the node into ToolBindings at Agent
+        # construction; the binding's validator stays bound to the node, so
+        # this still proves the factory wired the runner's exact object.
+        assert agent_tools[0].validator.__self__ is private_chat_tool
 
     def test_private_chat_advertises_expected_schema_name(self) -> None:
         """LLM tool advertising uses the schema name. If this drifts from
