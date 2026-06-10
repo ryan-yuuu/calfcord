@@ -36,6 +36,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from calfcord.cli._agents import detect_agents
+from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
 from calfcord.supervisor.compose import (
     _RESERVED_PROCESS_NAMES,
     SUPERVISOR_LOG_STEM,
@@ -70,7 +71,20 @@ def _known_names(agents_dir: Path) -> list[str]:
         name for name in ("broker", "bridge", "tools", "router")
         if name in _RESERVED_PROCESS_NAMES
     ]
-    return [*ordered_reserved, *detect_agents(agents_dir), _SUPERVISOR_LOG_NAME]
+    # MCP slots come from the same no-secrets mcp.json seam the compose
+    # generator uses. Tolerant on purpose: a broken mcp.json must not take the
+    # logs command down with it ("always show what the broker said before it
+    # died") — the strict readers (start, mcp start) surface the config error.
+    try:
+        mcp_slots = [f"mcp-{s}" for s in list_server_names(resolve_config_path())]
+    except McpConfigError:
+        mcp_slots = []
+    return [
+        *ordered_reserved,
+        *detect_agents(agents_dir),
+        *mcp_slots,
+        _SUPERVISOR_LOG_NAME,
+    ]
 
 
 def _emit_file(path: Path, *, label: str | None, out: Callable[..., None]) -> None:

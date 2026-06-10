@@ -149,12 +149,16 @@ def _process(
 
 
 def build_compose_project(
-    *, agent_ids: Iterable[str], home: str, launcher: str
+    *, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()
 ) -> dict:
     """Build the Process Compose project that supervises one calfcord host.
 
     ``agent_ids`` are the roster agents to declare (the caller enumerates the
-    host's ``agents/*.md``; this function never reads the filesystem). ``home``
+    host's ``agents/*.md``; this function never reads the filesystem), and
+    ``mcp_servers`` the MCP server names to declare (the caller enumerates
+    ``mcp.json`` via the no-secrets ``list_server_names`` reader) — each gets
+    its own ``mcp-<server>`` roster slot, so one broken server entry can
+    never take down sibling servers and each restarts independently. ``home``
     is ``$CALFCORD_HOME`` — only the per-process ``state/logs/<name>.log`` paths
     use it. ``launcher`` is the shim prefix every ``command`` is built on
     (e.g. ``$CALFCORD_HOME/shims/calfcord``); the generator never reconstructs
@@ -163,14 +167,23 @@ def build_compose_project(
     Returns a plain ``dict`` (serialize with :func:`render_compose`). See the
     module docstring for the substrate/roster, restart, depends_on, and probe
     contract this encodes. Raises :class:`ValueError` if an ``agent_id`` collides
-    with a reserved substrate/component process name.
+    with a reserved substrate/component process name or an MCP server slot.
     """
     agent_ids = list(agent_ids)
+    mcp_servers = list(mcp_servers)
+    mcp_slots = {f"mcp-{server}": server for server in mcp_servers}
     reserved = sorted(_RESERVED_PROCESS_NAMES.intersection(agent_ids))
     if reserved:
         raise ValueError(
             f"agent id(s) {reserved} collide with reserved process name(s) "
             f"{sorted(_RESERVED_PROCESS_NAMES)}; rename the agent(s)"
+        )
+    slot_collisions = sorted(set(mcp_slots).intersection(agent_ids))
+    if slot_collisions:
+        raise ValueError(
+            f"agent id(s) {slot_collisions} collide with MCP server process "
+            f"slot(s) (one per mcp.json server, named mcp-<server>); rename the "
+            f"agent(s) or the server(s)"
         )
 
     processes: dict[str, dict] = {}
@@ -221,6 +234,18 @@ def build_compose_project(
             depends_on={"broker": _HEALTHY},
         )
 
+    # MCP servers — roster members like agents (disabled, on_failure,
+    # broker-gated), one slot per mcp.json server for failure isolation.
+    for slot, server in mcp_slots.items():
+        processes[slot] = _process(
+            command=f"{launcher} run mcp {server}",
+            home=home,
+            name=slot,
+            disabled=True,
+            restart_policy="on_failure",
+            depends_on={"broker": _HEALTHY},
+        )
+
     return {
         "version": COMPOSE_SCHEMA_VERSION,
         "log_configuration": {
@@ -235,12 +260,16 @@ def build_compose_project(
     }
 
 
-def render_compose(*, agent_ids: Iterable[str], home: str, launcher: str) -> str:
+def render_compose(
+    *, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()
+) -> str:
     """Render the Process Compose project as a YAML string.
 
     Thin serializer over :func:`build_compose_project` — ``sort_keys=False`` keeps
     the substrate-before-roster ordering the builder emits, which makes the
     generated file readable even though the user never edits it.
     """
-    project = build_compose_project(agent_ids=agent_ids, home=home, launcher=launcher)
+    project = build_compose_project(
+        agent_ids=agent_ids, home=home, launcher=launcher, mcp_servers=mcp_servers
+    )
     return yaml.safe_dump(project, sort_keys=False)

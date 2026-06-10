@@ -250,3 +250,62 @@ def test_rendered_compose_validates_against_the_real_binary(tmp_path: Path) -> N
         "process-compose rejected the generated project "
         f"(exit={result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# --- MCP server slots ---------------------------------------------------------
+
+
+def _mcp_project(servers: list[str]) -> dict:
+    return build_compose_project(
+        agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER, mcp_servers=servers
+    )
+
+
+def test_mcp_servers_get_per_server_slots() -> None:
+    """Each mcp.json server is its own roster slot ``mcp-<server>`` running
+    ``<launcher> run mcp <server>`` — per-server isolation (one broken entry
+    must not take down sibling servers)."""
+    processes = _mcp_project(["github", "docs"])["processes"]
+    assert processes["mcp-github"]["command"] == f"{_LAUNCHER} run mcp github"
+    assert processes["mcp-docs"]["command"] == f"{_LAUNCHER} run mcp docs"
+
+
+def test_mcp_slots_are_roster_members() -> None:
+    """MCP slots follow the roster contract: declared disabled (nothing runs
+    that the user did not start), on_failure restart, health-gated on the
+    broker, no readiness probe."""
+    proc = _mcp_project(["github"])["processes"]["mcp-github"]
+    assert proc["disabled"] is True
+    assert proc["availability"]["restart"] == "on_failure"
+    assert proc["depends_on"] == {"broker": {"condition": "process_healthy"}}
+    assert "readiness_probe" not in proc
+
+
+def test_no_mcp_servers_yields_no_mcp_slots() -> None:
+    processes = _mcp_project([])["processes"]
+    assert not [name for name in processes if name.startswith("mcp-")]
+
+
+def test_omitting_mcp_servers_param_is_backward_compatible() -> None:
+    processes = build_compose_project(
+        agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER
+    )["processes"]
+    assert not [name for name in processes if name.startswith("mcp-")]
+
+
+def test_agent_id_colliding_with_mcp_slot_rejected() -> None:
+    """An agent named ``mcp-github`` would silently overwrite the github
+    server's slot in the shared processes dict — same fail-loud rule as the
+    reserved substrate names."""
+    with pytest.raises(ValueError, match="mcp-github"):
+        build_compose_project(
+            agent_ids=["assistant", "mcp-github"],
+            home=_HOME,
+            launcher=_LAUNCHER,
+            mcp_servers=["github"],
+        )
+
+
+def test_mcp_slot_log_location_under_state_logs() -> None:
+    proc = _mcp_project(["github"])["processes"]["mcp-github"]
+    assert proc["log_location"] == os.path.join(_HOME, "state", "logs", "mcp-github.log")

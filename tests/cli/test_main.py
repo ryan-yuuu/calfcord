@@ -27,7 +27,7 @@ from calfcord.cli import (
 )
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
-from calfcord.supervisor import component, lifecycle, roster
+from calfcord.supervisor import component, lifecycle, mcp_roster, roster
 
 
 def test_main_help_exits_zero() -> None:
@@ -1860,3 +1860,149 @@ def test_main_deploy_without_home_errors_native_install(
     monkeypatch.setattr(deploy, "run", _boom)
     assert main(["deploy", "systemd"]) == 1
     assert "native install" in capsys.readouterr().out
+
+
+# --- mcp lifecycle verbs ------------------------------------------------------
+
+
+def _mcp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    return home
+
+
+def test_main_mcp_start_dispatches_named_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, server, **kwargs):
+        captured.update(home=home_arg, server=server)
+        return 0
+
+    monkeypatch.setattr(mcp_roster, "mcp_start", _start)
+    assert main(["mcp", "start", "github"]) == 0
+    assert captured == {"home": home, "server": "github"}
+
+
+def test_main_mcp_start_all_passes_configured_servers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `mcp start --all` enumerates mcp.json via the no-secrets reader and
+    # passes the names — the "re-pick up mcp.json" sweep.
+    home = _mcp_home(tmp_path, monkeypatch)
+    config = home / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text(
+        '{"mcpServers": {"github": {"command": "x"}, "docs": {"type": "http", "url": "https://d"}}}'
+    )
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _start_all(home_arg, *, servers, **kwargs):
+        captured.update(home=home_arg, servers=list(servers))
+        return 0
+
+    def _single_boom(*args, **kwargs):
+        raise AssertionError("--all must dispatch to mcp_start_all, not the singular")
+
+    monkeypatch.setattr(mcp_roster, "mcp_start_all", _start_all)
+    monkeypatch.setattr(mcp_roster, "mcp_start", _single_boom)
+    assert main(["mcp", "start", "--all"]) == 0
+    assert captured == {"home": home, "servers": ["github", "docs"]}
+
+
+def test_main_mcp_start_all_invalid_config_errors_actionably(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    config = home / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text("{not json")
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    assert main(["mcp", "start", "--all"]) == 1
+    assert "error" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("verb", ["stop", "restart"])
+def test_main_mcp_stop_restart_dispatch_named(
+    verb: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _op(home_arg, *, server, **kwargs):
+        captured.update(home=home_arg, server=server)
+        return 0
+
+    monkeypatch.setattr(mcp_roster, f"mcp_{verb}", _op)
+    assert main(["mcp", verb, "github"]) == 0
+    assert captured == {"home": home, "server": "github"}
+
+
+@pytest.mark.parametrize("verb", ["stop", "restart"])
+def test_main_mcp_stop_restart_all_dispatch_home_only(
+    verb: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _op_all(home_arg, **kwargs):
+        captured.update(home=home_arg)
+        return 0
+
+    monkeypatch.setattr(mcp_roster, f"mcp_{verb}_all", _op_all)
+    assert main(["mcp", verb, "--all"]) == 0
+    assert captured == {"home": home}
+
+
+def test_main_mcp_requires_exactly_one_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mcp_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as excinfo:
+        main(["mcp", "start"])
+    assert excinfo.value.code == 2
+    with pytest.raises(SystemExit) as excinfo:
+        main(["mcp", "start", "github", "--all"])
+    assert excinfo.value.code == 2
+
+
+def test_main_mcp_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    assert main(["mcp", "start", "github"]) == 1
+    assert "CALFCORD_HOME" in capsys.readouterr().out
+
+
+def test_main_start_passes_mcp_servers_from_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `calfcord start` enumerates mcp.json alongside the agents dir so the
+    # generated project declares one disabled slot per server.
+    home = tmp_path / "home"
+    agents = home / "agents"
+    agents.mkdir(parents=True)
+    (agents / "assistant.md").write_text(
+        "---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n"
+    )
+    config = home / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, server_urls, launcher, agent_ids, mcp_servers=(), **kwargs):
+        captured.update(agent_ids=list(agent_ids), mcp_servers=list(mcp_servers))
+        return 0
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    assert main(["start"]) == 0
+    assert captured["agent_ids"] == ["assistant"]
+    assert captured["mcp_servers"] == ["github"]

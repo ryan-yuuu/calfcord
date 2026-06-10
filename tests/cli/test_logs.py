@@ -374,3 +374,44 @@ def test_logs_uses_the_shared_supervisor_log_stem() -> None:
     from calfcord.supervisor import compose
 
     assert logs_mod._SUPERVISOR_LOG_NAME == compose.SUPERVISOR_LOG_STEM
+
+
+def test_known_names_include_mcp_server_slots(tmp_path: Path) -> None:
+    """``logs mcp-<server>`` must be tailable: the name set enumerates
+    mcp.json through the same no-secrets seam the compose generator uses."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setenv("CALFCORD_HOME", str(tmp_path))
+    mp.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    try:
+        names = logs_mod._known_names(agents_dir)
+    finally:
+        mp.undo()
+    assert "mcp-github" in names
+
+
+def test_known_names_tolerate_invalid_mcp_config(tmp_path: Path) -> None:
+    """logs must keep working when mcp.json is broken — 'always show what the
+    broker said before it died' beats config strictness here."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text("{not json")
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setenv("CALFCORD_HOME", str(tmp_path))
+    mp.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    try:
+        names = logs_mod._known_names(agents_dir)
+    finally:
+        mp.undo()
+    assert "broker" in names
+    assert not [n for n in names if n.startswith("mcp-")]

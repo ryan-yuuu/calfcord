@@ -98,3 +98,11 @@ def test_explain_needs_no_install_home(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[str] = []
     assert explain.run_topology(out=captured.append) == 0
     assert captured and captured[0].strip()
+
+
+def test_topology_names_mcp_servers() -> None:
+    """The teaching screen covers the fifth process type: per-server MCP
+    toolboxes (calfkit-mcp), roster members holding the MCP credentials."""
+    text = explain.render_topology()
+    assert "calfkit-mcp" in text
+    assert "mcp" in text.lower()

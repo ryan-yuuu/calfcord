@@ -480,3 +480,32 @@ def test_run_unknown_target_returns_error(
     assert "error" in capsys.readouterr().out.lower()
 
 
+
+
+def test_k8s_renders_one_deployment_per_mcp_server() -> None:
+    """Each mcp.json server gets its own Deployment running
+    ``calfkit-mcp <server>`` — the same per-server isolation the local
+    supervisor encodes."""
+    rendered = deploy.render_k8s(
+        agent_ids=_AGENTS,
+        server_urls=_BROKER,
+        image="calfcord:latest",
+        mcp_servers=["github"],
+    )
+    docs = list(yaml.safe_load_all(rendered))
+    mcp = [
+        d for d in docs
+        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "mcp-github"
+    ]
+    assert len(mcp) == 1
+    container = mcp[0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["command"] == ["calfkit-mcp", "github"]
+
+
+def test_k8s_no_mcp_servers_renders_no_mcp_deployments() -> None:
+    rendered = deploy.render_k8s(agent_ids=_AGENTS, server_urls=_BROKER, image="calfcord:latest")
+    docs = list(yaml.safe_load_all(rendered))
+    assert not [
+        d for d in docs
+        if d.get("kind") == "Deployment" and d["metadata"]["name"].startswith("mcp-")
+    ]

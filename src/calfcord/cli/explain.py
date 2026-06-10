@@ -103,11 +103,15 @@ Roster members join the *running* workspace on demand and leave when stopped:
              todos, and the agent-to-agent private_chat tool.
   - router   the receptionist (calfkit-router): decides which agent, if any,
              answers an un-@mentioned message in a watched channel. Optional.
+  - mcp      MCP servers (calfkit-mcp), one process per server in mcp.json:
+             each hosts one Model Context Protocol server and advertises its
+             tools on the bus. The only processes holding MCP credentials —
+             agents pick the tools up from the advertisement, never the config.
 
   `calfcord agent start <name>` brings a teammate online; `calfcord status`
   shows who is in the office; `calfcord stop` closes it.
 
-The four process types
+The five process types
 ----------------------
 Every box above is one of calfkit's independently deployable process types:
 
@@ -115,6 +119,7 @@ Every box above is one of calfkit's independently deployable process types:
   - calfkit-agent    one or more agents (roster).
   - calfkit-router   the ambient-message router (roster).
   - calfkit-tools    the tools + private_chat host (roster).
+  - calfkit-mcp      one MCP server's toolbox (roster), one per server.
 
 They share nothing but the Kafka wire, the `.env` config, and the `agents/*.md`
 definitions — never a function call, never a filesystem. That decoupling is what

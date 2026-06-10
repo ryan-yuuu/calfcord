@@ -36,7 +36,8 @@ from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._prompts import make_prompter
 from calfcord.health.check import default_broker_probe, healthcheck
-from calfcord.supervisor import component, lifecycle, roster
+from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
+from calfcord.supervisor import component, lifecycle, mcp_roster, roster
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -180,6 +181,27 @@ def _build_parser() -> argparse.ArgumentParser:
             dest="all",
             action="store_true",
             help="Synonym for the bare verb (acts on this host's tools).",
+        )
+
+    # MCP servers (design: docs/design/mcp-reintroduction.md). Each mcp.json
+    # server is its own roster slot (mcp-<server>), so the lifecycle verbs take
+    # a server name OR --all like the agent roster. `start --all` sweeps every
+    # CONFIGURED server (the "re-pick up mcp.json" command); `stop`/`restart
+    # --all` sweep the RUNNING mcp- slots on this host.
+    mcp_p = sub.add_parser("mcp", help="Manage MCP servers (mcp.json).")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
+    for _verb, _help in (
+        ("start", "Bring an MCP server online (a running one is restarted in place)."),
+        ("stop", "Take an MCP server offline."),
+        ("restart", "Reload an MCP server after an mcp.json edit."),
+    ):
+        _mp = mcp_sub.add_parser(_verb, help=_help)
+        _mp.add_argument("server", nargs="?", help="Server name (an mcpServers key in mcp.json).")
+        _mp.add_argument(
+            "--all",
+            dest="all",
+            action="store_true",
+            help="Act on all servers (start: every configured; stop/restart: every running).",
         )
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
@@ -466,6 +488,61 @@ def _run_healthcheck(component: str) -> int:
     )
 
 
+
+def _configured_mcp_servers() -> list[str] | None:
+    """Server names from mcp.json via the no-secrets reader, or ``None`` after
+    printing the actionable error (an *invalid* config should fail every verb
+    that consults it, not just the server's own boot)."""
+    try:
+        return list_server_names(resolve_config_path())
+    except McpConfigError as exc:
+        print(f"error: {exc}")
+        return None
+
+
+def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Dispatch a ``calfcord mcp <verb>`` lifecycle command.
+
+    The same install-scoped supervisor surface as the agent roster
+    (:func:`_run_agent_roster`), driving the per-server ``mcp-<server>``
+    slots via :mod:`calfcord.supervisor.mcp_roster`. ``start``/``stop``/
+    ``restart`` take EITHER a server name OR ``--all`` (uniform with the
+    agent verbs): ``start --all`` sweeps every server *configured* in
+    mcp.json (enumerated here through the no-secrets ``list_server_names``
+    seam, so mcp_roster stays off the config read), while ``stop --all`` /
+    ``restart --all`` sweep every *running* ``mcp-`` slot (the bulk fns read
+    the supervisor themselves).
+    """
+    command = args.mcp_command
+
+    # Argument validity before the native-install guard, mirroring the agent
+    # roster: a bad invocation is a parser error (exit 2) even on a dev run.
+    if args.server is not None and args.all:
+        parser.error("server name and --all are mutually exclusive")
+    if not args.all and args.server is None:
+        parser.error("give an MCP server name or --all")
+
+    home = _require_home(f"mcp {command}")
+    if home is None:
+        return 1
+
+    if command == "stop":
+        if args.all:
+            return asyncio.run(mcp_roster.mcp_stop_all(home))
+        return asyncio.run(mcp_roster.mcp_stop(home, server=args.server))
+    if command == "restart":
+        if args.all:
+            return asyncio.run(mcp_roster.mcp_restart_all(home))
+        return asyncio.run(mcp_roster.mcp_restart(home, server=args.server))
+
+    if args.all:
+        servers = _configured_mcp_servers()
+        if servers is None:
+            return 1
+        return asyncio.run(mcp_roster.mcp_start_all(home, servers=servers))
+    return asyncio.run(mcp_roster.mcp_start(home, server=args.server))
+
+
 def _run_lifecycle(command: str) -> int:
     """Dispatch a substrate-lifecycle verb (``start`` / ``stop`` / ``status``).
 
@@ -496,12 +573,20 @@ def _run_lifecycle(command: str) -> int:
     _, agents_dir = init.resolve_paths(home)
     launcher = str(home / "shims" / "calfcord")
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    # MCP servers are roster slots too: enumerate mcp.json (no-secrets reader)
+    # so the generated project declares one disabled mcp-<server> slot each. An
+    # invalid mcp.json fails the whole start actionably rather than rendering a
+    # project that silently lacks the servers.
+    mcp_servers = _configured_mcp_servers()
+    if mcp_servers is None:
+        return 1
     return asyncio.run(
         lifecycle.start(
             home,
             server_urls=server_urls,
             launcher=launcher,
             agent_ids=detect_agents(agents_dir),
+            mcp_servers=mcp_servers,
         )
     )
 
@@ -685,6 +770,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     # the start/stop/restart verb.
     if args.command == "tools":
         return _run_component("tools", args.tools_command)
+
+    if args.command == "mcp":
+        return _run_mcp(parser, args)
 
     if args.command == "explain":
         return explain.run(args.explain_command)

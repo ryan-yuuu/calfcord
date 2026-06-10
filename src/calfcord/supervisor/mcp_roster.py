@@ -1,0 +1,251 @@
+"""Per-server MCP lifecycle: ``mcp-<server>`` roster slots clocking in/out.
+
+Each ``mcp.json`` server runs as its own Process Compose slot (see
+:func:`calfcord.supervisor.compose.build_compose_project`), so the verbs
+here are the agent-roster shape — including the not-declared reload path: a
+server added to ``mcp.json`` *after* ``calfcord start`` has no declared
+slot, exactly like a brand-new agent ``.md``, and gets the same
+workspace-reload hint instead of a raw 4xx.
+
+What they deliberately lack is the agent-only broker-wide duplicate guard:
+two hosts hosting the same toolbox id are competing consumers on one
+dispatch topic — a legitimate (if unusual) scale-out, not the agent
+split-brain where two same-id agents double-reply in Discord.
+
+``mcp start <server>`` of a Running slot restarts it in place (behavior #2),
+which is also the documented way to re-apply an edited ``mcp.json`` entry;
+``mcp start --all`` sweeps every *configured* server, making it the
+"re-pick up mcp.json" command. Stop/restart sweeps operate on the *running*
+``mcp-`` slots instead — stopping what exists, not what is configured.
+"""
+
+from __future__ import annotations
+
+import os
+
+from calfcord.mcp.selector import is_valid_server_name
+from calfcord.supervisor._workspace import (
+    WORKSPACE_NOT_RUNNING_HINT,
+    iter_process_dicts,
+    resolve_client,
+    workspace_is_up,
+)
+from calfcord.supervisor.client import ProcessComposeClient, ProcessComposeError
+
+MCP_SLOT_PREFIX = "mcp-"
+"""Prefix of every MCP server's Process Compose slot (``mcp-<server>``)."""
+
+_NOT_RUNNING_HINT = WORKSPACE_NOT_RUNNING_HINT
+_PC_RUNNING = "Running"
+
+_RELOAD_HINT = (
+    "is not in the running workspace. A server added to mcp.json after "
+    "`calfcord start` needs a workspace reload: run `calfcord stop` then "
+    "`calfcord start` (an in-place update would bounce the broker and bridge)."
+)
+
+
+def slot_name(server: str) -> str:
+    """The Process Compose slot for ``server`` (``mcp-<server>``)."""
+    return f"{MCP_SLOT_PREFIX}{server}"
+
+
+def _check_server_name(server: str) -> bool:
+    """Refuse a name that could never match a declared slot, pre-REST."""
+    if is_valid_server_name(server):
+        return True
+    print(
+        f"error: invalid MCP server name {server!r}; "
+        "must match [a-z0-9_]{1,64} (an mcp.json key)"
+    )
+    return False
+
+
+async def _running_mcp_slots(client: ProcessComposeClient) -> set[str]:
+    """This host's ``mcp-`` slots currently in the ``Running`` state."""
+    running: set[str] = set()
+    for item in iter_process_dicts(await client.list_processes()):
+        name = item.get("name")
+        if (
+            isinstance(name, str)
+            and name.startswith(MCP_SLOT_PREFIX)
+            and item.get("status") == _PC_RUNNING
+        ):
+            running.add(name)
+    return running
+
+
+async def mcp_start(
+    home: str | os.PathLike[str],
+    *,
+    server: str,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Bring MCP server ``server`` online; a Running slot is restarted in place.
+
+    Returns a POSIX exit code. Workspace check first; start-of-running is a
+    restart (behavior #2 — also the edited-entry pickup); a 4xx from the
+    supervisor is the not-declared case (server added after ``calfcord
+    start``) and prints the workspace-reload hint, while a 5xx / transport
+    fault is genuine infra and propagates loudly.
+    """
+    if not _check_server_name(server):
+        return 1
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    slot = slot_name(server)
+    if slot in await _running_mcp_slots(client):
+        await client.restart_process(slot)
+        print(f"mcp server {server} restarted")
+        return 0
+
+    try:
+        await client.start_process(slot)
+    except ProcessComposeError as exc:
+        if exc.status_code is not None and 400 <= exc.status_code < 500:
+            print(f"mcp server {server} {_RELOAD_HINT}")
+            return 1
+        raise RuntimeError(
+            f"mcp_start: starting MCP server {server!r} failed against the "
+            f"local supervisor (not a not-declared 4xx): {exc}"
+        ) from exc
+
+    print(f"mcp server {server} online")
+    return 0
+
+
+async def mcp_stop(
+    home: str | os.PathLike[str],
+    *,
+    server: str,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Take MCP server ``server`` offline (``PATCH /process/stop``)."""
+    if not _check_server_name(server):
+        return 1
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    await client.stop_process(slot_name(server))
+    print(f"mcp server {server} stopped")
+    return 0
+
+
+async def mcp_restart(
+    home: str | os.PathLike[str],
+    *,
+    server: str,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Reload MCP server ``server`` after an mcp.json edit (``POST`` restart).
+
+    Issues the restart unconditionally (a stopped slot restarting back up is
+    the expected effect). The 4xx → reload-hint branch mirrors
+    :func:`mcp_start`: restart of a never-declared slot is the same
+    added-after-``start`` case.
+    """
+    if not _check_server_name(server):
+        return 1
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    try:
+        await client.restart_process(slot_name(server))
+    except ProcessComposeError as exc:
+        if exc.status_code is not None and 400 <= exc.status_code < 500:
+            print(f"mcp server {server} {_RELOAD_HINT}")
+            return 1
+        raise RuntimeError(
+            f"mcp_restart: restarting MCP server {server!r} failed against the "
+            f"local supervisor (not a not-declared 4xx): {exc}"
+        ) from exc
+    print(f"mcp server {server} restarted")
+    return 0
+
+
+async def mcp_start_all(
+    home: str | os.PathLike[str],
+    *,
+    servers: list[str],
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Start (or restart-in-place) every *configured* server — the
+    "re-pick up mcp.json" sweep.
+
+    ``servers`` is the caller-enumerated mcp.json name list (the CLI reads it
+    via the no-secrets ``list_server_names``). Per-server failures don't stop
+    the sweep; the exit code aggregates (0 only if every server succeeded).
+    """
+    if not servers:
+        print("no MCP servers configured; add one with `calfcord mcp add`")
+        return 0
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    worst = 0
+    for server in servers:
+        worst = max(worst, await mcp_start(home, server=server, client=client))
+    return worst
+
+
+async def mcp_stop_all(
+    home: str | os.PathLike[str],
+    *,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Stop every *running* ``mcp-`` slot on this host."""
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    running = sorted(await _running_mcp_slots(client))
+    if not running:
+        print("no MCP servers running on this host")
+        return 0
+    for slot in running:
+        await client.stop_process(slot)
+        print(f"mcp server {slot.removeprefix(MCP_SLOT_PREFIX)} stopped")
+    return 0
+
+
+async def mcp_restart_all(
+    home: str | os.PathLike[str],
+    *,
+    client: ProcessComposeClient | None = None,
+) -> int:
+    """Restart every *running* ``mcp-`` slot on this host."""
+    home = os.fspath(home)
+    client = resolve_client(client, home)
+
+    if not await workspace_is_up(client):
+        print(_NOT_RUNNING_HINT)
+        return 1
+
+    running = sorted(await _running_mcp_slots(client))
+    if not running:
+        print("no MCP servers running on this host")
+        return 0
+    for slot in running:
+        await client.restart_process(slot)
+        print(f"mcp server {slot.removeprefix(MCP_SLOT_PREFIX)} restarted")
+    return 0

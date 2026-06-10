@@ -295,9 +295,17 @@ install_version() {
 }
 
 # Copy .env.example -> config/.env once; never clobber an operator's edits.
+# Also seed an empty mcp.json beside it (same once-only rule): the MCP CLI and
+# the compose generator read it, and 0600 because entries may carry literal
+# credentials.
 seed_config() {
   local dest="$1"
   mkdir -p "$CONFIG_DIR"
+  if [ ! -f "$CONFIG_DIR/mcp.json" ]; then
+    printf '{\n  "mcpServers": {}\n}\n' > "$CONFIG_DIR/mcp.json"
+    chmod 600 "$CONFIG_DIR/mcp.json"
+    log "seeded MCP config at $CONFIG_DIR/mcp.json (add servers with: calfcord mcp add)"
+  fi
   if [ -f "$CONFIG_ENV" ]; then
     log "keeping existing config at $CONFIG_ENV"
     return 0
@@ -437,7 +445,7 @@ usage:
   calfcord deploy <systemd|k8s|docker> [-o PATH]
                                  generate deployment manifests (advanced)
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
-  calfcord run <bridge|agent|router|tools>
+  calfcord run <bridge|agent|router|tools|mcp>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
@@ -447,6 +455,10 @@ usage:
                                  configure / run the optional ambient-message router
   calfcord tools <start|stop|restart> [--all]
                                  bring the tools host online / offline / reload
+  calfcord mcp <add|list|remove> [<server>]
+                                 manage MCP servers in mcp.json
+  calfcord mcp <start|stop|restart> <server>|--all
+                                 bring MCP servers online / offline / reload
   calfcord auth [args]           Codex (ChatGPT subscription) login
   calfcord self <version|status|update|rollback|set-broker>
 USAGE
@@ -499,15 +511,16 @@ case "${1:-}" in
   # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
   # they don't fall through to the `uv run` passthrough (which would try to exec
   # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
-  # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`).
+  # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`);
+  # `mcp` is too (per-server MCP lifecycle + mcp.json management).
   # The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
   # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
-  init|agent|router|tools|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
+  init|agent|router|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
-      bridge|agent|router|tools) set -- "calfkit-$1" "${@:2}" ;;
+      bridge|agent|router|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
     esac ;;

@@ -51,6 +51,7 @@ import yaml
 
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._envfile import read_env
+from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
 
 # The shipped image tag the docker-compose build produces; the k8s reference
 # manifests default to it so a freshly-built local image runs unchanged.
@@ -228,7 +229,13 @@ def _k8s_deployment(*, name: str, image: str, command: list[str]) -> dict:
     }
 
 
-def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_IMAGE) -> str:
+def render_k8s(
+    *,
+    agent_ids: list[str],
+    server_urls: str,
+    image: str = _DEFAULT_IMAGE,
+    mcp_servers: list[str] | None = None,
+) -> str:
     """Render *reference* Kubernetes manifests for a distributed calfcord.
 
     A multi-document YAML stream: a comment header, a ConfigMap holding the shared
@@ -343,9 +350,18 @@ def render_k8s(*, agent_ids: list[str], server_urls: str, image: str = _DEFAULT_
         }
     )
 
-    # Fixed process-type Deployments (singletons), then one per defined agent.
+    # Fixed process-type Deployments (singletons), then one per defined agent,
+    # then one per mcp.json server (per-server isolation, like the local slots).
     for component, script in _PROCESS_COMMANDS.items():
         docs.append(_k8s_deployment(name=component, image=image, command=[script]))
+    for server in mcp_servers or []:
+        docs.append(
+            _k8s_deployment(
+                name=f"mcp-{server}",
+                image=image,
+                command=["calfkit-mcp", server],
+            )
+        )
     for agent_id in roster:
         docs.append(
             _k8s_deployment(
@@ -471,7 +487,14 @@ def run(
             )
         manifest = render_systemd(home=str(home), launcher=launcher)
     elif target == "k8s":
-        manifest = render_k8s(agent_ids=roster, server_urls=server_urls)
+        try:
+            mcp_servers = list_server_names(resolve_config_path())
+        except McpConfigError as exc:
+            print(f"error: {exc}")
+            return 1
+        manifest = render_k8s(
+            agent_ids=roster, server_urls=server_urls, mcp_servers=mcp_servers
+        )
     else:  # docker — guarded by the membership check above
         manifest = render_docker(repo_compose_path="docker-compose.yml", agent_ids=roster)
 

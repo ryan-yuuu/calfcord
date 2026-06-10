@@ -20,6 +20,7 @@ end-to-end via a fake ``uv`` that simply prints the three env vars it inherits.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -698,3 +699,50 @@ def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
     assert not pwned.exists()
     # And the value still surfaced verbatim in the output (read, not run).
     assert "$(touch" in result.stdout
+
+
+# ------------------------------------------------------------------- mcp ---
+
+
+def test_shim_run_maps_mcp_to_runner_script(tmp_path: Path) -> None:
+    """``calfcord run mcp <server>`` is the supervised slot's command — it must
+    resolve to ``calfkit-mcp <server>``."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["run", "mcp", "github"]) == "calfkit-mcp github"
+
+
+def test_shim_dispatches_mcp_verbs_to_calfcord_cli(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["mcp", "start", "github"]) == "calfcord-cli mcp start github"
+
+
+def test_seed_config_creates_mcp_json_at_mode_600(tmp_path: Path) -> None:
+    """First install seeds an empty mcp.json next to config/.env, 0600 (the
+    file may later carry literal credentials)."""
+    home = tmp_path / "home"
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / ".env.example").write_text("EXAMPLE=value\n")
+
+    result = _source_and_run(f'seed_config "{dest}"', home=home)
+    assert result.returncode == 0, result.stderr
+
+    mcp_json = home / "config" / "mcp.json"
+    assert json.loads(mcp_json.read_text()) == {"mcpServers": {}}
+    assert (mcp_json.stat().st_mode & 0o777) == 0o600
+
+
+def test_seed_config_keeps_existing_mcp_json_untouched(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / "config").mkdir(parents=True)
+    existing = '{"mcpServers": {"github": {"command": "x"}}}'
+    (home / "config" / "mcp.json").write_text(existing)
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / ".env.example").write_text("EXAMPLE=value\n")
+
+    result = _source_and_run(f'seed_config "{dest}"', home=home)
+    assert result.returncode == 0, result.stderr
+    assert (home / "config" / "mcp.json").read_text() == existing

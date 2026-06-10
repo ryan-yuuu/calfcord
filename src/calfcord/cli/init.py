@@ -584,13 +584,24 @@ async def _finish_live(
 
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
-    # supervised process execs under, the broker URL, and the defined roster.
+    # supervised process execs under, the broker URL, the defined roster, and
+    # the mcp.json servers. Unlike `calfcord start`, a broken mcp.json is a
+    # WARNING here: onboarding's job is reaching a live org, and MCP slots are
+    # optional — the strict readers surface the error for fixing afterwards.
+    from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
+
+    try:
+        mcp_servers = list_server_names(resolve_config_path())
+    except McpConfigError as exc:
+        print(f"  warning: skipping MCP servers ({exc})")
+        mcp_servers = []
     launcher = str(home / "shims" / "calfcord")
     rc = await start_fn(
         home,
         server_urls=server_urls,
         launcher=launcher,
         agent_ids=detect_agents(agents_dir),
+        mcp_servers=mcp_servers,
     )
     if rc != 0:
         # start() already tore the substrate down and printed the specific cause;

@@ -1096,3 +1096,34 @@ def test_empty_token_on_rerun_keeps_existing_secret(tmp_path: Path) -> None:
     p = _prompter(name="scribe", discord_token="")  # blank → keep
     assert _run(p, tmp_path, env_path=env_path, home=tmp_path) == 0
     assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-original"
+
+
+def test_live_finish_passes_configured_mcp_servers(tmp_path: Path, monkeypatch) -> None:
+    """The live finish enumerates mcp.json (the same no-secrets seam
+    ``calfcord start`` uses) so the workspace declares the mcp-<server>
+    slots from the first boot."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    finish = _FinishStub(reply=True)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    assert rc == 0
+    assert finish.start_calls[0]["mcp_servers"] == ["github"]
+
+
+def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Onboarding must reach a live org even when mcp.json is broken: warn and
+    start with no MCP slots (the strict readers — `calfcord start`, `mcp
+    start` — surface the config error for fixing)."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text("{not json")
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    finish = _FinishStub(reply=True)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    assert rc == 0
+    assert finish.start_calls[0]["mcp_servers"] == []
+    assert "mcp.json" in capsys.readouterr().out

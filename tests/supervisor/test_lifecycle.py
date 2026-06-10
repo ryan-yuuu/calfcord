@@ -361,6 +361,44 @@ async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -
 # --- start: happy path ------------------------------------------------------
 
 
+async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) -> None:
+    """``start`` threads the caller-enumerated mcp.json server names through to
+    the compose generator, so each server gets its disabled ``mcp-<server>``
+    roster slot in the written project."""
+    import yaml as _yaml
+
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[
+            RuntimeError("not up yet"),
+            {"running": True},
+        ],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/calfcord",
+        agent_ids=["assistant"],
+        mcp_servers=["github"],
+        client=client,
+        spawn=spawn,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 0
+    project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
+    proc = project["processes"]["mcp-github"]
+    assert proc["command"] == "/h/shims/calfcord run mcp github"
+    assert proc["disabled"] is True
+
+
+
 async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
     home = _home(tmp_path)
     spawn = _RecordingSpawn()

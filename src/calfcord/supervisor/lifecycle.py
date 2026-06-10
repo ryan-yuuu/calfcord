@@ -347,6 +347,7 @@ async def start(
     server_urls: str,
     launcher: str,
     agent_ids: Iterable[str],
+    mcp_servers: Iterable[str] = (),
     ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_SECONDS,
     client: ProcessComposeClient | None = None,
     spawn: Spawn | None = None,
@@ -419,7 +420,10 @@ async def start(
 
         port = pc_port_for(home)
         yaml_text = render_compose(
-            agent_ids=list(agent_ids), home=home, launcher=launcher
+            agent_ids=list(agent_ids),
+            home=home,
+            launcher=launcher,
+            mcp_servers=list(mcp_servers),
         )
         yaml_path = _write_compose(home, yaml_text)
         log_path = _ensure_log_path(home)
