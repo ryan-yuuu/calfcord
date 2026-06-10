@@ -246,3 +246,5 @@ compose.override.yml
 compose.override.yaml
 docker-compose.override.yml
 docker-compose.override.yaml
+
+scratch/
