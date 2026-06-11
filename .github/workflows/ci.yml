@@ -47,7 +47,7 @@ jobs:
     # Drop this flag once the baseline is zero.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up uv (+ Python 3.12)
         uses: astral-sh/setup-uv@v6
         with:
@@ -75,7 +75,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up uv (+ Python 3.12)
         uses: astral-sh/setup-uv@v6
         with:
@@ -106,7 +106,7 @@ jobs:
     name: docker build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
       - name: Build calfcord image
         # No ``push``; this job exists to catch Dockerfile breakage early.

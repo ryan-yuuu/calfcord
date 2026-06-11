@@ -35,7 +35,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Lint installer + generated shims
@@ -49,7 +49,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # macOS ships bash 3.2 at /bin/bash; run the suite under it there to
       # guard the installer's bash-3.2 compatibility contract (the harness runs
       # the shims under the same interpreter). Linux uses its modern bash.
