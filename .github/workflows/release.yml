@@ -60,7 +60,7 @@ jobs:
         # silently downgrade ``docker pull ghcr.io/.../calfcord:latest``
         # for every consumer.
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
