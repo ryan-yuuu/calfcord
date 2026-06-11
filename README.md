@@ -1,6 +1,7 @@
 # 🐮 Calfcord
 
 [![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ryan-yuuu/calfcord/python-coverage-comment-action-data/endpoint.json)](https://github.com/ryan-yuuu/calfcord/tree/python-coverage-comment-action-data)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
 **Collaborate with your team of AI agents on Discord** — each with its own responsibilities and memories, all able to talk to you *and to each other*.

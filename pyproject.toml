@@ -46,6 +46,18 @@ markers = [
     "integration: tests that hit real external services (gated on env vars; not run in normal CI)",
 ]
 
+[tool.coverage.run]
+# ``relative_files`` is mandatory for python-coverage-comment-action.
+# coverage.py records absolute file paths by default, but the action reads the
+# .coverage file inside its own Docker container, whose workspace path differs
+# from the runner's. Repo-relative paths are the only ones that resolve in both.
+relative_files = true
+source = ["src/calfcord"]
+branch = true
+
+[tool.coverage.report]
+omit = ["*/__init__.py"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
@@ -59,4 +71,5 @@ ignore = []
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=7.1.0",
 ]

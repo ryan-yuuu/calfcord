@@ -5,7 +5,10 @@
 #           while we work down the 25 pre-existing baseline errors.
 #           A red ✗ surfaces in the PR check list but does not block
 #           merge.
-#   test  — pytest. Hard-gates: any failing test fails CI.
+#   test  — pytest with coverage. Hard-gates: any failing test fails CI
+#           (coverage is reported, not gated). Also publishes the coverage
+#           badge/data via python-coverage-comment-action; the companion
+#           ``coverage.yml`` posts the comment for fork/Dependabot PRs.
 #   build — docker build (no push). Catches Dockerfile drift even when
 #           Python tests pass.
 #
@@ -60,6 +63,17 @@ jobs:
   test:
     name: pytest
     runs-on: ubuntu-latest
+    # Elevated for THIS job only (the workflow default is ``contents: read``).
+    # python-coverage-comment-action needs ``contents: write`` to commit the
+    # badge + coverage data to its data branch
+    # (``python-coverage-comment-action-data``) on pushes to main, and
+    # ``pull-requests: write`` to post the coverage comment on same-repo PRs.
+    # Fork and Dependabot PRs run with a read-only token regardless (GitHub
+    # forces this); for those, the action writes a comment artifact that the
+    # trusted ``coverage.yml`` workflow posts via ``workflow_run``.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up uv (+ Python 3.12)
@@ -69,8 +83,24 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync --frozen
-      - name: Run pytest
-        run: uv run pytest -q
+      - name: Run pytest with coverage
+        # Coverage config lives in pyproject.toml ([tool.coverage.run]). This
+        # writes the .coverage file the action consumes below.
+        run: uv run pytest -q --cov --cov-report=term-missing
+      - name: Coverage comment
+        id: coverage_comment
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Thresholds set badge colour only; they do NOT gate CI.
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 70
+      - name: Store coverage comment (for fork / Dependabot PRs)
+        uses: actions/upload-artifact@v4
+        if: steps.coverage_comment.outputs.COMMENT_FILE_WRITTEN == 'true'
+        with:
+          name: python-coverage-comment-action
+          path: python-coverage-comment-action.txt
 
   build:
     name: docker build
