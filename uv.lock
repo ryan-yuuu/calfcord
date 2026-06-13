@@ -568,7 +568,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
-    { name = "openhands-tools", specifier = ">=1.23.1" },
+    { name = "openhands-tools", specifier = ">=1.28.0" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-frontmatter", specifier = ">=1.3.0,<2" },
@@ -2577,7 +2577,7 @@ wheels = [
 
 [[package]]
 name = "openhands-tools"
-version = "1.23.1"
+version = "1.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "binaryornot" },
@@ -2591,9 +2591,9 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/71/19241f999ee073dae08e425992693a2aeb4b39a6d76a7e00d911a2675182/openhands_tools-1.23.1.tar.gz", hash = "sha256:050309c53b223f6e9b66ca201c172f27f462ca9892e6569d477de6567fdc9238", size = 134605, upload-time = "2026-05-25T19:47:34.156Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/03/1a8c599a79721b3a45acba6ade54c98b06918f0e3343f74898828f0e8050/openhands_tools-1.28.0.tar.gz", hash = "sha256:7873df6ff3a0ccea92c21523f3c7da81bb088ff38cda3dbe705f751e06ea1406", size = 142456, upload-time = "2026-06-10T22:23:38.536Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/16/ae98924414af5db7909104d819d294a5c8e5746366338e5d25755ba08b69/openhands_tools-1.23.1-py3-none-any.whl", hash = "sha256:e162cad388492e3d04b32040d2ee5cfdb5fdbdda970a4d7efdb30f2ca308c6f1", size = 178312, upload-time = "2026-05-25T19:47:26.53Z" },
+    { url = "https://files.pythonhosted.org/packages/17/8b/96e949128fbc33444b12e4c0a4acbeca536ecd2dab1753efa6a24909fdf6/openhands_tools-1.28.0-py3-none-any.whl", hash = "sha256:6f84c383e29862c2ba6441cd16036ee90b26e8f68d3994cfb2022ced4e643feb", size = 187637, upload-time = "2026-06-10T22:23:41.39Z" },
 ]
 
 [[package]]
