@@ -7,6 +7,12 @@
       "skillPath": "skills/brainstorming/SKILL.md",
       "computedHash": "8df9b47092524833138b58682d03f2e153a242e550d1693657afdbee0cc9cdb0"
     },
+    "diataxis-docs-writer": {
+      "source": "ryan-yuuu/skills-for-dummies",
+      "sourceType": "github",
+      "skillPath": "skills/diataxis-docs-writer/SKILL.md",
+      "computedHash": "e7f9863312a0e89ef05f727d62ee21f5b0b885d7fe50917dd3211db1750354db"
+    },
     "doc-coauthoring": {
       "source": "anthropics/skills",
       "sourceType": "github",
