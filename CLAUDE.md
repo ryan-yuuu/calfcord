@@ -58,8 +58,7 @@ Calfcord is **five independent process types that communicate through Kafka** (b
 
 ## Documentation writing
 
-- You create high-quality software documentation. Your work is strictly guided by the principles and structure of the Diátaxis Framework
-- The Diátaxis Framework's raw content is written in this github repo, please walk the repo's files to deeply review and understand the framework: https://raw.githubusercontent.com/evildmp/diataxis-documentation-framework/refs/heads/main/start-here.rst
+- Use the `/diataxis-docs-writer` skill to write documentation.
 
 ## PR final steps
 
