@@ -24,6 +24,7 @@ from calfcord.cli import (
     init,
     logs,
     router_config,
+    tool_aliases,
 )
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
@@ -2086,3 +2087,178 @@ def test_main_mcp_remove_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert main(["mcp", "remove", "github", "--force"]) == 0
     assert captured["server"] == "github"
     assert captured["force"] is True
+
+
+# --- tools alias subcommand --------------------------------------------------
+
+
+def _fail_if_called(*args: object, **kwargs: object) -> int:
+    raise AssertionError("should not have been called")
+
+
+def _patch_workspace(monkeypatch: pytest.MonkeyPatch, *, up: bool) -> None:
+    """Stub the supervisor workspace probe ``_apply_alias_restart`` uses."""
+    from calfcord.supervisor import _workspace
+
+    monkeypatch.setattr(_workspace, "resolve_client", lambda client, home: object())
+
+    async def _is_up(client: object) -> bool:
+        return up
+
+    monkeypatch.setattr(_workspace, "workspace_is_up", _is_up)
+
+
+def test_main_tools_alias_add_dispatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _add(*, env_path, src, dst, tool_names, aliasable_names, apply_restart):
+        captured.update(
+            env_path=env_path, src=src, dst=dst,
+            tool_names=set(tool_names), aliasable_names=set(aliasable_names),
+            apply_restart=apply_restart,
+        )
+        return 0
+
+    monkeypatch.setattr(tool_aliases, "run_alias_add", _add)
+    assert main(["tools", "alias", "add", "terminal", "terminal_eu"]) == 0
+    expected_env, _ = init.resolve_paths(home)
+    assert captured["env_path"] == expected_env
+    assert captured["src"] == "terminal"
+    assert captured["dst"] == "terminal_eu"
+    assert captured["apply_restart"] is None  # no --restart → hint, not actuation
+    # The canonical surface is computed from ALL_TOOLS: terminal is aliasable,
+    # todo (per-session state) is a real tool but NOT aliasable.
+    assert "terminal" in captured["tool_names"]
+    assert "terminal" in captured["aliasable_names"]
+    assert "todo" in captured["tool_names"]
+    assert "todo" not in captured["aliasable_names"]
+
+
+def test_main_tools_alias_list_dispatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    captured: dict[str, object] = {}
+
+    def _list(*, env_path):
+        captured["env_path"] = env_path
+        return 0
+
+    monkeypatch.setattr(tool_aliases, "run_alias_list", _list)
+    assert main(["tools", "alias", "list"]) == 0
+    expected_env, _ = init.resolve_paths(home)
+    assert captured["env_path"] == expected_env
+
+
+def test_main_tools_alias_remove_dispatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    captured: dict[str, object] = {}
+
+    def _remove(*, env_path, dst, apply_restart):
+        captured.update(env_path=env_path, dst=dst, apply_restart=apply_restart)
+        return 0
+
+    monkeypatch.setattr(tool_aliases, "run_alias_remove", _remove)
+    assert main(["tools", "alias", "remove", "terminal_eu"]) == 0
+    assert captured["dst"] == "terminal_eu"
+    assert captured["apply_restart"] is None
+
+
+def test_main_tools_alias_add_restart_injects_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    captured: dict[str, object] = {}
+
+    def _add(*, env_path, src, dst, tool_names, aliasable_names, apply_restart):
+        captured["apply_restart"] = apply_restart
+        return 0
+
+    monkeypatch.setattr(tool_aliases, "run_alias_add", _add)
+    assert main(["tools", "alias", "add", "terminal", "terminal_eu", "--restart"]) == 0
+    # --restart injects the actuation callback (the workspace-gated restart).
+    assert callable(captured["apply_restart"])
+    assert captured["apply_restart"] is main_mod._apply_alias_restart
+
+
+def test_main_tools_alias_remove_restart_injects_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    captured: dict[str, object] = {}
+
+    def _remove(*, env_path, dst, apply_restart):
+        captured["apply_restart"] = apply_restart
+        return 0
+
+    monkeypatch.setattr(tool_aliases, "run_alias_remove", _remove)
+    assert main(["tools", "alias", "remove", "terminal_eu", "--restart"]) == 0
+    assert callable(captured["apply_restart"])
+
+
+class TestApplyAliasRestart:
+    """``_apply_alias_restart`` — the ``--restart`` actuation: gated on a
+    running workspace, then restart the tools host + running agents."""
+
+    def test_dev_tree_no_supervisor(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(main_mod, "_resolve_home", lambda: None)
+        # _run_component must NOT be called on a dev tree.
+        monkeypatch.setattr(main_mod, "_run_component", _fail_if_called)
+        main_mod._apply_alias_restart()
+        assert "next" in capsys.readouterr().out.lower()
+
+    def test_workspace_down_does_not_restart(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(main_mod, "_resolve_home", lambda: tmp_path)
+        _patch_workspace(monkeypatch, up=False)
+        monkeypatch.setattr(main_mod, "_run_component", _fail_if_called)
+        main_mod._apply_alias_restart()
+        assert "workspace not running" in capsys.readouterr().out.lower()
+
+    def test_workspace_up_restarts_tools_and_agents(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(main_mod, "_resolve_home", lambda: tmp_path)
+        _patch_workspace(monkeypatch, up=True)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            main_mod, "_run_component",
+            lambda comp, verb: calls.append((comp, verb)) or 0,
+        )
+
+        async def _restart_all(home):
+            calls.append(("agents", home))
+            return 0
+
+        monkeypatch.setattr(roster, "agent_restart_all", _restart_all)
+        main_mod._apply_alias_restart()
+        assert ("tools", "restart") in calls
+        assert ("agents", tmp_path) in calls
+
+
+def test_main_tools_start_still_dispatches_to_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias branch must not break the start/stop/restart verbs."""
+    captured: dict[str, object] = {}
+
+    def _run_component(comp, verb):
+        captured.update(comp=comp, verb=verb)
+        return 0
+
+    monkeypatch.setattr(main_mod, "_run_component", _run_component)
+    assert main(["tools", "start"]) == 0
+    assert captured == {"comp": "tools", "verb": "start"}

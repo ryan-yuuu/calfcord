@@ -165,7 +165,17 @@ calfcord tools start
 calfcord tools stop
 ```
 
+For multi-host deploys you can expose a tool under a second name (so an agent
+can route a call to a specific host) — `calfcord tools alias` manages that:
+
+```bash
+calfcord tools alias add terminal terminal_eu   # expose `terminal` also as `terminal_eu`
+calfcord tools alias list
+calfcord tools alias remove terminal_eu          # by the new name (--restart to apply now)
+```
+
 → What each tool does and how to write your own: [authoring-tools.md](authoring-tools.md).
+The multi-host alias story: [distributed-deployment.md](distributed-deployment.md).
 
 ## Give agents external tools over MCP
 

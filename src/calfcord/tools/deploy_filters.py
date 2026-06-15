@@ -30,7 +30,7 @@ import dataclasses
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from calfkit.nodes.tool import ToolNodeDef
 
@@ -66,25 +66,23 @@ def _resolve_include_filter() -> set[str] | None:
     return names or None
 
 
-def _resolve_alias_map() -> dict[str, str]:
-    """Parse ``CALFCORD_TOOLS_ALIAS`` into a ``{src: dst}`` dict.
+def parse_alias_csv(raw: str) -> dict[str, str]:
+    """Parse a ``src1=dst1,src2=dst2`` alias string into a ``{src: dst}`` dict.
 
-    Empty / unset / whitespace-only env → ``{}``. Otherwise parsed
-    strictly: any malformed entry, duplicate source, duplicate target,
-    ``src==dst`` no-op, or DST that violates :data:`TOOL_NAME_REGEX`
-    raises :class:`ValueError`. Strict-fail at boot is the right call —
-    an alias misconfig otherwise manifests as silent dead config
-    (``CALFCORD_TOOLS_ALIAS`` visible in ``docker inspect`` doing
-    nothing), which is harder to debug. Every error message includes the
-    raw env value so the operator sees all entries, not just the
-    offending one.
+    The shared grammar for ``CALFCORD_TOOLS_ALIAS`` — used by both the runtime
+    (:func:`_resolve_alias_map`) and the ``calfcord tools alias`` CLI.
+
+    Empty / whitespace-only → ``{}``; empty chunks (a trailing/double comma)
+    are skipped. Parsed strictly: a malformed entry, empty side, a ``dst`` that
+    violates :data:`TOOL_NAME_REGEX`, ``src==dst``, a duplicate source, or a
+    duplicate target each raise :class:`ValueError` (with the full value, so an
+    operator sees every entry, not just the offender).
 
     Raises:
-        ValueError: on any of: malformed entry (no ``=`` or empty side),
-            invalid DST (regex), ``src==dst``, duplicate source,
-            duplicate target.
+        ValueError: malformed entry (no ``=`` / empty side), invalid ``dst``,
+            ``src==dst``, duplicate source, or duplicate target.
     """
-    raw = os.environ.get(_ALIAS_ENV, "").strip()
+    raw = raw.strip()
     if not raw:
         return {}
     result: dict[str, str] = {}
@@ -95,43 +93,122 @@ def _resolve_alias_map() -> dict[str, str]:
             continue
         if "=" not in chunk:
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS entry {chunk!r} has no '=' — "
-                f"expected src=dst (full env: {raw!r})"
+                f"alias entry {chunk!r} has no '=' — expected src=dst "
+                f"(full value: {raw!r})"
             )
         src, _, dst = chunk.partition("=")
         src = src.strip()
         dst = dst.strip()
         if not src or not dst:
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS entry {chunk!r} has empty src or dst "
-                f"(full env: {raw!r})"
+                f"alias entry {chunk!r} has empty src or dst (full value: {raw!r})"
             )
         if not TOOL_NAME_REGEX.match(dst):
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS target {dst!r} is not a valid tool "
-                f"name; must match {TOOL_NAME_REGEX.pattern} (full env: {raw!r})"
+                f"alias target {dst!r} is not a valid tool name; must match "
+                f"{TOOL_NAME_REGEX.pattern} (full value: {raw!r})"
             )
         if src == dst:
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS entry {chunk!r} aliases a tool to "
-                f"itself; drop the entry or pick a distinct target "
-                f"(full env: {raw!r})"
+                f"alias entry {chunk!r} aliases a tool to itself; pick a "
+                f"distinct target (full value: {raw!r})"
             )
         if src in result:
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS source {src!r} is aliased multiple "
-                f"times; only one alias per source is supported "
-                f"(full env: {raw!r})"
+                f"alias source {src!r} is aliased multiple times; only one "
+                f"alias per source is supported (full value: {raw!r})"
             )
         if dst in used_targets:
             raise ValueError(
-                f"CALFCORD_TOOLS_ALIAS target {dst!r} is used by multiple "
-                f"aliases; only one src may alias to a given dst "
-                f"(full env: {raw!r})"
+                f"alias target {dst!r} is used by multiple aliases; only one "
+                f"src may alias to a given dst (full value: {raw!r})"
             )
         result[src] = dst
         used_targets.add(dst)
     return result
+
+
+def serialize_alias_map(aliases: Mapping[str, str]) -> str:
+    """Render a ``{src: dst}`` map back to the ``src=dst,…`` form, sorted.
+
+    The inverse of :func:`parse_alias_csv` (sorted by source for byte-stable
+    output). An empty map renders to ``""`` — the ``CALFCORD_TOOLS_ALIAS``
+    "no aliases" value.
+    """
+    return ",".join(f"{src}={dst}" for src, dst in sorted(aliases.items()))
+
+
+def _resolve_alias_map() -> dict[str, str]:
+    """Parse ``CALFCORD_TOOLS_ALIAS`` (env) into a ``{src: dst}`` dict.
+
+    Thin wrapper over :func:`parse_alias_csv`; see it for the grammar and the
+    strict-fail rationale.
+    """
+    return parse_alias_csv(os.environ.get(_ALIAS_ENV, ""))
+
+
+def is_aliasable(node: ToolNodeDef) -> bool:
+    """Whether ``node`` can be cloned under a second wire identity.
+
+    A tool that registers node-scoped lifecycle state — an ``@resource``
+    bracket or a lifecycle hook (only ``todo`` and ``private_chat`` today) —
+    cannot be aliased: the clone can't safely share that per-node resource.
+    Stateless and worker-resource tools (terminal, files, web_*) are aliasable.
+
+    NOTE: this inspects calfkit's private lazily-created ``__dict__`` keys
+    (the same ones ``_clone_with_name`` keys off and the worker populates). If
+    a calfkit bump renames them, ``.get()`` returns ``None`` and this would
+    report *every* tool aliasable — letting a non-aliasable tool past the CLI's
+    add-time check, only to fail at boot in ``_clone_with_name``. A public
+    "is this node stateless?" predicate on ``ToolNodeDef`` would remove this
+    coupling — worth filing upstream if it churns.
+    """
+    return not (
+        node.__dict__.get("_lifecycle_resource_cms")
+        or node.__dict__.get("_lifecycle_hooks")
+    )
+
+
+def validate_alias(
+    src: str,
+    dst: str,
+    *,
+    tool_names: Collection[str],
+    aliasable_names: Collection[str],
+    existing: Mapping[str, str],
+) -> None:
+    """Validate a proposed ``src``→``dst`` alias for ``calfcord tools alias add``.
+
+    Raises :class:`ValueError` (an operator-facing message) on the first rule
+    violated; returns ``None`` when the alias is valid. ``tool_names`` is the
+    canonical tool surface, ``aliasable_names`` the subset with no node-scoped
+    state (see :func:`is_aliasable`), and ``existing`` the already-configured
+    ``{src: dst}`` aliases.
+    """
+    if src not in tool_names:
+        raise ValueError(
+            f"{src!r} is not a known tool; valid tools: {sorted(tool_names)}"
+        )
+    if src not in aliasable_names:
+        raise ValueError(
+            f"tool {src!r} can't be aliased (it holds per-session state); "
+            f"aliasing is for stateless tools like terminal/search_files/web_*"
+        )
+    if not TOOL_NAME_REGEX.match(dst):
+        raise ValueError(
+            f"{dst!r} is not a valid tool name; must match {TOOL_NAME_REGEX.pattern}"
+        )
+    if dst == src:
+        raise ValueError(f"cannot alias {src!r} to itself; pick a distinct name")
+    if dst in tool_names:
+        raise ValueError(f"{dst!r} is already a tool name; pick a distinct alias")
+    if dst in set(existing.values()):
+        raise ValueError(f"{dst!r} is already used as an alias target")
+    if src in existing:
+        raise ValueError(
+            f"{src!r} is already aliased to {existing[src]!r}; "
+            f"remove that alias first to change it"
+        )
 
 
 def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
@@ -163,9 +240,7 @@ def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
     Raises:
         ValueError: if ``node`` has node-scoped resources or lifecycle hooks.
     """
-    if node.__dict__.get("_lifecycle_resource_cms") or node.__dict__.get(
-        "_lifecycle_hooks"
-    ):
+    if not is_aliasable(node):
         raise ValueError(
             f"cannot alias tool {node.tool_schema.name!r}: it registers "
             f"node-scoped resources or lifecycle hooks, which an alias clone "

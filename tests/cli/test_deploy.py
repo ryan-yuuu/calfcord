@@ -276,6 +276,31 @@ def test_k8s_pulls_secrets_by_reference_not_literal() -> None:
     assert "secretRef" in rendered or "secretKeyRef" in rendered
 
 
+def test_k8s_workloads_pull_env_so_alias_reaches_every_role() -> None:
+    """``CALFCORD_TOOLS_ALIAS`` lives in ``.env`` and is read at boot by every
+    role (the tools host serves the aliased name; an agent host advertises it
+    to its LLM). ``deploy`` carries it with ZERO special handling because every
+    workload pulls the SAME ``.env``-derived Secret via ``envFrom`` — so an
+    alias reaches both sides of the route (the two-sided requirement, ADR-0007).
+    """
+    rendered = deploy.render_k8s(
+        agent_ids=["scribe"], server_urls=_BROKER, image="calfcord:latest"
+    )
+    # The Secret operators create is sourced from .env, so a CALFCORD_TOOLS_ALIAS
+    # key in .env rides it to the pods (deploy never inlines or special-cases it).
+    assert "--from-env-file=.env" in rendered
+
+    deployments = _by_name(_k8s_docs(["scribe"]), "Deployment")
+    secret_names: set[str] = set()
+    for name in ("tools", "agent-scribe"):
+        container = deployments[name]["spec"]["template"]["spec"]["containers"][0]
+        refs = [r["secretRef"]["name"] for r in container.get("envFrom", []) if "secretRef" in r]
+        assert refs, f"{name} must pull the .env Secret via envFrom"
+        secret_names.update(refs)
+    # Both roles mount the SAME secret — no alias-reaches-only-one-side split.
+    assert len(secret_names) == 1, f"tools and agent reference different secrets: {secret_names}"
+
+
 def test_k8s_no_agents_still_renders_the_substrate() -> None:
     deployments = _by_name(_k8s_docs([]), "Deployment")
     for name in ("bridge", "router", "tools"):

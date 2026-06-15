@@ -19,6 +19,10 @@ from calfcord.tools.deploy_filters import (
     _resolve_alias_map,
     _resolve_include_filter,
     apply_deploy_filters,
+    is_aliasable,
+    parse_alias_csv,
+    serialize_alias_map,
+    validate_alias,
 )
 
 
@@ -270,3 +274,165 @@ class TestToolNameRegex:
 
     def test_rejects_invalid(self) -> None:
         assert TOOL_NAME_REGEX.match("bad name") is None
+
+
+# --------------------------------------------------------------------------
+# parse_alias_csv / serialize_alias_map — the shared CSV grammar used by both
+# the runtime (_resolve_alias_map) and the calfcord tools alias CLI.
+# --------------------------------------------------------------------------
+
+
+class TestParseAliasCsv:
+    def test_empty_returns_empty(self) -> None:
+        assert parse_alias_csv("") == {}
+
+    def test_whitespace_returns_empty(self) -> None:
+        assert parse_alias_csv("   ") == {}
+
+    def test_single_pair(self) -> None:
+        assert parse_alias_csv("a=b") == {"a": "b"}
+
+    def test_multiple_pairs(self) -> None:
+        assert parse_alias_csv("a=b,c=d") == {"a": "b", "c": "d"}
+
+    def test_trailing_and_double_commas_tolerated(self) -> None:
+        assert parse_alias_csv("a=b,,c=d,") == {"a": "b", "c": "d"}
+
+    def test_no_separator_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("noeq")
+
+    def test_empty_dst_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("a=")
+
+    def test_empty_src_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("=b")
+
+    def test_invalid_dst_regex_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("a=bad name")
+
+    def test_self_alias_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("a=a")
+
+    def test_duplicate_source_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("a=b,a=c")
+
+    def test_duplicate_target_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_alias_csv("a=z,b=z")
+
+
+class TestSerializeAliasMap:
+    def test_empty_is_empty_string(self) -> None:
+        assert serialize_alias_map({}) == ""
+
+    def test_single(self) -> None:
+        assert serialize_alias_map({"a": "b"}) == "a=b"
+
+    def test_sorted_for_determinism(self) -> None:
+        assert serialize_alias_map({"c": "d", "a": "b"}) == "a=b,c=d"
+
+    def test_round_trips_with_parse(self) -> None:
+        aliases = {"terminal": "terminal_eu", "patch": "patch_eu"}
+        assert parse_alias_csv(serialize_alias_map(aliases)) == aliases
+
+
+# --------------------------------------------------------------------------
+# is_aliasable — a tool with node-scoped lifecycle state (an @resource bracket
+# or a lifecycle hook) cannot be cloned under a second wire identity.
+# --------------------------------------------------------------------------
+
+
+class TestIsAliasable:
+    def test_plain_node_is_aliasable(self) -> None:
+        assert is_aliasable(_make_node("terminal")) is True
+
+    def test_resource_bracket_node_is_not_aliasable(self) -> None:
+        node = _make_node("todo")
+
+        @node.resource("state")
+        async def _state(setup_ctx):  # pragma: no cover - body not run
+            yield object()
+
+        assert is_aliasable(node) is False
+
+    def test_lifecycle_hook_node_is_not_aliasable(self) -> None:
+        node = _make_node("private_chat")
+
+        @node.on_startup
+        async def _boot(setup_ctx):  # pragma: no cover - body not run
+            return None
+
+        assert is_aliasable(node) is False
+
+
+# --------------------------------------------------------------------------
+# validate_alias — the CLI add-time validator (the seven rules in the spec).
+# --------------------------------------------------------------------------
+
+_TOOLS = {"terminal", "read_file", "todo"}
+_ALIASABLE = {"terminal", "read_file"}  # todo holds per-session state
+
+
+class TestValidateAlias:
+    def test_valid_passes(self) -> None:
+        validate_alias(
+            "terminal", "terminal_eu",
+            tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+        )
+
+    def test_unknown_src_raises(self) -> None:
+        with pytest.raises(ValueError, match="not a known tool"):
+            validate_alias(
+                "ghost", "ghost_eu",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            )
+
+    def test_non_aliasable_src_raises(self) -> None:
+        with pytest.raises(ValueError, match="can't be aliased"):
+            validate_alias(
+                "todo", "todo_eu",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            )
+
+    def test_invalid_dst_regex_raises(self) -> None:
+        with pytest.raises(ValueError, match="valid tool name"):
+            validate_alias(
+                "terminal", "bad name",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            )
+
+    def test_self_alias_raises(self) -> None:
+        with pytest.raises(ValueError, match="itself"):
+            validate_alias(
+                "terminal", "terminal",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            )
+
+    def test_dst_collides_with_real_tool_raises(self) -> None:
+        with pytest.raises(ValueError, match="already a tool"):
+            validate_alias(
+                "terminal", "read_file",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            )
+
+    def test_dst_collides_with_existing_alias_target_raises(self) -> None:
+        with pytest.raises(ValueError, match="already used"):
+            validate_alias(
+                "read_file", "terminal_eu",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE,
+                existing={"terminal": "terminal_eu"},
+            )
+
+    def test_src_already_aliased_raises(self) -> None:
+        with pytest.raises(ValueError, match="already aliased"):
+            validate_alias(
+                "terminal", "terminal_2",
+                tool_names=_TOOLS, aliasable_names=_ALIASABLE,
+                existing={"terminal": "terminal_eu"},
+            )

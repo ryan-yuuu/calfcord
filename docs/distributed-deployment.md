@@ -256,6 +256,23 @@ subscribes to `tool.<dst>.input` instead, so two hosts can serve `patch`
 (one under its original name on a workstation, one aliased to `patch_eu` on
 a remote VM) and agents can call either by picking the appropriate name.
 
+**Manage it with the CLI.** Rather than hand-editing the env var, use
+`calfcord tools alias` — it validates against the live tool surface (rejecting
+an unknown or non-aliasable tool, a name collision, etc.) and writes the
+install `.env` on the host you run it on:
+
+```bash
+calfcord tools alias add patch patch_eu   # run on EACH host that should know the name
+calfcord tools alias list
+calfcord tools alias remove patch_eu      # by the new name
+```
+
+Add `--restart` to apply it to a running workspace immediately (otherwise it
+takes effect on the next start, since `.env` is read at boot). The rest of this
+section shows the raw `CALFCORD_TOOLS_ALIAS` env var the CLI manages — the same
+value you'd set directly in a Dockerfile `ENV`, a compose `environment:`, or a
+k8s ConfigMap.
+
 ### Run the aliased host
 
 On the remote VM, set both env vars on the canonical image:
@@ -288,8 +305,8 @@ than build a broken clone.)
 ### Configure the agent host
 
 For an agent to call `patch_eu`, that name must exist in the
-agent host's `TOOL_REGISTRY`. Set the same alias env on the agent
-host:
+agent host's `TOOL_REGISTRY`. Set the same alias on the agent host —
+`calfcord tools alias add patch patch_eu` (or the raw env directly):
 
 ```env
 # .env on the agent host

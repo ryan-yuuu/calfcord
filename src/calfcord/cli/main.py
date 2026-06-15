@@ -185,6 +185,26 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Synonym for the bare verb (acts on this host's tools).",
         )
 
+    # Tool aliases (CALFCORD_TOOLS_ALIAS) — install config the tools/agent
+    # hosts read at boot; managed here, not by a launch flag (ADR-0007).
+    alias_p = tools_sub.add_parser(
+        "alias", help="Manage tool aliases (CALFCORD_TOOLS_ALIAS)."
+    )
+    alias_sub = alias_p.add_subparsers(dest="tools_alias_command", required=True)
+    _restart_help = (
+        "Restart the tools host + agents to apply now (if a workspace is running)."
+    )
+    _aadd = alias_sub.add_parser(
+        "add", help="Alias a tool under a new name (multi-host routing)."
+    )
+    _aadd.add_argument("src", help="The tool to alias (e.g. terminal).")
+    _aadd.add_argument("dst", help="The new name to expose it under (e.g. terminal_eu).")
+    _aadd.add_argument("--restart", action="store_true", help=_restart_help)
+    alias_sub.add_parser("list", help="List configured tool aliases.")
+    _arm = alias_sub.add_parser("remove", help="Remove a tool alias by its new name.")
+    _arm.add_argument("dst", help="The alias (new name) to remove.")
+    _arm.add_argument("--restart", action="store_true", help=_restart_help)
+
     # MCP servers (design: docs/design/mcp-reintroduction.md). Each mcp.json
     # server is its own roster slot (mcp-<server>), so the lifecycle verbs take
     # a server name OR --all like the agent roster. `start --all` sweeps every
@@ -777,6 +797,81 @@ def _run_deploy(target: str, *, output: str | None) -> int:
     )
 
 
+def _run_tool_alias(args: argparse.Namespace) -> int:
+    """Dispatch ``calfcord tools alias <add|list|remove>`` to its handlers.
+
+    Edits the install ``.env`` (``CALFCORD_TOOLS_ALIAS``). Works in a native
+    install or a dev tree — unlike ``deploy`` it only touches ``.env``, so it
+    needs no ``$CALFCORD_HOME``. ``add`` resolves the canonical tool surface
+    from ``ALL_TOOLS`` so the validator can check the source and its
+    aliasability without the CLI hard-coding the tool list.
+    """
+    from calfcord.cli import tool_aliases
+
+    env_path, _ = init.resolve_paths(_resolve_home())
+    cmd = args.tools_alias_command
+    if cmd == "list":
+        return tool_aliases.run_alias_list(env_path=env_path)
+
+    # ``--restart`` injects the workspace-gated actuation; without it the
+    # handler prints the apply-by-restart hint.
+    apply_restart = _apply_alias_restart if args.restart else None
+    if cmd == "remove":
+        return tool_aliases.run_alias_remove(
+            env_path=env_path, dst=args.dst, apply_restart=apply_restart
+        )
+
+    from calfcord.tools import ALL_TOOLS
+    from calfcord.tools.deploy_filters import is_aliasable
+
+    tool_names = {n.tool_schema.name for n in ALL_TOOLS}
+    aliasable_names = {n.tool_schema.name for n in ALL_TOOLS if is_aliasable(n)}
+    return tool_aliases.run_alias_add(
+        env_path=env_path,
+        src=args.src,
+        dst=args.dst,
+        tool_names=tool_names,
+        aliasable_names=aliasable_names,
+        apply_restart=apply_restart,
+    )
+
+
+def _apply_alias_restart() -> None:
+    """Restart the tools host + running agents so a just-written alias applies.
+
+    The ``--restart`` actuation for ``calfcord tools alias add/remove`` (ADR-0007):
+    gated on a running workspace, then restart both roles that read
+    ``CALFCORD_TOOLS_ALIAS`` at boot. On a dev tree (no ``$CALFCORD_HOME``) or a
+    closed workspace it just notes the change applies on next start — the
+    ``.env`` is read at process boot, so there is nothing to actuate.
+    """
+    home = _resolve_home()
+    if home is None:
+        print("not a native install; the alias applies on the next `calfkit-tools` start.")
+        return
+
+    # This up-front probe is for UX, not necessity: ``_run_component`` and
+    # ``agent_restart_all`` each re-gate on the workspace internally, but
+    # letting them fail separately would print two confusing "not running"
+    # hints for what is really a single no-op. Probing once lets us print one
+    # clean line instead. (Don't "simplify" this away.)
+    from calfcord.supervisor._workspace import resolve_client, workspace_is_up
+
+    async def _up() -> bool:
+        return await workspace_is_up(resolve_client(None, str(home)))
+
+    if not asyncio.run(_up()):
+        print("workspace not running; the alias applies on next start.")
+        return
+
+    # Best-effort: the .env write already succeeded; each restart path prints
+    # its own result, so a restart failure is visible without changing the
+    # add/remove exit code (the alias edit itself did not fail).
+    print("restarting the tools host and agents to apply the alias…")
+    _run_component("tools", "restart")
+    asyncio.run(roster.agent_restart_all(home))
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command in ("start", "stop", "status"):
@@ -817,8 +912,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _run_router(args)
 
     # ``tools`` is a singleton-component verb group; ``tools_command`` carries
-    # the start/stop/restart verb.
+    # the start/stop/restart verb — except ``alias``, which is its own config
+    # subgroup (see _run_tool_alias).
     if args.command == "tools":
+        if args.tools_command == "alias":
+            return _run_tool_alias(args)
         return _run_component("tools", args.tools_command)
 
     if args.command == "mcp":
