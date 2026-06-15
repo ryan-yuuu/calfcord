@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_0eb9b53b7be7c797_factory_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-13 06:10 +0000
+            created at 2026-06-15 21:03 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -209,9 +209,9 @@
     <p class="run run2"><span class="n"><a id="t125" href="#t125">125</a></span><span class="t"><span class="str">        - ``tools: [a, b]`` &#8212; agent gets exactly those tools.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t126" href="#t126">126</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t127" href="#t127">127</a></span><span class="t"><span class="str">    Security note: the "all by default" behaviour means a new</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t128" href="#t128">128</a></span><span class="t"><span class="str">    ``agents/&lt;name>.md`` ships with ``shell`` / ``write_file`` /</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t129" href="#t129">129</a></span><span class="t"><span class="str">    ``edit_file`` access to the workspace bind-mounted into the</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t130" href="#t130">130</a></span><span class="t"><span class="str">    ``calfkit-tools`` container unless the operator narrows the list</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t128" href="#t128">128</a></span><span class="t"><span class="str">    ``agents/&lt;name>.md`` ships with ``terminal`` / ``execute_code`` /</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t129" href="#t129">129</a></span><span class="t"><span class="str">    ``write_file`` / ``patch`` access to the workspace bind-mounted into</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t130" href="#t130">130</a></span><span class="t"><span class="str">    the ``calfkit-tools`` container unless the operator narrows the list</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t131" href="#t131">131</a></span><span class="t"><span class="str">    explicitly. If you need a restricted-tools agent, add the</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t132" href="#t132">132</a></span><span class="t"><span class="str">    ``tools:`` line. See :doc:`docs/authoring-agents` for the security</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t133" href="#t133">133</a></span><span class="t"><span class="str">    model.</span>&nbsp;</span><span class="r"></span></p>
@@ -329,7 +329,7 @@
     <p class="pln"><span class="n"><a id="t245" href="#t245">245</a></span><span class="t"><span class="str">        gate for every read path: the agent process parses each ``.md``</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t246" href="#t246">246</a></span><span class="t"><span class="str">        through here before booting.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t247" href="#t247">247</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t248" href="#t248">248</a></span><span class="t"><span class="str">        Bare names (anything not starting with ``mcp/`` &#8212; ``shell``,</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t248" href="#t248">248</a></span><span class="t"><span class="str">        Bare names (anything not starting with ``mcp/`` &#8212; ``terminal``,</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t249" href="#t249">249</a></span><span class="t"><span class="str">        ``calendar``, &#8230;) pass through **untouched**. Whether a bare name</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t250" href="#t250">250</a></span><span class="t"><span class="str">        actually resolves to a registered builtin is checked later, by</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t251" href="#t251">251</a></span><span class="t"><span class="str">        :meth:`AgentFactory._resolve_tools` against the factory's tool registry</span>&nbsp;</span><span class="r"></span></p>
@@ -454,7 +454,7 @@
             <a class="nav" href="z_0eb9b53b7be7c797_factory_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-13 06:10 +0000
+            created at 2026-06-15 21:03 +0000
         </p>
     </div>
 </footer>
