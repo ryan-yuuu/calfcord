@@ -17,8 +17,8 @@ re-projected by the bridge's outbox poster) and exposes it as the worker-scoped
 ``a2a_client`` resource. Any *tool-specific* live resource is owned by the tool
 itself via a node-scoped ``@resource`` bracket that calfkit builds only when
 that tool is hosted — notably ``private_chat`` opens its own Discord connection
-and enforces ``DISCORD_GUILD_ID`` there. So a host serving only fs/shell tools
-needs no Discord credentials.
+and enforces ``DISCORD_GUILD_ID`` there. So a host serving only non-A2A tools
+(e.g. ``terminal``/``read_file``) needs no Discord credentials.
 
 Run::
 
@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from calfkit.client import Client
@@ -40,7 +41,7 @@ from dotenv import load_dotenv
 from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.tools import TOOL_REGISTRY
-from calfcord.tools.builtin.private_chat import _RES_CLIENT as _A2A_CLIENT_RESOURCE
+from calfcord.tools.private_chat import _RES_CLIENT as _A2A_CLIENT_RESOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +50,54 @@ _REPLY_TOPIC = "calfkit.tools.reply"
 ``discord.outbox`` so target-agent ReturnCalls route here, not to the
 bridge's outbox consumer (which would project them to Discord twice)."""
 
+_WORKSPACE_ENV = "CALFCORD_WORKSPACE_DIR"
+_TERMINAL_CWD_ENV = "TERMINAL_CWD"
+_DEFAULT_WORKSPACE = Path("state") / "workspace"
+
+
+def _configure_tool_workspace() -> Path:
+    """Point the vendored hermes terminal backend at the shared workspace.
+
+    The hermes tools start each agent session's shell in ``TERMINAL_CWD``
+    (falling back to the process cwd). Setting it to the calfcord workspace
+    root gives every agent a consistent, writable base directory while the
+    per-session ``task_id`` keying keeps one agent's shell state out of
+    another's. The workspace-relative memory layout (``memory/<agent_id>/``,
+    see :mod:`calfcord.agents.memory`) resolves against this root.
+
+    An operator-set ``TERMINAL_CWD`` wins and is left untouched. Otherwise
+    the root comes from ``CALFCORD_WORKSPACE_DIR`` (default
+    ``<cwd>/state/workspace``) and is created on demand so a fresh checkout
+    doesn't error before any tool has written to it.
+
+    Returns:
+        The resolved workspace root (the value ``TERMINAL_CWD`` now carries).
+    """
+    explicit = os.environ.get(_TERMINAL_CWD_ENV, "").strip()
+    if explicit:
+        return Path(explicit)
+
+    raw = os.environ.get(_WORKSPACE_ENV)
+    root = (
+        Path(raw).expanduser().resolve()
+        if raw
+        else (Path.cwd() / _DEFAULT_WORKSPACE).resolve()
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    os.environ[_TERMINAL_CWD_ENV] = str(root)
+    logger.info(
+        "tools workspace root=%s (TERMINAL_CWD) from_env=%s",
+        root,
+        _WORKSPACE_ENV in os.environ,
+    )
+    return root
+
 # The worker-resource key under which the process-wide ``Client`` is exposed to
 # A2A tool bodies is imported from its owner/consumer (private_chat) so producer
 # and consumer cannot drift — the same single-source-of-truth posture as the
 # cross-process topic literals in ``calfcord.topics``. The runner already
-# imports private_chat transitively via TOOL_REGISTRY discovery, so this adds no
-# new coupling across the (same-process) tools deployment.
+# imports private_chat (it is part of the composed TOOL_REGISTRY surface), so
+# this adds no new coupling across the (same-process) tools deployment.
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -77,8 +120,8 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
     ``CALFCORD_TOOLS_INCLUDE`` (per-tool images), so the SystemExit
     message includes the env var value to short-circuit the operator's
     "why is my registry empty" hunt. A complementary WARNING fires at
-    discovery time naming the specific typo'd entries (see
-    :func:`calfcord.tools.discovery.discover_tools`).
+    composition time naming the specific typo'd entries (see
+    :func:`calfcord.tools.deploy_filters.apply_deploy_filters`).
     """
     nodes = list(registry.values())
     if not nodes:
@@ -142,6 +185,9 @@ def main() -> None:
     )
     load_dotenv()
     _parse_args()
+    # Pin the hermes terminal/file tools to the shared workspace before the
+    # worker starts handling calls (it reads TERMINAL_CWD per call).
+    _configure_tool_workspace()
     try:
         asyncio.run(_amain())
     except KeyboardInterrupt:

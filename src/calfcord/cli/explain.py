@@ -99,8 +99,8 @@ Roster members join the *running* workspace on demand and leave when stopped:
 
   - agents   your AI teammates (calfkit-agent), one process per agent or many
              per process; each subscribes to its channels plus a private inbox.
-  - tools    the tools host (calfkit-tools): filesystem, shell, search, web,
-             todos, and the agent-to-agent private_chat tool.
+  - tools    the tools host (calfkit-tools): filesystem, terminal, code
+             execution, search, web, todo, and the agent-to-agent private_chat tool.
   - router   the receptionist (calfkit-router): decides which agent, if any,
              answers an un-@mentioned message in a watched channel. Optional.
   - mcp      MCP servers (calfkit-mcp), one process per server in mcp.json:

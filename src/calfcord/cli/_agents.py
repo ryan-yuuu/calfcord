@@ -20,7 +20,8 @@ here match exactly what ``calfkit-agent`` would run.
 
 :func:`pick_tools` defers its ``TOOL_REGISTRY`` import into the function body so
 the rest of the module (e.g. :func:`detect_agents`) stays light — importing the
-registry eagerly walks every builtin tool module.
+registry eagerly composes the tool surface (importing the vendored
+``calfkit-tools`` nodes).
 """
 
 from __future__ import annotations
@@ -52,10 +53,14 @@ logger = logging.getLogger(__name__)
 STARTER_AGENT_NAME = "assistant"
 DEFAULT_DESCRIPTION = "General-purpose AI teammate — answers questions and helps with tasks."
 
-# Tools that grant shell / filesystem-write reach into the ``calfkit-tools``
-# launch directory. Selecting any of them drives the one-line security caution,
-# because anyone who can @mention the agent can then drive them.
-_DANGEROUS_TOOLS = frozenset({"shell", "write_file", "edit_file"})
+# Tools that grant code-execution or filesystem-write reach into the
+# ``calfkit-tools`` host. Selecting any of them drives the one-line security
+# caution, because anyone who can @mention the agent can then drive them.
+# ``terminal`` and ``execute_code`` run arbitrary code on the host (see
+# docs/adr/0005); ``write_file``/``patch`` mutate the shared workspace.
+_DANGEROUS_TOOLS = frozenset(
+    {"terminal", "process", "execute_code", "write_file", "patch"}
+)
 
 # Permitted characters for an agent-name *stem*. The on-disk identifier must
 # satisfy ``AgentDefinition.agent_id`` (``[a-z0-9_-]{1,32}``); we slugify toward
@@ -306,9 +311,9 @@ def pick_tools(
 
     if _DANGEROUS_TOOLS.intersection(selected):
         print(
-            "note: these tools include shell + file write access in the calfkit-tools "
-            "launch dir, drivable by anyone who can @mention this agent — keep the bot "
-            "off public Discord (docs/security.md §3.4)."
+            "note: these tools include code execution + file write access in the "
+            "calfkit-tools launch dir, drivable by anyone who can @mention this agent "
+            "— keep the bot off public Discord (docs/security.md §3.4)."
         )
 
     return selected

@@ -1,9 +1,12 @@
 # Authoring a calfcord Tool
 
-How to add a new tool that any calfcord agent can invoke. This is the
-contributor reference for the file-drop workflow; for the architectural
-background on tools as a calfkit node type, see
-`src/calfcord/tools/__init__.py` and the calfkit docs.
+How to add or change a tool that calfcord agents can invoke. The tool
+surface is an **explicit, composed list** — there is no auto-discovery —
+so where you make a change depends on *which kind* of tool it is. This
+guide covers both kinds, then the `@agent_tool` contract every tool
+obeys. For the architectural background and the rationale behind explicit
+composition, see `src/calfcord/tools/__init__.py` and
+`docs/adr/0005-adopt-calfkit-tools-explicit-composition.md`.
 
 ## 1. Overview
 
@@ -24,33 +27,81 @@ agent process (LLM sees the string return)
 ```
 
 A tool is, concretely, **an `async` function decorated with
-`@agent_tool` from `calfkit.nodes` that returns `str`**. Tools live in
-`src/calfcord/tools/builtin/`. Drop a `.py` file there with
-a `ToolNodeDef` attribute at module scope and the next `calfkit-tools`
-boot picks it up — no edits to a central registry, no entry-point
-metadata, no second deploy. The discovery walk in
-`src/calfcord/tools/discovery.py` does the work.
+`@agent_tool` from `calfkit.nodes` that returns `str`**, wrapped into a
+`ToolNodeDef`.
 
-The canonical references are the modules under
-`src/calfcord/tools/builtin/`. Read a couple before writing
-a new one.
-
-## 2. The 3-step workflow
-
-A worked example: a `pypi_info` tool that fetches package metadata from
-PyPI's public JSON API. Useful in practice — agents can answer
-"what version is requests on?" without web scraping — and exercises
-every pattern this doc covers.
-
-### Step 1 — Write the function
+The surface is built by **composition, not discovery**. The complete
+list of tools the deployment can host is the explicit `ALL_TOOLS` tuple
+in `src/calfcord/tools/__init__.py`:
 
 ```python
-# src/calfcord/tools/builtin/pypi.py
+ALL_TOOLS: tuple[ToolNodeDef, ...] = (
+    terminal, process, read_file, write_file, patch, search_files,
+    todo, execute_code, web_search, web_extract,  # vendored (calfkit-tools)
+    web_fetch,                                     # vendored (separate subpackage)
+    private_chat_tool,                             # first-party
+)
+```
+
+Most of these are **vendored** from the `calfkit-tools` package (the
+hermes terminal / process / file / search / todo / code-execution / web
+nodes, plus an SSRF-safe `web_fetch`). Only `private_chat` is
+**first-party** — it is agent-to-agent A2A over Discord and cannot be
+vendored. `apply_deploy_filters` turns `ALL_TOOLS` into the name-keyed
+`TOOL_REGISTRY` at boot, applying the operator-facing
+`CALFCORD_TOOLS_INCLUDE` / `CALFCORD_TOOLS_ALIAS` transforms (see
+[`distributed-deployment.md`](./distributed-deployment.md)).
+
+This list is the **security boundary**: `terminal` and `execute_code`
+run arbitrary code on the tools host, so what agents can reach is a
+local, reviewable decision rather than an artifact of which package
+version happens to be installed. That is why the hermes nodes are
+imported *by name* and never spread from the package's published set,
+and why entry-point plugin discovery was deliberately rejected (§ 9).
+
+## 2. Which kind of tool are you adding?
+
+There is no single "add a tool" workflow anymore — the path forks on
+what the tool is.
+
+### 2.1 Changing a common (vendored) tool — contribute upstream
+
+The terminal, file, search, todo, code-execution, and web tools live in
+the **`calfkit-tools` package** (the `calf-ai/calfkit-peripherals`
+repo), not in calfcord. To add a new general-purpose tool to that set,
+or to change the behaviour of an existing one, **contribute it
+upstream**. Once the package publishes the node, adopt it in calfcord by:
+
+1. Bumping the `calfkit-tools` dependency (`uv add calfkit-tools@<ver>`).
+2. Importing the new node by name in `src/calfcord/tools/__init__.py`
+   and adding it to the `ALL_TOOLS` tuple.
+3. Updating the `EXPECTED_TOOLS` set in `tests/tools/test_registry.py`.
+
+That third step matters: a **drift-guard test** in `test_registry.py`
+fails CI whenever the package publishes a hermes tool that calfcord
+neither exposes in `ALL_TOOLS` nor lists in `_EXCLUDED_HERMES_NODES`. So
+a dependency bump that adds a new upstream tool forces a deliberate
+adopt-or-exclude decision — nothing reaches agents without a reviewable
+edit.
+
+### 2.2 Adding a first-party calfcord tool
+
+Some tools cannot be vendored because they need calfcord's own internals
+— `private_chat`, for instance, needs the A2A client and the Discord
+guild plumbing. Those live as modules under `src/calfcord/tools/`.
+
+The workflow is two explicit steps:
+
+**Step 1 — Write the module under `src/calfcord/tools/`** with a
+`ToolNodeDef` at module scope. A worked example, a `pypi_info` tool that
+fetches package metadata from PyPI's public JSON API:
+
+```python
+# src/calfcord/tools/pypi.py
 """``pypi_info`` — look up a package's metadata on PyPI.
 
 Thin wrapper around the public ``https://pypi.org/pypi/<name>/json``
-endpoint. No API key. The endpoint returns the package's latest release
-plus a release index; we surface the bits an LLM typically wants
+endpoint. No API key. We surface the bits an LLM typically wants
 (version, summary, project page, recent releases) and drop the
 heavyweight ``releases`` map.
 """
@@ -73,11 +124,7 @@ _client: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Lazy-init the module-global ``httpx.AsyncClient``.
-
-    Constructed on first call so import stays cheap and tests can swap
-    the singleton via ``monkeypatch.setattr(pypi, "_get_client", ...)``.
-    """
+    """Lazy-init the module-global ``httpx.AsyncClient`` (see § 8)."""
     global _client
     if _client is None:
         _client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
@@ -96,10 +143,9 @@ async def pypi_info(ctx: ToolContext, package_name: str) -> str:
             ``"pydantic-ai"``). Case-insensitive; PyPI normalizes.
 
     Returns:
-        A short markdown summary with the latest version, summary,
-        homepage, and the last few releases. On a missing package
-        (HTTP 404) or network failure, an ``"error: ..."`` string the
-        calling LLM can adapt to.
+        A short markdown summary. On a missing package (HTTP 404) or
+        network failure, an ``"error: ..."`` string the calling LLM can
+        adapt to.
     """
     _ = ctx
     url = _PYPI_URL.format(package=package_name)
@@ -116,39 +162,15 @@ async def pypi_info(ctx: ToolContext, package_name: str) -> str:
             f"{package_name!r}: {resp.text[:200]}"
         )
 
-    data = resp.json()
-    info = data.get("info") or {}
+    info = (resp.json().get("info")) or {}
     name = info.get("name") or package_name
     version = info.get("version") or "(unknown)"
     summary = info.get("summary") or "(no summary)"
-    home_page = info.get("home_page") or info.get("project_url") or ""
-    releases = sorted((data.get("releases") or {}).keys(), reverse=True)
-    recent = ", ".join(releases[:_MAX_RECENT_RELEASES]) or "(none)"
+    return f"**{name}** — {version}\n\n{summary}"
 
-    lines = [
-        f"**{name}** — {version}",
-        "",
-        summary,
-        "",
-        f"Home: {home_page}" if home_page else "",
-        f"Recent releases: {recent}",
-    ]
-    return "\n".join(line for line in lines if line is not None)
-```
 
-### Step 2 — Decorate with `agent_tool`
-
-At the bottom of the same module, wrap the bare function into a
-`ToolNodeDef` by calling `agent_tool` directly. Keep the bare `async
-def` importable under its real name — tests should call it without
-going through calfkit's dispatch.
-
-```python
-# At the bottom of src/calfcord/tools/builtin/pypi.py
-
-# Call ``agent_tool`` as a function (not as the ``@agent_tool``
-# decorator form on the def) so ``pypi_info`` stays directly
-# importable for unit tests. Every builtin uses this same shape.
+# Call ``agent_tool`` as a function (not as the ``@agent_tool`` decorator
+# on the def) so ``pypi_info`` stays directly importable for unit tests.
 pypi_info_tool: ToolNodeDef = agent_tool(pypi_info)
 ```
 
@@ -156,43 +178,36 @@ The schema name the LLM sees comes from the wrapped function's
 `__name__` (so `pypi_info`, not `pypi_info_tool`). Subscribe/publish
 topics derive from the same name: `tool.pypi_info.input` and
 `tool.pypi_info.output`. The function's docstring becomes the tool's
-description in the LLM-facing tool advertisement — write the docstring
-for the LLM, not just for humans.
+description in the LLM-facing advertisement — write the docstring for
+the LLM, not just for humans.
 
-### Step 3 — Drop the file, restart, declare
+**Step 2 — Add it to `ALL_TOOLS`.** This is the step that did not exist
+under the old auto-discovery model and is mandatory now:
 
-Save the file at `src/calfcord/tools/builtin/pypi.py`. No
-edits to `tools/__init__.py`, no registry insertions, no entry points.
+```python
+# src/calfcord/tools/__init__.py
+from calfcord.tools.pypi import pypi_info_tool
 
-Restart `calfkit-tools`. The discovery loader walks the package at
-import time and logs each registration:
-
-```
-INFO calfcord.tools.discovery: registered builtin
-     tool=pypi_info from=calfcord.tools.builtin.pypi:pypi_info_tool
-```
-
-An agent opts into the tool either by listing its name in the agent's
-`.md` frontmatter `tools:` array — see `agents/agent.template.md` — or
-interactively via `calfcord agent tools <name>` (which writes the same
-list back to the `.md`):
-
-```yaml
----
-name: librarian
-display_name: Librarian
-description: Looks up Python packages and library docs.
-tools:
-  - pypi_info
-  - web_fetch
----
-You are the librarian. When users ask about a Python package, call
-`pypi_info` first; follow up with `web_fetch` on the home page if you
-need more detail.
+ALL_TOOLS: tuple[ToolNodeDef, ...] = (
+    terminal, process, read_file, write_file, patch, search_files,
+    todo, execute_code, web_search, web_extract,
+    web_fetch,
+    private_chat_tool,
+    pypi_info_tool,   # ← your new first-party tool
+)
 ```
 
-Agent boot resolves each name against `TOOL_REGISTRY` (populated by
-discovery). Unknown names fail fast with a "known tools: ..." error.
+Restart `calfkit-tools` (`calfcord tools stop && calfcord tools start`,
+or `uv run calfkit-tools` in dev). The runner logs each registration:
+
+```
+INFO calfcord.tools: registered tool=pypi_info
+```
+
+Agents opt into the tool by listing its name in the agent's `.md`
+frontmatter `tools:` array (or via `calfcord agent tools <name>`). Agent
+boot resolves each name against `TOOL_REGISTRY`; unknown names fail fast
+with a "known tools: ..." error.
 
 ## 3. The `@agent_tool` contract
 
@@ -214,9 +229,9 @@ async def name(ctx: ToolContext, **kwargs) -> str: ...
 - **The docstring is the description**. The first paragraph is what the
   LLM sees as the tool's purpose. Use the `Args:` block to document each
   argument — pydantic-ai parses it. Write for the LLM: explain *when* to
-  use the tool, not just *what* it does. Compare `private_chat`'s
-  docstring for an example of explicit "when not to use" and "writing
-  good content" guidance.
+  use the tool, not just *what* it does. `private_chat`'s docstring is
+  the canonical example of explicit "when not to use" and "writing good
+  content" guidance.
 - **The function must be `async`**. Calfkit's tool runner is
   asyncio-only; a sync function will not be dispatchable. CPU-bound
   work belongs behind `asyncio.to_thread` or a process pool.
@@ -235,23 +250,29 @@ caller needs — markdown, JSON, plain text. The LLM is a flexible reader.
 
 ### `ToolContext` access
 
-Two fields matter to tool authors:
+The fields that matter to tool authors:
 
 - **`ctx.agent_name: str | None`** — the calling agent's id, populated
-  by calfkit from the inbound `x-calf-emitter` Kafka header. `None`
-  means dispatch was bypassed; that's an infra bug (see below).
-  `private_chat` uses this to look up the caller in the phonebook.
+  by calfkit from the inbound `x-calf-emitter` Kafka header. It is
+  unspoofable (the LLM cannot set it). `None` means dispatch was
+  bypassed; that's an infra bug. `private_chat` uses it to look up the
+  caller in the phonebook, and the vendored stateful tools use it to key
+  per-agent state (§ 5).
 - **`ctx.deps: dict[str, Any]`** — the per-call deps the bridge
   populates on every publish (a bare dict; read keys as
   `ctx.deps["discord"]`). The two it always sets are `"discord"` (the
   originating `WireMessage` dict) and `"phonebook"` (the canonical
-  roster of registered agents); memory-enabled deployments also get
-  `"memory_prompt"`, and `private_chat` forwards `"caller_agent_id"` on
-  A2A hops. Most tools don't need any of these; `private_chat` is the
-  only builtin that does.
-
-`ctx.correlation_id: str` is also available — useful in error
-log lines so operators can grep across the Kafka audit trail.
+  roster of registered agents); memory-enabled deployments also seed a
+  memory-prompt template, and `private_chat` forwards `"caller_agent_id"`
+  on A2A hops. Most tools don't need any of these; `private_chat` is the
+  only first-party tool that does.
+- **`ctx.resources: dict[str, Any]`** — node- and worker-scoped
+  lifecycle resources (calfkit 0.6.0+). This is how `private_chat`
+  reaches its Discord connection and the process-wide calfkit `Client`
+  without module globals (§ 8).
+- **`ctx.correlation_id: str`** — the Kafka audit-trail id (it mirrors
+  `run_id`). Put it in error log lines so operators can grep across the
+  trail.
 
 ## 4. Error handling convention
 
@@ -270,25 +291,13 @@ if package_name.startswith("-"):
     return f"error: package_name {package_name!r} is not a valid PyPI distribution name"
 ```
 
-The `"error: "` prefix is the convention every builtin tool uses (see
-`tools/builtin/_observation.py` for the constant and rationale). When
-your tool wraps an openhands `Observation`, use the shared helper
-`flatten_observation_text(obs)` from `tools/builtin/_observation.py`
-— it inspects `obs.is_error` and applies the prefix automatically:
-
-```python
-from calfcord.tools.builtin._observation import flatten_observation_text
-
-obs = _get_executor()(action)
-return flatten_observation_text(obs)
-```
+The `"error: "` prefix is the convention every tool uses.
 
 ### Infrastructure bugs
 
 Missing required env var, malformed deps from the bridge, calfkit
-dispatch bypassed, the tool was invoked without a setup phase running
-— anything an operator (not the LLM) needs to see. **Raise
-`RuntimeError` with full context**:
+dispatch bypassed, a required resource not built — anything an operator
+(not the LLM) needs to see. **Raise `RuntimeError` with full context**:
 
 ```python
 if api_key is None:
@@ -301,9 +310,9 @@ if api_key is None:
 `private_chat.py` is the canonical reference: its `_raise_infra` helper
 logs caller / target / correlation_id at ERROR level and raises
 `RuntimeError` with the chained cause. Funneling every infra-bug path
-through a single helper keeps operator triage uniform — read
-`src/calfcord/tools/builtin/private_chat.py` lines around
-the `_raise_infra` definition and copy the shape.
+through a single helper keeps operator triage uniform — read the
+`_raise_infra` definition in `src/calfcord/tools/private_chat.py` and
+copy the shape.
 
 The boundary rule: if a competent human operator could fix the
 condition by editing config / re-deploying / restoring a service, it's
@@ -312,42 +321,46 @@ re-issuing the call with different arguments, it's recoverable and you
 return `"error: ..."`. When in doubt, prefer to raise — a noisy
 `RuntimeError` is easier to triage than a silent LLM loop.
 
-## 5. Discovery rules
+## 5. Multi-tenancy: per-agent state isolation
 
-The auto-loader at `src/calfcord/tools/discovery.py`
-enforces these rules at import time:
+The `calfkit-tools` process is shared by every agent, so any tool that
+holds **per-call session state** must key it by the calling agent so one
+agent cannot read or disturb another's.
 
-- **Drop a `.py` file in `tools/builtin/`.** No edits to
-  `tools/__init__.py`, no entries in a manifest, no decorator-side
-  registration call. The loader walks the package with `pkgutil.iter_modules`
-  on every boot.
-- **Modules whose name starts with `_` are skipped.** Pytest-style
-  convention. Use this for shared helpers — `_observation.py` holds
-  `flatten_observation_text` and is not scanned for tools. Keep
-  helper-only modules underscore-prefixed so a future contributor
-  doesn't see them in the registry and assume they're tools.
-- **Every module-level attribute that is a `ToolNodeDef` is
-  registered.** The registry key is `value.tool_schema.name` — which
-  is the wrapped function's `__name__` because `agent_tool` derives it
-  there. So `pypi_info_tool: ToolNodeDef = agent_tool(pypi_info)`
-  registers under the name `pypi_info`. The attribute name
-  (`pypi_info_tool`) is irrelevant to discovery; pick a convention and
-  stick with it (existing builtins use `<name>_tool`).
-- **A single module may export multiple tools.** `fs.py` does this for
-  `read_file`, `write_file`, and `edit_file` — they share a lazy
-  executor singleton, so co-locating them is the right shape. Each
-  gets its own `<name>_tool: ToolNodeDef = agent_tool(<name>)` line.
-- **Re-exports are deduped by `id()`.** If module B does `from .a
-  import foo_tool`, the loader sees the same `ToolNodeDef` instance
-  twice and registers it once. You do not need to guard against this.
-- **Name collisions raise `ValueError` at boot.** Two distinct
-  `ToolNodeDef` instances advertising the same schema name is a hard
-  failure with both `module:attribute` paths in the message. Pick a
-  unique function name; alphabetical module + attribute ordering
-  determines which side of the collision logs as "existing".
-- **`ImportError` in a tool module aborts boot.** A broken tool module
-  is a hard config error, not a condition to skip — see the discovery
-  docstring for the rationale. Fix the import, restart.
+The vendored stateful nodes (`terminal`, `process`, the in-flight file
+edits, `execute_code`, `todo`) already do this. They derive a session
+key:
+
+```python
+session_key = f"{agent_name}:{deps.get('session_id', 'default')}"
+```
+
+where `agent_name` comes from `ctx.agent_name` (the unspoofable
+`x-calf-emitter` header). A call with no `agent_name` **fails closed** —
+the node raises rather than merging the caller into a shared bucket. So
+each agent gets its own shell session, working directory,
+files-in-flight, and todo list out of the box, with no cross-agent leak.
+This is verified end-to-end in `tests/tools/test_multitenancy.py`
+against the *composed registry* node, so a wiring change that dropped
+isolation fails CI.
+
+Scope is **agent-lifetime** by default: `session_id` is left unset
+(calfcord wires no `deps["session_id"]`), so an agent's tool state
+persists across all of its turns and resets only on a tools-process
+restart. Finer per-conversation scope (one session per Discord thread,
+say) is a documented future option — it would wire a thread/channel id
+into `deps["session_id"]` — and is not enabled today.
+
+If you write a first-party tool that holds session state, follow the
+same pattern: read `ctx.agent_name`, fail closed when it is `None`, and
+key your state by the session key. A purely stateless tool (like
+`pypi_info`) needs none of this.
+
+A practical consequence covered in [`security.md`](./security.md) § 1.1:
+because this state is in-memory, a stateful tool is correct at **one
+tools-process replica**. Pin stateful tools to a single host with
+`CALFCORD_TOOLS_INCLUDE` rather than running two replicas on the same
+`tool.<name>.input` topic.
 
 ## 6. Security model
 
@@ -356,38 +369,37 @@ host access.** No per-tool sandbox, no syscall filter, no per-call
 permission grant. Treat the `calfkit-tools` process as a trusted
 collaborator with the same blast radius as Claude Code running on a
 laptop — it can read every file the process user can read, run every
-binary on `$PATH`, open every socket. The shipped builtins
-(`shell`, `read_file`, `write_file`, `edit_file`) lean directly into
-this; new tools inherit it whether they want to or not.
+binary on `$PATH`, open every socket. The vendored `terminal` and
+`execute_code` tools lean directly into this — `terminal` runs arbitrary
+shell commands and `execute_code` runs arbitrary Python — and new tools
+inherit the same trust whether they want it or not.
 
-The bridge's "trusted shared workspace" model (documented in the
-README) is the org-level disposition. Your tool's responsibility within
-that model is the call-level disposition:
+The org-level "trusted shared workspace" disposition is documented in
+[`security.md`](./security.md). Your tool's responsibility within that
+model is the call-level disposition:
 
 - **Validate every LLM-supplied argument before using it.** The LLM is
   an untrusted string source. Type annotations give you JSON-encoded
   shape; they give you nothing about content. Treat every `str`
-  argument as if it could be a prompt-injection payload or an attacker-
-  crafted path.
+  argument as if it could be a prompt-injection payload or an
+  attacker-crafted path.
 - **Never pass an LLM argument directly to `subprocess.run` with
   `shell=True`.** Even with `shell=False`, validate the argv. The
-  shipped `shell` tool exists precisely so that no other tool needs
-  to invent its own subprocess pipeline — if you find yourself
-  reaching for `subprocess`, ask first whether the workflow belongs as
-  a shell command the LLM composes.
+  `terminal` and `execute_code` tools exist precisely so that no other
+  tool needs to invent its own subprocess/eval pipeline — if you find
+  yourself reaching for `subprocess`, ask first whether the workflow
+  belongs as a command the LLM composes through `terminal`.
 - **Validate URLs before fetching.** Reject `file://` / `gopher://` /
   unknown schemes if your tool only intends to fetch HTTP. Validate
   hostnames if your tool only intends to talk to a specific upstream.
-  PyPI's API (the example above) is safe because the URL template is
-  fixed and only the path segment is templated — the `package_name`
-  argument cannot redirect the request to a different host.
-- **Validate filesystem paths.** Absolute-path arguments are part of
-  the trusted-workspace contract for the `fs` tools, but if your tool
-  only operates on a fixed subdirectory, reject paths that escape it
-  via `..` or absolute prefixes. `_resolve_path` in
-  `src/calfcord/tools/builtin/fs.py` shows the v1 baseline
-  (no escape protection — by design); a more restrictive tool should
-  do better.
+  The `pypi_info` example above is safe because the URL template is
+  fixed and only the path segment is templated — `package_name` cannot
+  redirect the request to a different host.
+- **Validate filesystem paths.** If your tool only operates on a fixed
+  subdirectory, reject paths that escape it via `..` or absolute
+  prefixes. (The vendored file tools intentionally do not bound the
+  workspace — that's the trusted-workspace contract; a more restrictive
+  first-party tool should do better.)
 - **Validate SQL / shell / templated strings.** Anything that's
   forwarded into a downstream interpreter needs the same hygiene you'd
   apply on a public web endpoint.
@@ -401,33 +413,32 @@ annotation says otherwise.
 
 ## 7. Testing pattern
 
-Tests live next to the source: a tool at
-`src/calfcord/tools/builtin/pypi.py` gets tests at
-`tests/tools/builtin/test_pypi.py`. Two canonical references:
+Tests live under `tests/tools/` — one module per tool, e.g. a tool at
+`src/calfcord/tools/pypi.py` gets tests at `tests/tools/test_pypi.py`.
+Canonical references already in the tree:
 
-- **`tests/tools/builtin/test_fs.py`** — exercises the real
-  `FileEditorExecutor` against `tmp_path`. No mocking. Use this shape
-  when your tool wraps an executor that's cheap to construct against a
-  temp dir.
-- **`tests/tools/builtin/test_web.py`** — `monkeypatch.setattr` to
-  replace the lazy-init singleton with a `MagicMock`. Use this shape
-  when your tool talks to the network or to an upstream that's
-  expensive / non-deterministic to instantiate.
+- **`tests/tools/test_private_chat.py`** — exercises the first-party
+  `private_chat` tool by calling its bare async function with a
+  hand-built `ToolContext`, mocking the Discord/A2A resources. Use this
+  shape when your tool reads `ctx` fields or resources.
+- **`tests/tools/test_multitenancy.py`** — drives the *composed registry*
+  node's tool body to prove per-agent isolation. Use this shape when
+  your tool holds session state (§ 5).
+- **`tests/tools/test_registry.py`** — the surface drift-guard. Update
+  its `EXPECTED_TOOLS` set when you add or drop a tool.
 
-Build a `ToolContext` with a minimal helper at the top of every test
-module (the builtin tests duplicate this rather than importing — the
-helper is three lines and the duplication keeps each test file
-self-contained):
+Build a `ToolContext` with a minimal helper at the top of the test
+module:
 
 ```python
-# tests/tools/builtin/test_pypi.py
+# tests/tools/test_pypi.py
 from calfkit.models import ToolContext
 
 
 def _ctx(agent: str = "alice") -> ToolContext:
     return ToolContext(
         deps={},
-        run_id="c",  # exposed to the tool as ctx.correlation_id
+        run_id="c",        # exposed to the tool as ctx.correlation_id
         agent_name=agent,
     )
 ```
@@ -435,68 +446,49 @@ def _ctx(agent: str = "alice") -> ToolContext:
 For the `pypi_info` example, mock the lazy client singleton:
 
 ```python
-# tests/tools/builtin/test_pypi.py
+# tests/tools/test_pypi.py
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
-from calfcord.tools.builtin import pypi
+from calfcord.tools import pypi
 
 
 @pytest.fixture(autouse=True)
-def _reset_singleton() -> None:
+def _reset_singleton():
     pypi._client = None
     yield
     pypi._client = None
 
 
 async def test_returns_summary_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = MagicMock()
     resp = MagicMock(status_code=200)
     resp.json.return_value = {
         "info": {"name": "requests", "version": "2.32.0", "summary": "HTTP for humans."},
-        "releases": {"2.32.0": [], "2.31.0": [], "2.30.0": []},
     }
 
     async def fake_get(url: str) -> MagicMock:
         return resp
 
+    fake = MagicMock()
     fake.get = fake_get
     monkeypatch.setattr(pypi, "_get_client", lambda: fake)
 
     result = await pypi.pypi_info(_ctx(), "requests")
-    assert "requests" in result
-    assert "2.32.0" in result
+    assert "requests" in result and "2.32.0" in result
 
 
 async def test_404_returns_recoverable_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = MagicMock()
-
     async def fake_get(url: str) -> MagicMock:
         return MagicMock(status_code=404)
 
+    fake = MagicMock()
     fake.get = fake_get
     monkeypatch.setattr(pypi, "_get_client", lambda: fake)
 
     result = await pypi.pypi_info(_ctx(), "definitely-not-a-real-package")
     assert result.startswith("error: ")
-
-
-async def test_network_failure_returns_recoverable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = MagicMock()
-
-    async def fake_get(url: str) -> None:
-        raise httpx.ConnectError("dns lookup failed")
-
-    fake.get = fake_get
-    monkeypatch.setattr(pypi, "_get_client", lambda: fake)
-
-    result = await pypi.pypi_info(_ctx(), "requests")
-    assert result.startswith("error: ")
-    assert "dns lookup failed" in result
 ```
 
 Three notes:
@@ -510,12 +502,18 @@ Three notes:
   before and after each test keeps cross-test bleed-through from
   silently sharing a `MagicMock`.
 
-## 8. Lazy-init pattern for heavy resources
+## 8. Heavy resources: lazy-init and lifecycle brackets
 
-Don't construct HTTP clients, DB pools, subprocess sessions, or any
-other heavyweight resource at module import time. Use a module-global
-`_get_thing()` helper that idempotently constructs the singleton on
-first call:
+Don't construct HTTP clients, DB pools, subprocess sessions, or other
+heavyweight resources at module import time. Agent processes import the
+tool module solely for the `ToolNodeDef` schema and never run the body,
+so importing must construct nothing. There are two patterns.
+
+### Module-global lazy-init (simple, no teardown)
+
+For a resource with no meaningful teardown (an `httpx` client, say), use
+a module-global `_get_thing()` helper that idempotently constructs the
+singleton on first call:
 
 ```python
 _client: httpx.AsyncClient | None = None
@@ -527,42 +525,40 @@ def _get_client() -> httpx.AsyncClient:
     if _client is None:
         _client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
     return _client
-
-
-async def pypi_info(ctx: ToolContext, package_name: str) -> str:
-    resp = await _get_client().get(...)
-    ...
 ```
 
-Three reasons this pattern matters:
+This keeps import cheap, lets tests substitute via
+`monkeypatch.setattr(pypi, "_get_client", lambda: fake)`, and surfaces
+setup errors at the tool's first call (in that call's log line) rather
+than at boot.
 
-1. **Import stays cheap.** Tool discovery imports every module in
-   `tools/builtin/` at boot. A `boto3.client("s3")` at import time
-   would block boot on network for every tool that touches S3, even
-   for agents that don't declare the tool. With lazy-init, the
-   construction cost only happens in processes that actually invoke
-   the tool.
-2. **Tests can substitute via `monkeypatch.setattr`.** The pattern
-   `monkeypatch.setattr(pypi, "_get_client", lambda: fake)` works
-   because the consumer reads the function name through the module —
-   if the singleton were created at import, tests would have to patch
-   the cached instance plus every callsite that captured it. See
-   `tests/tools/builtin/test_web.py` for the canonical shape.
-3. **Resource setup errors surface at the tool's first call** — where
-   the operator sees them in the log line for that invocation — rather
-   than at process boot, where they break unrelated agents.
+### Node-scoped `@resource` brackets (managed lifecycle)
 
-`tools/builtin/fs.py`, `shell.py`, and `web.py` all use this pattern.
-Copy the shape exactly.
+For a resource that must be opened *and closed* — a Discord connection,
+a connection pool — use calfkit's node-scoped `@resource` lifecycle
+bracket instead. `private_chat` does this: `_a2a_resource` opens its
+Discord connection at worker startup **only when the node is hosted**
+and closes it at drain, and the tool body reaches it via `ctx.resources`
+rather than a module global. This is the right pattern when the resource
+has a lifecycle the worker should own; read `_a2a_resource` and
+`_resources_from_ctx` in `src/calfcord/tools/private_chat.py` for the
+shape.
 
-## 9. Future — third-party plugins (deferred)
+## 9. Why not entry-point / third-party plugin discovery?
 
-Today, calfcord only auto-discovers tools that live inside the repo at
-`src/calfcord/tools/builtin/`. There is no entry-point
-loading, no `[project.entry-points."calfcord.tools"]` discovery, no
-support for pip-installable third-party tool packages. If you want to
-ship a closed-source or otherwise externally-distributed tool without
-forking calfcord, file an issue describing the use case. The discovery
-loader is small (see `src/calfcord/tools/discovery.py`)
-and entry-point loading is an additive change — we just haven't
-needed it yet.
+calfcord deliberately does **not** support `importlib.metadata`
+entry-point loading or `[project.entry-points."calfcord.tools"]`
+discovery, and it does not walk a directory looking for tool modules.
+This is a security decision, not a missing feature: the tool surface is
+the security boundary (§ 1), and entry-point discovery would let merely
+*installing* a package arm a tool that runs arbitrary code on the tools
+host. The surface must stay an explicit, code-reviewed list.
+
+If you want to ship a closed-source or externally-distributed tool
+without forking calfcord, the supported path is to contribute it to the
+`calfkit-tools` package (§ 2.1) so it goes through the same explicit
+adoption and drift-guard review as every other vendored tool. If that
+doesn't fit your use case, file an issue describing it — but note that
+any solution will preserve the explicit-allowlist property; see
+`docs/adr/0005-adopt-calfkit-tools-explicit-composition.md` for the full
+rationale.

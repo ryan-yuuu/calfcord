@@ -27,9 +27,9 @@ running underneath.
   `calfcord router edit` (which sets `CALFKIT_ROUTER_PROVIDER` /
   `CALFKIT_ROUTER_MODEL`), then bring it online with `calfcord router start`.
   See [`ambient-routing.md`](./ambient-routing.md).
-- **`calfkit-tools`** — runs the A2A `private_chat` tool plus the built-in
-  filesystem / shell / search / web / todo tools. Intentionally decoupled from
-  the bridge (see below).
+- **`calfkit-tools`** — runs the A2A `private_chat` tool plus the vendored
+  `calfkit-tools` nodes: terminal / process / filesystem / search / code-execution
+  / web / todo tools. Intentionally decoupled from the bridge (see below).
 - **`calfkit-mcp`** — one MCP server's toolbox. Each server in
   `mcp.json` becomes its own process (slot `mcp-<server>`) that connects to that
   external [Model Context Protocol](https://modelcontextprotocol.io) server,
@@ -334,10 +334,11 @@ src/calfcord/
 ├── router/        # ambient-channel routing agent (definition, runner,
 │                  # roster, fanout, prompt)
 ├── tools/
-│   ├── builtin/   # shipped tools — fs, search, shell, web, todos,
-│   │              # private_chat, plus _observation / workspace helpers
-│   ├── discovery.py  # auto-discovery loader (walks builtin/ at import)
-│   └── runner.py     # calfkit-tools entry point
+│   ├── __init__.py       # explicit tool surface (ALL_TOOLS) — vendored
+│   │                     # calfkit-tools nodes + first-party private_chat
+│   ├── deploy_filters.py # pure INCLUDE/ALIAS transform -> TOOL_REGISTRY
+│   ├── private_chat.py   # first-party A2A tool (not vendorable)
+│   └── runner.py         # calfkit-tools entry point
 └── mcp/           # MCP integration: selector (frontmatter grammar),
                    # agent_select (frontmatter -> per-server toolbox refs),
                    # config (mcp.json loader), runner (calfkit-mcp entry

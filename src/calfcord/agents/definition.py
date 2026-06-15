@@ -125,9 +125,9 @@ class AgentDefinition(BaseModel):
         - ``tools: [a, b]`` — agent gets exactly those tools.
 
     Security note: the "all by default" behaviour means a new
-    ``agents/<name>.md`` ships with ``shell`` / ``write_file`` /
-    ``edit_file`` access to the workspace bind-mounted into the
-    ``calfkit-tools`` container unless the operator narrows the list
+    ``agents/<name>.md`` ships with ``terminal`` / ``execute_code`` /
+    ``write_file`` / ``patch`` access to the workspace bind-mounted into
+    the ``calfkit-tools`` container unless the operator narrows the list
     explicitly. If you need a restricted-tools agent, add the
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
     model.
@@ -245,7 +245,7 @@ class AgentDefinition(BaseModel):
         gate for every read path: the agent process parses each ``.md``
         through here before booting.
 
-        Bare names (anything not starting with ``mcp/`` — ``shell``,
+        Bare names (anything not starting with ``mcp/`` — ``terminal``,
         ``calendar``, …) pass through **untouched**. Whether a bare name
         actually resolves to a registered builtin is checked later, by
         :meth:`AgentFactory._resolve_tools` against the factory's tool registry

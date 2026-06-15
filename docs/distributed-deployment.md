@@ -23,7 +23,7 @@ What *does* travel — the contract every process agrees on regardless of
 which box it runs on — is three things:
 
 - **The Kafka wire.** Topic names are derived from agent and tool names
-  (`tool.shell.input`, `agent.scribe.in`, …), so any process on any host
+  (`tool.terminal.input`, `agent.scribe.in`, …), so any process on any host
   finds its peers by dialing the same broker. This is the seam.
 - **`.env`.** The shared `CALF_HOST_URL` (broker address) plus the
   Discord credentials. Identical on every host except `CALF_HOST_URL`,
@@ -158,16 +158,16 @@ to one box, mounting workspaces, and securing the broker.
 ## 1. Why split
 
 Tools are location-transparent over Kafka. An agent declaring
-`tools: [shell]` can't tell whether the `calfkit-tools` process
-answering on `tool.shell.input` is on the same host or behind a
+`tools: [terminal]` can't tell whether the `calfkit-tools` process
+answering on `tool.terminal.input` is on the same host or behind a
 Tailscale exit node — calfkit's RPC layer abstracts the wire and
 calfcord inherits the contract.
 
-The killer use case is the **remote shell tool**. Run
-`calfcord-package-tools shell` on a remote dev box with that box's
+The killer use case is the **remote terminal tool**. Run
+`calfcord-package-tools terminal` on a remote dev box with that box's
 project bind-mounted at `/workspace`. Run the bridge + router + agent
-on your laptop. When the agent's LLM calls `shell("git log")`, the
-command executes against the remote box's filesystem — the LLM never
+on your laptop. When the agent's LLM runs `git log` through `terminal`,
+the command executes against the remote box's filesystem — the LLM never
 knew the difference, but the side effects landed on a different
 machine.
 
@@ -188,37 +188,37 @@ threat model that goes with running tools on multiple hosts.
 The basic shape:
 
 ```bash
-uv run calfcord-package-tools shell --tag my-shell:1.0
+uv run calfcord-package-tools terminal --tag my-terminal:1.0
 ```
 
-That writes a slim Dockerfile that filters tool discovery via the
-`CALFCORD_TOOLS_INCLUDE=shell` env var (consumed by
-`src/calfcord/tools/discovery.py`) and installs only the
-OS deps that `shell` actually needs (`tmux` for persistent sessions,
-plus the always-on `ca-certificates`). The image is materially smaller
-than `calfcord:latest`:
+That writes a slim Dockerfile that narrows the hosted tool surface via
+the `CALFCORD_TOOLS_INCLUDE=terminal` env var (applied at boot by
+`src/calfcord/tools/deploy_filters.py` over the explicit `ALL_TOOLS`
+list) and installs only the OS deps that `terminal` actually needs (none
+beyond the always-on `ca-certificates` + `git` — the hermes terminal
+uses bash + a PTY, so no `tmux`). The image is materially smaller than
+`calfcord:latest`:
 
 ```bash
-docker image inspect my-shell:1.0 --format '{{.Size}}'
+docker image inspect my-terminal:1.0 --format '{{.Size}}'
 ```
 
 Verify the resulting registry contains only the tools you asked for:
 
 ```bash
-docker run --rm --entrypoint /bin/sh my-shell:1.0 \
+docker run --rm --entrypoint /bin/sh my-terminal:1.0 \
   -c "python -c 'from calfcord.tools import TOOL_REGISTRY; print(sorted(TOOL_REGISTRY))'"
-# ['shell']
+# ['terminal']
 ```
 
-OS-dep slimming is per-tool: `shell` brings `tmux`; `grep` and `glob`
-bring `ripgrep`; web tools (`web_fetch`, `web_search`) bring
-`ca-certificates` (which is always on regardless of which tools you
-pick). Other builtins bring nothing extra.
+OS-dep slimming is per-tool: `search_files` brings `ripgrep`; `terminal`
+and `execute_code` need nothing beyond the always-on `ca-certificates` +
+`git` (no `tmux` anymore). Other tools bring nothing extra.
 
 Multiple tools in one image:
 
 ```bash
-uv run calfcord-package-tools shell read_file write_file edit_file \
+uv run calfcord-package-tools terminal read_file write_file patch \
   --tag my-coding-tools:1.0
 ```
 
@@ -226,7 +226,7 @@ To inspect the generated Dockerfile without building anything, pass
 `--dry-run`:
 
 ```bash
-uv run calfcord-package-tools shell --tag my-shell:1.0 --dry-run
+uv run calfcord-package-tools terminal --tag my-terminal:1.0 --dry-run
 ```
 
 NOTE: v1 does no Python-dep slimming. Every generated image installs the
@@ -237,53 +237,53 @@ Python wheel set.
 ## 3. Deploying the same tool on multiple hosts
 
 By default a tool's Kafka topic name is derived from its Python function
-name — `edit_file` always subscribes to `tool.edit_file.input`. If you
-deploy the `edit_file` worker on two hosts, both compete for messages
+name — `patch` always subscribes to `tool.patch.input`. If you
+deploy the `patch` worker on two hosts, both compete for messages
 on the same topic and the broker round-robins between them: the agent
 has no way to choose which host runs a given call.
 
 The `--rename SRC=DST` flag on `calfcord-package-tools` lets you expose
 the same Python tool body under a different schema name in the
 resulting image. The renamed tool subscribes to `tool.<DST>.input`
-instead, so two hosts can serve `edit_file` (one under its original
-name on a workstation, one renamed to `edit_file_eu` on a remote VM)
+instead, so two hosts can serve `patch` (one under its original
+name on a workstation, one renamed to `patch_eu` on a remote VM)
 and agents can call either by picking the appropriate name.
 
 ### Build the renamed image
 
 ```bash
-uv run calfcord-package-tools edit_file \
-  --rename edit_file=edit_file_eu \
-  --tag edit-file-eu:1.0
+uv run calfcord-package-tools patch \
+  --rename patch=patch_eu \
+  --tag patch-eu:1.0
 ```
 
-The positional name (`edit_file`) tells the build which Python tool
+The positional name (`patch`) tells the build which Python tool
 body to include; `--rename` renames it in the resulting image. The
 generated Dockerfile bakes two env vars:
 
-- `CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu` — the discovery loader
-  clones the `edit_file` `ToolNodeDef` under the new name with all
-  four name-bound fields rewritten (`tool_schema.name`,
+- `CALFCORD_TOOLS_ALIAS=patch=patch_eu` — `deploy_filters` (the boot-time
+  transform over `ALL_TOOLS`) clones the `patch` `ToolNodeDef` under the
+  new name with all four name-bound fields rewritten (`tool_schema.name`,
   `subscribe_topics`, `publish_topic`, `node_id`).
-- `CALFCORD_TOOLS_INCLUDE=edit_file_eu` — the filter drops the
-  original so this host subscribes ONLY to `tool.edit_file_eu.input`.
+- `CALFCORD_TOOLS_INCLUDE=patch_eu` — the filter drops the
+  original so this host subscribes ONLY to `tool.patch_eu.input`.
   Without this, the host would subscribe to BOTH topics and race
-  with the workstation on `tool.edit_file.input`.
+  with the workstation on `tool.patch.input`.
 
 The CLI translates positional names through the alias map before
-baking `CALFCORD_TOOLS_INCLUDE`, so typing `edit_file` (the on-disk
+baking `CALFCORD_TOOLS_INCLUDE`, so typing `patch` (the on-disk
 source name) produces the correct filter for the post-rename name —
 no operator math required.
 
 ### Configure the agent host
 
-For an agent to call `edit_file_eu`, that name must exist in the
+For an agent to call `patch_eu`, that name must exist in the
 agent host's `TOOL_REGISTRY`. Set the same alias env on the agent
 host:
 
 ```env
 # .env on the agent host
-CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu
+CALFCORD_TOOLS_ALIAS=patch=patch_eu
 ```
 
 The agent host doesn't have an include filter, so both names land in
@@ -294,12 +294,12 @@ frontmatter:
 ---
 name: scribe
 ...
-tools: [edit_file, edit_file_eu, shell]
+tools: [patch, patch_eu, terminal]
 ---
 ```
 
-The LLM picks `edit_file` to operate on workstation files; it picks
-`edit_file_eu` for the EU VM. Routing happens at the broker — the
+The LLM picks `patch` to operate on workstation files; it picks
+`patch_eu` for the EU VM. Routing happens at the broker — the
 agent's process publishes to `tool.<name>.input` and the matching
 worker (whichever host subscribed to that topic) services the call.
 
@@ -308,15 +308,15 @@ worker (whichever host subscribed to that topic) services the call.
 - **Tool descriptions match between original and clone.** The LLM
   differentiates by name suffix and by whatever routing instructions
   you write into the calling agent's system prompt
-  (e.g. "when the user asks about EU files, prefer `edit_file_eu`").
+  (e.g. "when the user asks about EU files, prefer `patch_eu`").
   An operator-controllable description override is a clean follow-on
   if real usage shows this needs more signal.
 - **One alias per source, one source per target.** The parser
   enforces this; multi-region from a single image isn't supported
   yet.
-- **No transitive chains.** `edit_file=tmp,tmp=edit_file_eu` does not
+- **No transitive chains.** `patch=tmp,tmp=patch_eu` does not
   chase the chain — only `tmp` would be registered as a clone of
-  `edit_file`, not `edit_file_eu`.
+  `patch`, not `patch_eu`.
 
 ## 4. Building a per-agent image
 
@@ -372,10 +372,10 @@ server on two hosts makes them competing consumers on one dispatch topic — a
 legitimate scale-out, not the agent split-brain the duplicate-name guard
 prevents. See [`mcp-tools.md`](./mcp-tools.md) for the full MCP story.
 
-## 5. Worked example: remote shell tool
+## 5. Worked example: remote terminal tool
 
 Two hosts: **laptop** runs broker + bridge + router + agent; **builder**
-(a remote dev box) runs only the shell tool against its own project
+(a remote dev box) runs only the terminal tool against its own project
 directory.
 
 **Network prereq.** Builder needs to reach the broker. For trusted
@@ -386,7 +386,7 @@ Tailscale with hostnames `laptop` and `builder`.
 
 **Laptop side.** Set the broker to its tailnet hostname so builder can
 reach it, then open the workspace (substrate) and clock in everything
-EXCEPT the all-in-one tools — the remote box owns `shell` (see § 10 for
+EXCEPT the all-in-one tools — the remote box owns `terminal` (see § 10 for
 excluding it from a local tools process if you keep one):
 
 ```bash
@@ -408,7 +408,7 @@ router agent` — the `TANSU_ADVERTISE` override makes Tansu advertise
 
 ```bash
 docker run -d \
-  --name calfcord-shell \
+  --name calfcord-terminal \
   --restart unless-stopped \
   -e CALF_HOST_URL=laptop:9092 \
   -e DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN \
@@ -416,17 +416,17 @@ docker run -d \
   -e DISCORD_GUILD_ID=$DISCORD_GUILD_ID \
   -e CALFCORD_WORKSPACE_DIR=/workspace \
   -v /home/me/my-project:/workspace \
-  my-shell:1.0
+  my-terminal:1.0
 ```
 
 The Discord env vars are required because `calfkit-tools` boots an
 `A2AChannelResolver` for the audit channel even when no A2A tool is
 hosted (see `src/calfcord/tools/runner.py`).
 
-**Verify.** In Discord: `` @scribe please run `pwd && uname -a` via shell ``.
+**Verify.** In Discord: `` @scribe please run `pwd && uname -a` via terminal ``.
 The reply should contain builder's hostname and `/workspace` — proving
 the call landed on the remote box. If you see laptop's hostname, you
-have a duplicate `shell` consumer; see § 10.
+have a duplicate `terminal` consumer; see § 10.
 
 ## 6. Broker authentication
 
@@ -484,7 +484,7 @@ the all-in-one image. Bind-mount the project root into that path:
 ```bash
 docker run -e CALFCORD_WORKSPACE_DIR=/workspace \
            -v /home/me/my-project:/workspace \
-           my-shell:1.0
+           my-terminal:1.0
 ```
 
 Once mounted, `read_file("foo.py")` inside the container operates on
@@ -499,7 +499,7 @@ Caveats:
   tool process sees permission errors on writes. Rebuild with
   `--build-arg UID=$(id -u) GID=$(id -g)` or chown to match. macOS
   Docker Desktop handles this automatically.
-- **Read/write reaches everything under the mount.** The shell tool
+- **Read/write reaches everything under the mount.** The `terminal` tool
   can `rm -rf /workspace`. Pick the mount target deliberately.
 - **Symlinks follow.** A symlink inside the workspace that points to
   `$HOME/.ssh` will be dereferenced inside the container.
@@ -513,15 +513,15 @@ invoked:
   via `CALFKIT_TOOLS_TIMEOUT_SECONDS`). When the target agent is
   unreachable, the caller's LLM gets an `error: target 'X' did not
   reply within 60s` string and can adapt.
-- **Every other builtin tool** (`shell`, `read_file`, etc.) currently
+- **Every other tool** (`terminal`, `read_file`, etc.) currently
   has **no default per-call timeout** at the calfkit layer. If the
   tool's host is down, the calling agent's `execute` RPC blocks
   until the broker drops the connection or the operator restarts the
-  agent. Mitigation: enforce a deadline inside the tool body itself
-  (e.g. `shell`'s upstream openhands executor accepts a `timeout`
-  arg), or rely on Docker / supervisor health-restart of the calling
-  agent process. A future calfkit release may add a default
-  per-tool-call timeout; track that upstream.
+  agent. Mitigation: enforce a deadline inside the call itself where the
+  tool exposes one (the vendored `terminal` tool takes a `timeout`
+  argument the LLM can pass), or rely on Docker / supervisor
+  health-restart of the calling agent process. A future calfkit release
+  may add a default per-tool-call timeout; track that upstream.
 
 In either case, the bridge and agent processes themselves stay up —
 only the in-flight call hangs.
@@ -550,14 +550,14 @@ one.
 Almost nothing, by design.
 
 - **Agent definitions stay identical.** An agent with
-  `tools: [shell, web_fetch]` works the same whether the tools are in
+  `tools: [terminal, web_fetch]` works the same whether the tools are in
   one image, in two images on two hosts, or in the all-in-one
   `calfcord:latest`. Kafka topic names don't change.
 - **Per-tool log isolation.** A misbehaving tool can crash its own
   container without taking down the others; compose's
   `restart: unless-stopped` recovers each independently.
-- **Independent rollout.** Ship a new `shell` by redeploying only
-  the `my-shell` image — the bridge never read the tool code, so it
+- **Independent rollout.** Ship a new `terminal` by redeploying only
+  the `my-terminal` image — the bridge never read the tool code, so it
   needs no restart.
 - **No tool-authoring change.** The packaging CLIs change deployment
   topology, not the contract. `docs/authoring-tools.md`'s rules (the
@@ -567,28 +567,33 @@ Almost nothing, by design.
 ## 10. Combining with all-in-one
 
 You can run `calfcord:latest` on host A AND a per-tool image like
-`my-shell:1.0` on host B at the same time. Kafka load-balances calls to
-`tool.shell.input` between them via consumer-group semantics — but
+`my-terminal:1.0` on host B at the same time. Kafka load-balances calls to
+`tool.terminal.input` between them via consumer-group semantics — but
 because each call lands on exactly ONE of the two consumers, the
-effective behavior is "shell runs on either A or B, randomly per call".
-This is almost never what you want.
+effective behavior is "terminal runs on either A or B, randomly per call".
+This is almost never what you want — and for the stateful tools
+(`terminal`, `process`, `todo`, `execute_code`, in-flight file edits) it
+is actively wrong: their per-agent session state is in-memory on whichever
+replica served the last call, so splitting them across hosts fragments an
+agent's session (see [`security.md`](./security.md) § 1.1).
 
-To pin `shell` to the remote host:
+To pin `terminal` to the remote host:
 
 ```bash
-# On host A (the all-in-one), exclude shell from the tool registry:
-docker run -e CALFCORD_TOOLS_INCLUDE=read_file,write_file,edit_file,grep,glob,web_fetch,web_search,todo_view,todo_write,private_chat \
+# On host A (the all-in-one), exclude terminal from the tool registry:
+docker run -e CALFCORD_TOOLS_INCLUDE=process,read_file,write_file,patch,search_files,todo,execute_code,web_search,web_extract,web_fetch,private_chat \
            calfcord:latest calfkit-tools
 ```
 
-Now host A serves every tool *except* shell; host B serves shell only;
-each tool has exactly one host responsible for it. This is the
+Now host A serves every tool *except* `terminal`; host B serves `terminal`
+only; each tool has exactly one host responsible for it. This is the
 intended distributed shape.
 
 The same `CALFCORD_TOOLS_INCLUDE` env var is consumed by both the slim
 images (where it's baked into the Dockerfile's `ENV`) and the all-in-one
 image (where you set it at `docker run` time). The semantics are
-identical: filter `tools/discovery.py`'s scan down to the listed names.
+identical: `deploy_filters` narrows the explicit `ALL_TOOLS` surface down
+to the listed names.
 
 For the broader security model that goes with running tools on multiple
 hosts, see `docs/security.md` § Distributed deployments. For the

@@ -28,7 +28,7 @@ def make_parser(*, prog: str, item_kind: str, item_examples: str) -> argparse.Ar
         prog: ``calfcord-package-tools`` or ``calfcord-package-agents``.
         item_kind: ``"tool"`` or ``"agent"`` (singular, for help text).
         item_examples: Concrete example values for the ``--help`` epilog
-            (e.g. ``"shell read_file grep"`` or ``"scribe conan"``).
+            (e.g. ``"terminal read_file search_files"`` or ``"scribe conan"``).
     """
     parser = argparse.ArgumentParser(
         prog=prog,

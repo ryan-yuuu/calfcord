@@ -157,7 +157,7 @@ messages just go unanswered.
 
 ## Run the built-in tools host
 
-The filesystem, shell, search, web, and todos tools — plus the agent-to-agent `private_chat` channel — run in
+The terminal, filesystem, search, code-execution, web, and todo tools — plus the agent-to-agent `private_chat` channel — run in
 their own host. Bring it online when an agent needs them:
 
 ```bash

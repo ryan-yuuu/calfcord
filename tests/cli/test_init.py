@@ -232,16 +232,18 @@ def test_empty_tool_selection_writes_explicit_empty_list(tmp_path: Path) -> None
     assert parse_agent_md(agents_dir / "scribe.md").tools == ()
 
 
-def test_security_caution_prints_when_shell_or_write_selected(
+def test_security_caution_prints_when_dangerous_tool_selected(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     agents_dir = tmp_path / "agents"
+    # execute_code runs arbitrary code on the tools host — selecting it (even
+    # without a write tool) must trigger the caution.
     prompter = _fresh_run_prompter(
-        name="scribe", description="d", checkboxes=[["shell", "write_file"]]
+        name="scribe", description="d", checkboxes=[["execute_code", "read_file"]]
     )
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
     out = capsys.readouterr().out
-    assert "shell + file write access" in out
+    assert "code execution + file write access" in out
     assert "docs/security.md §3.4" in out
 
 

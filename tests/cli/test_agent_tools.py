@@ -131,13 +131,13 @@ def test_explicit_tools_prechecks_exactly_those(tmp_path: Path) -> None:
 
 def test_selecting_subset_writes_that_subset(tmp_path: Path) -> None:
     md_path = _seed_agent(tmp_path, "assistant", tools_line=None)
-    fake = FakePrompter(checkbox_result=["read_file", "shell"])
+    fake = FakePrompter(checkbox_result=["read_file", "terminal"])
     rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
     assert rc == 0
 
     # On-disk: an explicit list of exactly the selected tools, reloadable.
-    assert frontmatter.load(md_path).metadata["tools"] == ["read_file", "shell"]
-    assert parse_agent_md(md_path).tools == ("read_file", "shell")
+    assert frontmatter.load(md_path).metadata["tools"] == ["read_file", "terminal"]
+    assert parse_agent_md(md_path).tools == ("read_file", "terminal")
 
 
 def test_deselecting_all_writes_empty_list(tmp_path: Path) -> None:
@@ -153,14 +153,14 @@ def test_deselecting_all_writes_empty_list(tmp_path: Path) -> None:
 def test_name_omitted_picks_via_select(tmp_path: Path) -> None:
     _seed_agent(tmp_path, "alpha", tools_line="[]")
     md_beta = _seed_agent(tmp_path, "beta", tools_line="[]")
-    fake = FakePrompter(select_result="beta", checkbox_result=["shell"])
+    fake = FakePrompter(select_result="beta", checkbox_result=["terminal"])
 
     rc = agent_tools.run(fake, agents_dir=tmp_path, name=None)
     assert rc == 0
     # The picker offered both detected agents, sorted...
     assert fake.last_select_choices == [Choice("alpha", "alpha"), Choice("beta", "beta")]
     # ...and the chosen agent's file got the write.
-    assert frontmatter.load(md_beta).metadata["tools"] == ["shell"]
+    assert frontmatter.load(md_beta).metadata["tools"] == ["terminal"]
 
 
 def test_no_agents_returns_1(tmp_path: Path, capsys) -> None:
@@ -202,17 +202,17 @@ def test_mcp_entry_in_md_kept_as_prechecked_row(tmp_path: Path) -> None:
     editor cannot enumerate (no mcp.json on this host, server offline) must
     never be silently dropped by an unrelated edit."""
     agents_dir = tmp_path
-    _seed_agent(agents_dir, "legacy", tools_line="[shell, mcp/gmail]")
-    fake = FakePrompter(checkbox_result=["shell", "mcp/gmail"])
+    _seed_agent(agents_dir, "legacy", tools_line="[terminal, mcp/gmail]")
+    fake = FakePrompter(checkbox_result=["terminal", "mcp/gmail"])
     assert agent_tools.run(fake, agents_dir=agents_dir, name="legacy") == 0
 
     assert fake.last_checkbox_choices is not None
     by_value = {c.value: c for c in fake.last_checkbox_choices}
     assert by_value["mcp/gmail"].checked is True
-    assert by_value["shell"].checked is True
+    assert by_value["terminal"].checked is True
 
     # Write-through preserves the selector verbatim.
-    assert parse_agent_md(agents_dir / "legacy.md").tools == ("shell", "mcp/gmail")
+    assert parse_agent_md(agents_dir / "legacy.md").tools == ("terminal", "mcp/gmail")
 
 
 # -------------------------------------------------------------- first_line ---
@@ -235,8 +235,8 @@ def test_editor_offers_configured_mcp_server_rows(tmp_path: Path) -> None:
     (MCP is an explicit grant — never pre-checked unless already on the
     agent)."""
     agents_dir = tmp_path
-    _seed_agent(agents_dir, "helper", tools_line="[shell]")
-    fake = FakePrompter(checkbox_result=["shell"])
+    _seed_agent(agents_dir, "helper", tools_line="[terminal]")
+    fake = FakePrompter(checkbox_result=["terminal"])
     rc = agent_tools.run(
         fake,
         agents_dir=agents_dir,

@@ -92,34 +92,39 @@ model: claude-sonnet-4-5
 # builtin). See docs/mcp-tools.md.
 # ----------------------------------------------------------------------------
 
-# Available builtins (see src/calfcord/tools/builtin/ for source):
+# Available builtins (vendored from calfkit-tools, plus first-party private_chat):
 #   - private_chat   one-on-one A2A conversation with another agent
-#   - shell          run a shell command on the calfkit-tools host
+#   - terminal       run a shell command on the calfkit-tools host
+#   - process        manage background processes started by terminal
 #   - read_file      view a file's contents (with line numbers)
 #   - write_file     create or overwrite a file
-#   - edit_file      exact-string edit (replace_all optional)
-#   - grep           search file contents (ripgrep-backed)
-#   - glob           find files by name pattern
+#   - patch          targeted edit (exact-string replace or V4A patch)
+#   - search_files   search file contents or find files by name (ripgrep-backed)
+#   - todo           view or replace the agent's task list
+#   - execute_code   run Python on the calfkit-tools host
+#   - web_search     web search
+#   - web_extract    extract readable content from URLs
 #   - web_fetch      fetch a URL and convert to markdown
-#   - web_search     DuckDuckGo search
-#   - todo_view      view the agent's task list
-#   - todo_write     replace the agent's task list
+#
+# Per-agent isolation: the stateful tools (terminal, files, todo, …) key
+# their state by the calling agent's identity, so one agent's shell session,
+# working directory, and task list are invisible to another.
 #
 # Semantics of the `tools:` line:
 #   - omitted entirely  → agent gets EVERY registered builtin (but NO MCP tools;
 #                         MCP grants are always explicit). Convenient, but means a
-#                         new agent ships with shell/write_file/edit_file access
-#                         to the shared workspace — narrow the list if the agent
-#                         takes input from untrusted users.
+#                         new agent ships with terminal/write_file/execute_code
+#                         access to the shared workspace — narrow the list if the
+#                         agent takes input from untrusted users.
 #   - tools: []         → agent gets NO tools (text-only).
 #   - tools: [a, b]     → exactly those builtins (and/or mcp/... selectors), e.g.
 #                         tools: [read_file, mcp/github, mcp/docs/search]
 #
-# Filesystem/shell tools share one workspace on the calfkit-tools host
-# (CALFCORD_WORKSPACE_DIR, default state/workspace/). Every agent that
-# declares them can read/edit any file in that workspace. See
-# docs/security.md before adding shell/file tools to an agent that
-# takes input from untrusted users.
+# Filesystem/shell tools start in one shared workspace on the calfkit-tools
+# host (CALFCORD_WORKSPACE_DIR, default state/workspace/). Each agent gets its
+# own session there, but all sessions can reach the same files. See
+# docs/security.md before adding terminal/file/execute_code tools to an agent
+# that takes input from untrusted users.
 tools: []
 
 # ----------------------------------------------------------------------------

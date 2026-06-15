@@ -58,14 +58,12 @@ FROM python:3.12-slim AS runtime
 
 # OS packages the calfcord tools need at runtime. Strictly minimal — no
 # build toolchain leaks past the builder stage.
-#   tmux            — persistent shell sessions for the ``shell`` tool
-#   ripgrep         — preferred backend for the ``grep`` tool
-#   git             — agents commonly run ``git`` via the ``shell`` tool
-#   curl            — agents commonly run ``curl`` via the ``shell`` tool
-#   ca-certificates — HTTPS trust store for ``web_fetch``
+#   ripgrep         — backend for the ``search_files`` tool (falls back to grep)
+#   git             — agents commonly run ``git`` via the ``terminal`` tool
+#   curl            — agents commonly run ``curl`` via the ``terminal`` tool
+#   ca-certificates — HTTPS trust store for ``web_fetch`` / ``web_search``
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        tmux \
         ripgrep \
         git \
         curl \

@@ -59,7 +59,7 @@ def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
 
 
-def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_file, shell]") -> Path:
+def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_file, terminal]") -> Path:
     """Write a minimal valid ``agents/<name>.md`` and return its path."""
     agents_dir.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -155,8 +155,8 @@ def test_set_success_survives_unparsable_md_on_provider_reread(
 def test_set_tools_writes_exactly_those(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe", tools_line=None)
-    assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file, shell"}) == 0
-    assert parse_agent_md(md_path).tools == ("read_file", "shell")
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file, terminal"}) == 0
+    assert parse_agent_md(md_path).tools == ("read_file", "terminal")
 
 
 def test_set_provider_and_model_keys(tmp_path: Path) -> None:

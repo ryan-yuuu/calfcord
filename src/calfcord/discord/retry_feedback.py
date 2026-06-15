@@ -5,7 +5,7 @@ Two callers post LLM-generated text to Discord and both want the same
 
 * :mod:`calfcord.bridge.outbox` — channel replies, posted
   fire-and-forget via ``client.send`` on retry.
-* :mod:`calfcord.tools.builtin.private_chat` — A2A audit
+* :mod:`calfcord.tools.private_chat` — A2A audit
   projections, posted synchronously inside the caller's
   ``execute`` RPC on retry.
 

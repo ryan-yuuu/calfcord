@@ -9,8 +9,8 @@ surface it.
 Two entry points (wired in ``pyproject.toml``):
 
 * ``calfcord-package-tools`` — produces an image hosting only the named
-  tools. The image bakes ``CALFCORD_TOOLS_INCLUDE`` so the auto-discovery
-  loader skips registration of anything outside the list.
+  tools. The image bakes ``CALFCORD_TOOLS_INCLUDE`` so
+  ``apply_deploy_filters`` skips registration of anything outside the list.
 * ``calfcord-package-agents`` — produces an image hosting only the named
   agents. The Dockerfile COPYies just the selected ``agents/<name>.md``
   files; the runner already loads "whatever's in the agents dir," so no

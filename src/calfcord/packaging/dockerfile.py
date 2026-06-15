@@ -4,20 +4,21 @@ The shape mirrors the project's canonical ``Dockerfile`` exactly,
 varying these five things:
 
 1. The runtime stage's ``apt-get install`` list — narrowed by the
-   per-tool OS-dep mapping (e.g. no ``tmux`` if ``shell`` isn't
-   included, no ``ripgrep`` if neither ``grep`` nor ``glob`` is).
+   per-tool OS-dep mapping (e.g. no ``ripgrep`` if ``search_files``
+   isn't included).
 2. The builder's ``COPY agents`` line — for per-agent images, COPYs
    only the selected ``agents/<name>.md`` files rather than the whole
    directory. For per-tool images, the line is OMITTED entirely (a
    tools-only worker has no use for agent definitions).
 3. The runtime ``ENV`` block — bakes ``CALFCORD_TOOLS_INCLUDE`` for
-   per-tool images so the auto-discovery loader filters to just those
-   tools at boot. Optionally also bakes ``CALFCORD_TOOLS_ALIAS`` (per
+   per-tool images so ``apply_deploy_filters`` narrows the registry to just
+   those tools at boot. Optionally also bakes ``CALFCORD_TOOLS_ALIAS`` (per
    ``--rename`` on ``calfcord-package-tools``) so the same Python tool
    body registers under a different schema name in this image — used
-   for multi-host deployments of the same tool. Always bakes
-   ``OPENHANDS_SUPPRESS_BANNER=1`` so boot logs aren't drowned in the
-   openhands SDK ASCII banner.
+   for multi-host deployments of the same tool. Agents images also bake
+   ``OPENHANDS_SUPPRESS_BANNER=1`` (their codex provider imports the
+   openhands SDK, whose ASCII banner would otherwise drown boot logs);
+   tools images don't import openhands, so they omit it.
 4. The default ``CMD`` — ``calfkit-tools`` for tools images and
    ``calfkit-agent`` for agents images. The canonical Dockerfile
    defaults to ``calfkit-bridge`` because it's the only entry point
@@ -43,7 +44,7 @@ from collections.abc import Iterable
 # Always-on OS packages for TOOLS images. ``ca-certificates`` is needed
 # by any tool that talks HTTPS (web_fetch, web_search, and any
 # third-party tool an operator might add later). ``git`` is kept because
-# the ``shell`` tool's most common ergonomic use — agents asking for
+# the ``terminal`` tool's most common ergonomic use — agents asking for
 # ``git status`` / ``git log`` — only works if the binary is present.
 # Removing either to save image size would trade a few tens of MB for
 # "works in dev, fails in prod" surprises.
@@ -61,19 +62,24 @@ _ALWAYS_ON_AGENT_OS_DEPS: tuple[str, ...] = ("ca-certificates",)
 # OS binary, add it here AND to the canonical Dockerfile so the
 # all-in-one image keeps working.
 _TOOL_OS_DEPS: dict[str, tuple[str, ...]] = {
-    "shell": ("tmux",),
-    "grep": ("ripgrep",),
-    "glob": ("ripgrep",),
-    # web_fetch / web_search only need ca-certificates, which is
-    # always-on. Listed explicitly so the table is exhaustive.
+    # ``search_files`` is ripgrep-backed (falls back to grep, which is in
+    # the base image, but ripgrep is what its output parser expects).
+    "search_files": ("ripgrep",),
+    # The hermes terminal uses bash + a PTY (no tmux); execute_code runs
+    # Python — both rely only on base-image binaries.
+    "terminal": (),
+    "process": (),
+    "execute_code": (),
+    # web tools only need ca-certificates, which is always-on. Listed
+    # explicitly so the table is exhaustive.
     "web_fetch": (),
     "web_search": (),
-    # FS tools and the in-memory tools have no extra OS deps.
+    "web_extract": (),
+    # FS and in-memory tools have no extra OS deps.
     "read_file": (),
     "write_file": (),
-    "edit_file": (),
-    "todo_view": (),
-    "todo_write": (),
+    "patch": (),
+    "todo": (),
     "private_chat": (),
 }
 
@@ -148,10 +154,10 @@ def render_tools_dockerfile(
             any aliases are passed). Validation against ``TOOL_REGISTRY``
             is the CLI's job; this function trusts its input.
         aliases: Optional ``{src: dst}`` map baked into the image as
-            ``CALFCORD_TOOLS_ALIAS=src1=dst1,src2=dst2``. The discovery
-            loader at runtime clones each ``src`` tool's ``ToolNodeDef``
-            under the ``dst`` name with all four name-bound fields
-            rewritten. Pairs naturally with ``include_tools`` containing
+            ``CALFCORD_TOOLS_ALIAS=src1=dst1,src2=dst2``.
+            ``apply_deploy_filters`` at boot clones each ``src`` tool's
+            ``ToolNodeDef`` under the ``dst`` name with all four name-bound
+            fields rewritten. Pairs naturally with ``include_tools`` containing
             the ``dst`` names to give true rename behavior — the
             original ``src`` drops out of the filter, only the clone
             survives. Empty/``None`` produces no ``CALFCORD_TOOLS_ALIAS``
@@ -194,8 +200,8 @@ def render_tools_dockerfile(
 #
 # Tools subscribe to ``tool.<name>.input`` topics; this image's
 # ``calfkit-tools`` worker subscribes only to the listed names because
-# the ``CALFCORD_TOOLS_INCLUDE`` env var (baked below) filters the
-# auto-discovery walk in ``tools/discovery.py``.
+# the ``CALFCORD_TOOLS_INCLUDE`` env var (baked below) narrows the registry
+# composed in ``tools/__init__.py`` (via ``tools/deploy_filters.py``).
 
 
 # ── builder ──────────────────────────────────────────────────────────────────
@@ -229,17 +235,12 @@ RUN groupadd --gid ${{GID}} calfcord \\
 
 WORKDIR /app
 
-# OPENHANDS_SUPPRESS_BANNER silences the openhands SDK's ASCII boot
-# banner. The banner is operationally noise (printed on every import
-# of the openhands package, before any calfcord work begins) and
-# pollutes both compose-logs output and ad-hoc ``docker run`` sessions
-# operators use to inspect the registry. Operators who want the banner
-# can restore it with ``-e OPENHANDS_SUPPRESS_BANNER=0`` at run time —
-# Docker ``-e`` overrides image ``ENV``.
+# No openhands banner suppression: the tools image hosts only the vendored
+# calfkit-tools nodes and never imports that SDK (the agents image sets it
+# because its codex provider does). See the module docstring.
 ENV PATH=/app/.venv/bin:$PATH \\
     PYTHONUNBUFFERED=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
-    OPENHANDS_SUPPRESS_BANNER=1 \\
     CALFCORD_TOOLS_INCLUDE={include_csv}{alias_env_line}
 
 COPY --from=builder --chown=calfcord:calfcord /app /app

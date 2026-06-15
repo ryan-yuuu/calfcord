@@ -292,9 +292,9 @@ def test_update_tools_is_reloadable_via_parse_agent_md(tmp_path: Path) -> None:
     from calfcord.agents.definition import parse_agent_md
 
     md_path = _seed_md(tmp_path)
-    update_tools(md_path, ["shell"])
+    update_tools(md_path, ["terminal"])
     re_parsed = parse_agent_md(md_path)
-    assert re_parsed.tools == ("shell",)
+    assert re_parsed.tools == ("terminal",)
 
 
 def test_update_tools_empty_writes_empty_list(tmp_path: Path) -> None:

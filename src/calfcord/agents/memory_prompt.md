@@ -1,6 +1,6 @@
 # Memory
 
-You have a persistent, file-based memory at `{{MEMORY_DIR}}` that survives restarts. You manage it with your normal file tools (read_file, write_file, edit_file, glob) — there are no special memory commands, and write_file creates the directory for you. Each memory is one file holding one fact, with frontmatter:
+You have a persistent, file-based memory at `{{MEMORY_DIR}}` that survives restarts. You manage it with your normal file tools (read_file, write_file, patch, search_files) — there are no special memory commands, and write_file creates the directory for you. Each memory is one file holding one fact, with frontmatter:
 
     ---
     name: <short-kebab-case-slug>

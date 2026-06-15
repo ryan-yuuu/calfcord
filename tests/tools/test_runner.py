@@ -6,8 +6,8 @@ one A2A-specific responsibility: exposing the process-wide calfkit
 ``Client`` as a worker-scoped resource so the ``private_chat`` tool body
 can reach it via ``ctx.resources``. The Discord connection itself is no
 longer the runner's concern — it is built by ``private_chat``'s own
-node-scoped ``@resource`` bracket (see ``tests/tools/builtin/
-test_private_chat.py::TestA2AResource``), so the per-call response
+node-scoped ``@resource`` bracket (see
+``tests/tools/test_private_chat.py::TestA2AResource``), so the per-call response
 timeout and audit-channel env resolvers now live with that tool and are
 tested there.
 
@@ -18,6 +18,7 @@ those boundaries.
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,8 +26,7 @@ import pytest
 from calfkit.client import Client
 from calfkit.worker import Worker
 
-from calfcord.tools import runner
-from calfcord.tools.builtin import private_chat
+from calfcord.tools import private_chat, runner
 
 
 class TestResolveToolNodes:
@@ -123,6 +123,103 @@ class TestAmainExposesClientResource:
         # The reply topic must be the tools-private one (NOT the bridge's
         # discord.outbox) or target-agent ReturnCalls get double-projected.
         assert captured["connect_kwargs"]["reply_topic"] == runner._REPLY_TOPIC
+
+
+class TestConfigureToolWorkspace:
+    """The runner points the vendored hermes terminal backend at the shared
+    calfcord workspace by setting ``TERMINAL_CWD``. The hermes local backend
+    starts each agent session's shell in ``TERMINAL_CWD`` (falling back to the
+    process cwd), so this gives every agent a consistent, writable base dir
+    while keeping per-agent session isolation."""
+
+    def test_sets_terminal_cwd_from_workspace_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        ws = tmp_path / "ws"
+        monkeypatch.setenv("CALFCORD_WORKSPACE_DIR", str(ws))
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        resolved = runner._configure_tool_workspace()
+        assert resolved == ws.resolve()
+        assert os.environ["TERMINAL_CWD"] == str(ws.resolve())
+        assert ws.is_dir()  # created on demand
+
+    def test_expands_user_home_in_workspace_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        # ``~`` in CALFCORD_WORKSPACE_DIR must expand, not land a literal
+        # "~/..." directory next to the cwd.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CALFCORD_WORKSPACE_DIR", "~/myws")
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        resolved = runner._configure_tool_workspace()
+        assert resolved == (tmp_path / "myws").resolve()
+
+    def test_respects_operator_set_terminal_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+        monkeypatch.setenv("CALFCORD_WORKSPACE_DIR", str(tmp_path / "ws"))
+        monkeypatch.setenv("TERMINAL_CWD", str(explicit))
+        runner._configure_tool_workspace()
+        # An explicit operator value wins — not overwritten by the workspace.
+        assert os.environ["TERMINAL_CWD"] == str(explicit)
+
+    def test_defaults_workspace_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("CALFCORD_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        monkeypatch.chdir(tmp_path)
+        resolved = runner._configure_tool_workspace()
+        expected = (tmp_path / "state" / "workspace").resolve()
+        assert resolved == expected
+        assert os.environ["TERMINAL_CWD"] == str(expected)
+        assert expected.is_dir()
+
+
+class TestMainEntryPoint:
+    """``main`` is the console-script entry: configure logging, load the env,
+    pin the tool workspace, then run the worker. The Kafka/Discord boundary
+    (``_amain``) is mocked so these stay unit tests."""
+
+    def test_parse_args_returns_namespace(self) -> None:
+        assert runner._parse_args([]) is not None
+
+    def test_main_configures_workspace_before_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(runner, "load_dotenv", lambda: calls.append("dotenv"))
+        # _parse_args() with no argv would parse pytest's sys.argv — stub it.
+        monkeypatch.setattr(runner, "_parse_args", lambda: None)
+        monkeypatch.setattr(
+            runner, "_configure_tool_workspace", lambda: calls.append("workspace")
+        )
+
+        def _fake_run(coro: object) -> None:
+            coro.close()  # avoid "coroutine never awaited"
+            calls.append("run")
+
+        monkeypatch.setattr(runner.asyncio, "run", _fake_run)
+        runner.main()
+        # Workspace must be pinned before the worker runs (TERMINAL_CWD is
+        # read per call, but pinning first keeps the ordering contract clear).
+        assert calls.index("workspace") < calls.index("run")
+
+    def test_main_swallows_keyboard_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(runner, "load_dotenv", lambda: None)
+        monkeypatch.setattr(runner, "_parse_args", lambda: None)
+        monkeypatch.setattr(runner, "_configure_tool_workspace", lambda: None)
+
+        def _raise(coro: object) -> None:
+            coro.close()
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(runner.asyncio, "run", _raise)
+        runner.main()  # Ctrl-C is a clean shutdown, not a crash.
 
 
 class TestRunWorkerShutdownContract:

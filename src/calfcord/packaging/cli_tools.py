@@ -4,8 +4,8 @@ Walkthrough:
     1. Parse args. Names are positional; ``--tag`` is required.
        Optional repeatable ``--rename SRC=DST`` aliases a tool to a
        new schema name in the resulting image (multi-host deployment
-       of the same tool — e.g. ``edit_file`` running on a workstation
-       AND an EU VM, with the EU host renamed to ``edit_file_eu``).
+       of the same tool — e.g. ``terminal`` running on a workstation
+       AND an EU VM, with the EU host renamed to ``terminal_eu``).
     2. Validate the names against the live ``TOOL_REGISTRY``. Unknown
        names fail-fast with the full known list (mirrors the
        agent-factory's tool-resolution error message).
@@ -13,14 +13,14 @@ Walkthrough:
        ``DST`` must match the tool-name regex and not collide with
        another tool or another rename target.
     4. Translate positional names through the alias map. An operator
-       who typed ``edit_file --rename edit_file=edit_file_eu`` means
-       "host the edit_file tool but expose it as edit_file_eu" — the
+       who typed ``terminal --rename terminal=terminal_eu`` means
+       "host the terminal tool but expose it as terminal_eu" — the
        filter that lands in the image must be the POST-rename name,
        otherwise discovery would drop the alias clone and keep the
        original.
     5. Generate the Dockerfile via the templater. The image bakes
        ``CALFCORD_TOOLS_INCLUDE`` plus an optional
-       ``CALFCORD_TOOLS_ALIAS`` so the auto-discovery loader narrows
+       ``CALFCORD_TOOLS_ALIAS`` so ``apply_deploy_filters`` narrows
        registration to just the listed names (and clones renamed
        tools under their new identity).
     6. Write the Dockerfile to a tempdir; invoke ``docker buildx build``.
@@ -36,14 +36,6 @@ from __future__ import annotations
 
 import os
 import sys
-
-# Suppress the openhands SDK boot banner during ``--help`` and registry
-# validation. The CLI is a build-time tool, not a runtime worker —
-# operators don't care about openhands' banner here. Set BEFORE any
-# import of ``calfcord.tools`` (which transitively imports
-# the openhands SDK). Respect an explicit user override so anyone
-# wanting to see the banner can ``OPENHANDS_SUPPRESS_BANNER=0 …``.
-os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
 # Strip deploy-time runtime env vars from the operator's shell BEFORE
 # anything imports ``calfcord.tools``. The CLI validates
@@ -62,7 +54,7 @@ os.environ.pop("CALFCORD_TOOLS_INCLUDE", None)
 
 from calfcord.packaging._build import make_parser, repo_root, run_build
 from calfcord.packaging.dockerfile import render_tools_dockerfile
-from calfcord.tools.discovery import TOOL_NAME_REGEX
+from calfcord.tools.deploy_filters import TOOL_NAME_REGEX
 
 
 def _validate_tool_names(names: list[str]) -> list[str]:
@@ -73,11 +65,12 @@ def _validate_tool_names(names: list[str]) -> list[str]:
     error" code) if any name is unknown, after printing the full
     known list for forensic value.
 
-    Importing :data:`TOOL_REGISTRY` here triggers the auto-discovery
-    walk in ``tools/__init__.py``; that's fine — the CLI runs
-    short-lived so the boot cost is paid once per build invocation.
+    Importing :data:`TOOL_REGISTRY` here composes the registry in
+    ``tools/__init__.py`` (importing the vendored ``calfkit-tools``
+    nodes); that's fine — the CLI runs short-lived so the boot cost is
+    paid once per build invocation.
     """
-    # Local import keeps ``--help`` cheap (no openhands-tools / smolagents
+    # Local import keeps ``--help`` cheap (no vendored calfkit-tools node
     # imports just to display usage text).
     from calfcord.tools import TOOL_REGISTRY
 
@@ -192,12 +185,12 @@ def _check_aliases_referenced(
 
     The CLI's positional-name translation maps each include name
     through the alias map before baking ``CALFCORD_TOOLS_INCLUDE``.
-    If the operator typed ``--rename edit_file=edit_file_eu`` but
-    didn't add ``edit_file`` to the positional list, the alias bakes
+    If the operator typed ``--rename terminal=terminal_eu`` but
+    didn't add ``terminal`` to the positional list, the alias bakes
     into the image's ``CALFCORD_TOOLS_ALIAS`` env BUT the include
-    filter doesn't reference ``edit_file_eu`` (the post-rename name)
-    — discovery at boot would add the clone, then immediately drop
-    it via the filter. The image then has rename env doing nothing
+    filter doesn't reference ``terminal_eu`` (the post-rename name)
+    — ``apply_deploy_filters`` at boot would add the clone, then
+    immediately drop it via the filter. The image then has rename env doing nothing
     (visible in ``docker inspect`` as live config but inert at
     runtime) — silent dead config.
 
@@ -221,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = make_parser(
         prog="calfcord-package-tools",
         item_kind="tool",
-        item_examples="shell grep",
+        item_examples="terminal search_files",
     )
     # The ``--rename`` flag is specific to tool images — agent .md
     # files carry identity-bound fields (slash command, display name)
@@ -252,12 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     # config.
     _check_aliases_referenced(aliases, include_tools)
     # Translate the positional include list through the alias map.
-    # An operator who types ``calfcord-package-tools edit_file --rename
-    # edit_file=edit_file_eu`` means "host the edit_file tool body but
-    # expose it as edit_file_eu" — the filter env var baked into the
+    # An operator who types ``calfcord-package-tools terminal --rename
+    # terminal=terminal_eu`` means "host the terminal tool body but
+    # expose it as terminal_eu" — the filter env var baked into the
     # image must reference the POST-rename name, otherwise discovery
-    # would drop the alias clone (filter excludes ``edit_file_eu``)
-    # and keep the original (filter includes ``edit_file``) — the
+    # would drop the alias clone (filter excludes ``terminal_eu``)
+    # and keep the original (filter includes ``terminal``) — the
     # opposite of intent. The dict.get fallback preserves names that
     # weren't renamed.
     include_tools = [aliases.get(n, n) for n in include_tools]

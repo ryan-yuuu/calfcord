@@ -1,47 +1,76 @@
-"""Registry of calfkit tool nodes available to agents.
+"""The calfcord tool surface.
 
 Tools an agent declares in its ``.md`` frontmatter under ``tools:`` are
 resolved against :data:`TOOL_REGISTRY` at factory build time. The runnable
 tool node — the process that actually executes the tool's Python body —
 lives in a separate ``calfkit-tools`` deployment; the agent process only
-needs each tool's :class:`~calfkit.nodes.ToolNodeDef` for its schema (LLM
-tool advertising) and its subscribe topic (where ``Agent`` publishes a
+needs each tool's :class:`~calfkit.nodes.tool.ToolNodeDef` for its schema
+(LLM tool advertising) and its subscribe topic (where ``Agent`` publishes a
 ``Call`` when the LLM invokes the tool).
 
-Adding a new tool:
-    1. Drop a ``.py`` file in ``src/calfcord/tools/builtin/``
-       that declares an ``async def`` decorated by :func:`agent_tool` and
-       assigns the resulting :class:`ToolNodeDef` to a module-level
-       attribute (the convention is ``<name>_tool``).
-    2. Restart ``calfkit-tools``. The auto-discovery loader at
-       :func:`~calfcord.tools.discovery.discover_tools` walks
-       ``tools/builtin/`` at import time and registers every
-       :class:`ToolNodeDef` it finds — no edits to this file required.
-    3. The ``calfkit-tools`` runner picks up the same registry and hosts
-       the tool's body. The agent process imports this module solely for
-       the schema + subscribe-topic that the LLM dispatch needs.
+Composition over discovery
+--------------------------
 
-See :mod:`calfcord.tools.discovery` for the discovery rules
-(file naming, collision handling, re-export dedup) and
-``docs/authoring-tools.md`` for the contributor walkthrough.
+The surface is an **explicit list** (:data:`ALL_TOOLS`), not a filesystem
+walk. Most tools are vendored from the ``calfkit-tools`` package (hermes
+shell/files/web/todo + an SSRF-safe ``web_fetch``); ``private_chat`` is the
+one first-party tool (agent-to-agent A2A over Discord, which the vendored
+package cannot provide). The hermes nodes are imported by name rather than
+spread from ``HERMES_NODES`` on purpose: this list is the security boundary
+— tools like ``terminal`` and ``execute_code`` run arbitrary code on the
+tools host, so what agents can reach must be a reviewable, local decision,
+never an artifact of which package version happens to be installed. The
+drift-guard in ``tests/tools/test_registry.py`` fails CI if this list and
+the package's published set diverge.
+
+Deploy-time narrowing (``CALFCORD_TOOLS_INCLUDE``, per-tool images) and
+aliasing (``CALFCORD_TOOLS_ALIAS``, multi-host rename) are applied by
+:func:`~calfcord.tools.deploy_filters.apply_deploy_filters` — a pure
+transform over :data:`ALL_TOOLS`.
 """
 
 from __future__ import annotations
 
 from calfkit.nodes.tool import ToolNodeDef
+from calfkit_tools.hermes.node import (
+    execute_code,
+    patch,
+    process,
+    read_file,
+    search_files,
+    terminal,
+    todo,
+    web_extract,
+    web_search,
+    write_file,
+)
+from calfkit_tools.web_fetch.node import web_fetch
 
-# ``TOOL_REGISTRY`` must be a defined name before the builtin package
-# is imported below. Tool modules transitively import back into this
-# package (via bridge/agent code), and Python resolves the cycle by
-# binding to whatever ``TOOL_REGISTRY`` references at that point — an
-# empty dict here, mutated by ``discover_tools`` once the cycle resolves.
-TOOL_REGISTRY: dict[str, ToolNodeDef] = {}
-"""Tool name → :class:`ToolNodeDef`. Populated at import time by
-:func:`~calfcord.tools.discovery.discover_tools` walking
-``tools/builtin/``. Order of insertion is deterministic (alphabetical by
-module then by attribute name) so boot logs are reproducible."""
+from calfcord.tools.deploy_filters import apply_deploy_filters
+from calfcord.tools.private_chat import private_chat_tool
 
-from calfcord.tools import builtin as _builtin  # noqa: E402
-from calfcord.tools.discovery import discover_tools  # noqa: E402
+ALL_TOOLS: tuple[ToolNodeDef, ...] = (
+    # hermes (vendored ``calfkit-tools``) — shell + process management,
+    # files, search, todo, code execution, web search/extract.
+    terminal,
+    process,
+    read_file,
+    write_file,
+    patch,
+    search_files,
+    todo,
+    execute_code,
+    web_search,
+    web_extract,
+    # SSRF-safe URL fetch (vendored, separate ``calfkit-tools`` subpackage).
+    web_fetch,
+    # First-party: agent-to-agent private chat over Discord. Not vendorable
+    # — needs calfcord's A2A client + Discord guild plumbing.
+    private_chat_tool,
+)
+"""The complete, auditable tool surface this deployment can expose."""
 
-discover_tools(_builtin, TOOL_REGISTRY)
+TOOL_REGISTRY: dict[str, ToolNodeDef] = apply_deploy_filters(ALL_TOOLS)
+"""Tool name → :class:`ToolNodeDef`, after applying the deploy-time
+``CALFCORD_TOOLS_INCLUDE`` / ``CALFCORD_TOOLS_ALIAS`` transforms. Order
+follows :data:`ALL_TOOLS` so boot logs are reproducible."""

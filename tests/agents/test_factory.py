@@ -795,16 +795,17 @@ class TestToolsWiring:
     @pytest.mark.parametrize(
         "tool_name",
         [
-            "shell",
+            "terminal",
+            "process",
             "read_file",
             "write_file",
-            "edit_file",
-            "grep",
-            "glob",
-            "web_fetch",
+            "patch",
+            "search_files",
+            "todo",
+            "execute_code",
             "web_search",
-            "todo_view",
-            "todo_write",
+            "web_extract",
+            "web_fetch",
         ],
     )
     def test_builtin_tool_resolves_through_default_registry(self, tool_name: str) -> None:

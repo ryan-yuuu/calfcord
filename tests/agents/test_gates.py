@@ -126,7 +126,7 @@ class TestAddressedToMeGate:
     def test_accepts_slash_from_peer_agent_addressed_to_me(self) -> None:
         """A2A regression check: ``private_chat`` synthesizes a wire with
         ``kind="slash"`` and ``slash_target`` pointing at this agent (see
-        ``tools/builtin/private_chat.py``'s ``model_copy(update=...)`` block); the
+        ``tools/private_chat.py``'s ``model_copy(update=...)`` block); the
         author remains the original Discord author (which may be a peer
         agent's persona). This path must continue to be accepted — A2A
         does not depend on the removed ambient branch."""

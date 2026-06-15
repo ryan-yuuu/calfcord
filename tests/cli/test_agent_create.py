@@ -376,16 +376,16 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
     MCP is an explicit grant that never rides the all-builtins default."""
     from calfcord.cli import _agents
 
-    prompter = FakePrompter(checkboxes=[["shell"]])
+    prompter = FakePrompter(checkboxes=[["terminal"]])
     selected = _agents.pick_tools(
         prompter,
         "helper",
         mcp_servers_fn=lambda: ["github"],
         live_tools_fn=lambda: {"github": ["search"]},
     )
-    assert selected == ["shell"]
+    assert selected == ["terminal"]
     by_value = {c.value: c for c in prompter.last_checkbox_choices}
     assert by_value["mcp/github"].checked is False
     assert by_value["mcp/github/search"].checked is False
     # Builtins are still the pre-checked default.
-    assert by_value["shell"].checked is True
+    assert by_value["terminal"].checked is True

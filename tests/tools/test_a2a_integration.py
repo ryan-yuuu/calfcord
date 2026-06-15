@@ -1,6 +1,6 @@
 """Integration tests linking the agent-side wiring with the tool-side runner.
 
-The unit tests in :mod:`tests.tools.builtin.test_private_chat` exercise the tool
+The unit tests in :mod:`tests.tools.test_private_chat` exercise the tool
 body in isolation, and :mod:`tests.agents.test_factory` exercises the
 factory's tool-resolution path against a fake registry. These tests
 connect the two: an agent declared with ``tools: [private_chat]`` must
@@ -31,7 +31,7 @@ from calfcord.bridge.pending_wires import PendingWires
 from calfcord.bridge.registry import AgentRegistry
 from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.tools import TOOL_REGISTRY
-from calfcord.tools.builtin.private_chat import private_chat_tool
+from calfcord.tools.private_chat import private_chat_tool
 
 
 def _definition(tools: tuple[str, ...]) -> AgentDefinition:
@@ -128,7 +128,7 @@ class TestWireConventionRoundTrip:
         self,
     ) -> None:
         from calfcord.agents.phonebook import phonebook_from_deps
-        from calfcord.tools.builtin import private_chat as pc
+        from calfcord.tools import private_chat as pc
 
         # Stub calfkit Client to capture the deps the bridge writes —
         # no Kafka, no real publish. The slash ingress publishes

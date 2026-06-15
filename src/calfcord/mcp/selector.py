@@ -4,8 +4,8 @@ Background
 ----------
 
 Agents declare their tools in ``agents/*.md`` frontmatter under a single
-``tools:`` list. Builtin tools appear there by bare name (``shell``,
-``web``); MCP-server tools appear in the *same* list using a ``mcp/``
+``tools:`` list. Builtin tools appear there by bare name (``terminal``,
+``web_search``); MCP-server tools appear in the *same* list using a ``mcp/``
 selector syntax so an author never has to learn a second declaration
 mechanism:
 
@@ -33,7 +33,7 @@ Design choices
 
 * **Regexes redeclared, not imported** — the character-class rules below
   intentionally duplicate the spirit of ``TOOL_NAME_REGEX`` in
-  :mod:`calfcord.tools.discovery` rather than importing it. Importing
+  :mod:`calfcord.tools.deploy_filters` rather than importing it. Importing
   from the ``tools`` package would create a coupling (and a potential
   import cycle, since tool modules import back through bridge/agent code)
   for the sake of one shared constant. A few lines of duplication here
@@ -61,19 +61,19 @@ from typing import NamedTuple
 
 MCP_SELECTOR_PREFIX = "mcp/"
 """The literal prefix that marks a ``tools:`` entry as an MCP selector
-rather than a builtin tool name. A bare entry like ``shell`` is a builtin;
+rather than a builtin tool name. A bare entry like ``terminal`` is a builtin;
 ``mcp/gmail`` or ``mcp/gmail/search`` is an MCP selector."""
 
 # Server segment: must double as a Kafka topic segment, an mcp.json key,
 # and a roster process-name suffix, so we restrict to lowercase + digits +
 # underscore. Redeclared here (rather than imported from
-# calfcord.tools.discovery) to keep this module a pure leaf — see the
+# calfcord.tools.deploy_filters) to keep this module a pure leaf — see the
 # module docstring's "Regexes redeclared" note.
 _SERVER_NAME_REGEX = re.compile(r"^[a-z0-9_]{1,64}$")
 
 # Tool segment: matches the *original* MCP tool name advertised by an
 # upstream server we do not control; allow mixed case + hyphen + a longer
-# bound, mirroring ``TOOL_NAME_REGEX`` in calfcord.tools.discovery (also
+# bound, mirroring ``TOOL_NAME_REGEX`` in calfcord.tools.deploy_filters (also
 # redeclared, not imported — same leaf-module rationale).
 _TOOL_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 

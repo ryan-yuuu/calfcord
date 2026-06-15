@@ -26,14 +26,14 @@ class TestOsDepsForTools:
         assert "ca-certificates" in deps
         assert "git" in deps
 
-    def test_shell_brings_tmux(self) -> None:
-        assert "tmux" in os_deps_for_tools(["shell"])
-        assert "tmux" not in os_deps_for_tools(["read_file"])
+    def test_search_files_brings_ripgrep(self) -> None:
+        assert "ripgrep" in os_deps_for_tools(["search_files"])
+        assert "ripgrep" not in os_deps_for_tools(["read_file"])
 
-    def test_grep_or_glob_bring_ripgrep(self) -> None:
-        assert "ripgrep" in os_deps_for_tools(["grep"])
-        assert "ripgrep" in os_deps_for_tools(["glob"])
-        assert "ripgrep" not in os_deps_for_tools(["shell"])
+    def test_terminal_brings_no_tmux(self) -> None:
+        # The hermes terminal uses bash + a PTY, not tmux.
+        assert "tmux" not in os_deps_for_tools(["terminal"])
+        assert "tmux" not in os_deps_for_tools(["process"])
 
     def test_unknown_tool_ignored(self) -> None:
         # The templater is loose-coupled — validation is the CLI's
@@ -41,13 +41,13 @@ class TestOsDepsForTools:
         assert os_deps_for_tools(["definitely_not_a_tool"]) == os_deps_for_tools([])
 
     def test_deduplication(self) -> None:
-        # grep and glob both bring ripgrep; the union must have exactly
-        # one ripgrep entry.
-        deps = os_deps_for_tools(["grep", "glob"])
-        assert deps.count("ripgrep") == 1
+        # The union must contain no duplicates regardless of overlap
+        # between always-on deps and per-tool deps.
+        deps = os_deps_for_tools(["search_files", "terminal", "web_fetch"])
+        assert len(deps) == len(set(deps))
 
     def test_sorted_output(self) -> None:
-        deps = os_deps_for_tools(["shell", "grep", "web_fetch"])
+        deps = os_deps_for_tools(["terminal", "search_files", "web_fetch"])
         assert deps == sorted(deps)
 
 
@@ -56,57 +56,58 @@ class TestRenderToolsDockerfile:
         return render_tools_dockerfile(include_tools=names)
 
     def test_bakes_include_filter_env_var(self) -> None:
-        dockerfile = self._render(["shell", "grep"])
+        dockerfile = self._render(["terminal", "search_files"])
         # The auto-discovery loader reads this env var; the image
         # baking it is the whole point of per-tool images.
-        assert "CALFCORD_TOOLS_INCLUDE=grep,shell" in dockerfile
+        assert "CALFCORD_TOOLS_INCLUDE=search_files,terminal" in dockerfile
 
     def test_only_lists_needed_os_packages(self) -> None:
-        # shell-only image must include tmux but NOT ripgrep.
-        dockerfile = self._render(["shell"])
-        assert "tmux" in dockerfile
-        assert "ripgrep" not in dockerfile
+        # search_files image includes ripgrep; a read_file-only image does not.
+        dockerfile = self._render(["search_files"])
+        assert "ripgrep" in dockerfile
+        df_readonly = self._render(["read_file"])
+        assert "ripgrep" not in df_readonly
         # Always-on deps still present.
-        assert "ca-certificates" in dockerfile
-        assert "git" in dockerfile
+        assert "ca-certificates" in df_readonly
+        assert "git" in df_readonly
 
-    def test_grep_only_omits_tmux(self) -> None:
-        dockerfile = self._render(["grep"])
+    def test_search_files_brings_ripgrep_not_tmux(self) -> None:
+        dockerfile = self._render(["search_files"])
         assert "ripgrep" in dockerfile
         assert "tmux" not in dockerfile
 
     def test_default_cmd_is_calfkit_tools(self) -> None:
-        dockerfile = self._render(["shell"])
+        dockerfile = self._render(["terminal"])
         # Per-tool images should boot the tools runner by default —
         # bridge / agent / router wouldn't make sense here.
         assert 'CMD ["calfkit-tools"]' in dockerfile
 
     def test_header_names_inputs(self) -> None:
-        dockerfile = self._render(["shell", "grep"])
+        dockerfile = self._render(["terminal", "search_files"])
         # Header is operator-forensic; an inspected image should
         # tell you which CLI invocation produced it.
         assert "calfcord-package-tools" in dockerfile
         # Header banner now lives below the # syntax= directive on
         # line 1; check the banner block (lines 2+).
         banner_line = dockerfile.split("\n", 2)[1]
-        assert "grep" in banner_line
-        assert "shell" in banner_line
+        assert "search_files" in banner_line
+        assert "terminal" in banner_line
 
     def test_deterministic_ordering(self) -> None:
         # Same inputs in different order produce identical output —
         # build caches hit reliably.
-        a = self._render(["shell", "grep"])
-        b = self._render(["grep", "shell"])
+        a = self._render(["terminal", "search_files"])
+        b = self._render(["search_files", "terminal"])
         assert a == b
 
     def test_includes_static_uv_copy(self) -> None:
         # The hermetic-build property (uv binary from upstream image
         # rather than curl|sh) must survive templating.
-        dockerfile = self._render(["shell"])
+        dockerfile = self._render(["terminal"])
         assert "ghcr.io/astral-sh/uv:latest" in dockerfile
 
     def test_runs_as_non_root(self) -> None:
-        dockerfile = self._render(["shell"])
+        dockerfile = self._render(["terminal"])
         assert "USER calfcord" in dockerfile
 
     def test_runtime_copy_chowns_to_calfcord(self) -> None:
@@ -116,15 +117,16 @@ class TestRenderToolsDockerfile:
         image where calfcord (uid 1000) can't write to /app or its
         venv — bind-mount semantics break, .pyc compilation fails (if
         ever re-enabled), etc. Load-bearing for the non-root model."""
-        dockerfile = self._render(["shell"])
+        dockerfile = self._render(["terminal"])
         assert "COPY --from=builder --chown=calfcord:calfcord /app /app" in dockerfile
 
-    def test_bakes_banner_suppression(self) -> None:
-        """Per-tool images bake OPENHANDS_SUPPRESS_BANNER=1 so boot
-        logs stay readable. Operators can still override at runtime
-        with ``-e OPENHANDS_SUPPRESS_BANNER=0``."""
-        dockerfile = self._render(["shell"])
-        assert "OPENHANDS_SUPPRESS_BANNER=1" in dockerfile
+    def test_omits_banner_suppression(self) -> None:
+        """Per-tool images host only vendored calfkit-tools nodes and never
+        import the openhands SDK, so there's no banner to silence — the env
+        var must NOT be baked (only the agents image, with its codex
+        provider, needs it)."""
+        dockerfile = self._render(["terminal"])
+        assert "OPENHANDS_SUPPRESS_BANNER" not in dockerfile
 
     def test_syntax_directive_on_line_one(self) -> None:
         """Docker only honors the ``# syntax=`` frontend-selector
@@ -132,7 +134,7 @@ class TestRenderToolsDockerfile:
         Dockerfile. A regression that puts the generated banner above
         it would silently disable the 1.x BuildKit frontend that the
         ``--mount=type=cache`` lines depend on."""
-        dockerfile = self._render(["shell"])
+        dockerfile = self._render(["terminal"])
         first_line = dockerfile.split("\n", 1)[0]
         assert first_line.startswith("# syntax=docker/dockerfile:")
 
@@ -151,26 +153,26 @@ class TestRenderToolsDockerfileAliases:
 
     def test_aliases_baked_into_env_block(self) -> None:
         dockerfile = render_tools_dockerfile(
-            include_tools=["edit_file_eu"],
-            aliases={"edit_file": "edit_file_eu"},
+            include_tools=["patch_eu"],
+            aliases={"patch": "patch_eu"},
         )
         # The alias env var lives in the ENV block. A future refactor
         # that puts it in a separate ``ENV`` statement would also
         # satisfy this assertion, which is fine — the contract is
         # "this name=value pair appears somewhere in the file."
-        assert "CALFCORD_TOOLS_ALIAS=edit_file=edit_file_eu" in dockerfile
+        assert "CALFCORD_TOOLS_ALIAS=patch=patch_eu" in dockerfile
 
     def test_aliases_sorted_for_determinism(self) -> None:
         """Same input dict in different insertion orders must produce
         byte-identical output so the build cache hits reliably across
         invocations."""
         a = render_tools_dockerfile(
-            include_tools=["edit_file_eu", "shell_eu"],
-            aliases={"edit_file": "edit_file_eu", "shell": "shell_eu"},
+            include_tools=["patch_eu", "terminal_eu"],
+            aliases={"patch": "patch_eu", "terminal": "terminal_eu"},
         )
         b = render_tools_dockerfile(
-            include_tools=["edit_file_eu", "shell_eu"],
-            aliases={"shell": "shell_eu", "edit_file": "edit_file_eu"},
+            include_tools=["patch_eu", "terminal_eu"],
+            aliases={"terminal": "terminal_eu", "patch": "patch_eu"},
         )
         assert a == b
 
@@ -179,16 +181,16 @@ class TestRenderToolsDockerfileAliases:
         produces no ``CALFCORD_TOOLS_ALIAS`` line. A stray line with
         an empty value would parse as an empty alias map at boot
         (harmless but operator-noisy), so it's worth pinning."""
-        dockerfile = render_tools_dockerfile(include_tools=["shell"])
+        dockerfile = render_tools_dockerfile(include_tools=["terminal"])
         assert "CALFCORD_TOOLS_ALIAS" not in dockerfile
         # Same for explicit None / empty dict.
         assert (
             "CALFCORD_TOOLS_ALIAS"
-            not in render_tools_dockerfile(include_tools=["shell"], aliases=None)
+            not in render_tools_dockerfile(include_tools=["terminal"], aliases=None)
         )
         assert (
             "CALFCORD_TOOLS_ALIAS"
-            not in render_tools_dockerfile(include_tools=["shell"], aliases={})
+            not in render_tools_dockerfile(include_tools=["terminal"], aliases={})
         )
 
     def test_header_mentions_aliases_when_present(self) -> None:
@@ -196,21 +198,21 @@ class TestRenderToolsDockerfileAliases:
         the Dockerfile pulled out of the image is self-describing
         without re-parsing the ENV block."""
         dockerfile = render_tools_dockerfile(
-            include_tools=["edit_file_eu"],
-            aliases={"edit_file": "edit_file_eu"},
+            include_tools=["patch_eu"],
+            aliases={"patch": "patch_eu"},
         )
         # The header lives in the first ~6 lines of the file. Pin the
         # rename appearance there so it's discoverable at a glance.
         head = "\n".join(dockerfile.split("\n", 8)[:8])
-        assert "edit_file" in head and "edit_file_eu" in head
+        assert "patch" in head and "patch_eu" in head
         assert "Renames" in head or "→" in head
 
     def test_aliases_do_not_break_syntax_directive_position(self) -> None:
         """The ``# syntax=`` directive must still be on line 1 even
         with the optional header alias line inserted below."""
         dockerfile = render_tools_dockerfile(
-            include_tools=["edit_file_eu"],
-            aliases={"edit_file": "edit_file_eu"},
+            include_tools=["patch_eu"],
+            aliases={"patch": "patch_eu"},
         )
         first_line = dockerfile.split("\n", 1)[0]
         assert first_line.startswith("# syntax=docker/dockerfile:")
@@ -298,9 +300,7 @@ class TestRenderAgentsDockerfile:
 @pytest.mark.parametrize(
     "tool_name,expected_dep",
     [
-        ("shell", "tmux"),
-        ("grep", "ripgrep"),
-        ("glob", "ripgrep"),
+        ("search_files", "ripgrep"),
     ],
 )
 def test_per_tool_os_dep_mapping(tool_name: str, expected_dep: str) -> None:

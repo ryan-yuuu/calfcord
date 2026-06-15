@@ -13,7 +13,7 @@ Two contexts share the same builder via a keyword-only flag:
   rules. Tools-independent: the rules apply to any agent posting into
   a channel, whether or not it also has the ``private_chat`` tool.
 * ``channel=False`` — the invocation came via A2A
-  (:func:`~calfcord.tools.builtin.private_chat.private_chat`).
+  (:func:`~calfcord.tools.private_chat.private_chat`).
   Returns roster only, and only when the target has the
   ``private_chat`` tool. The tool's own docstring carries everything
   else; restating it here would be wasted tokens.

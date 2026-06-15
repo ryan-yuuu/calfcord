@@ -138,7 +138,7 @@ through `CALFKIT_AGENT_DEFAULT_MODEL` rather than editing every `.md`.
 ### 3.3 Tools (optional)
 
 ```yaml
-tools: [private_chat, shell, read_file]
+tools: [private_chat, terminal, read_file]
 ```
 
 `tools` is a list of bare tool names. Each name is resolved against
@@ -147,29 +147,33 @@ unknown name fails fast:
 
 ```
 agent 'librarian' declares unknown tool(s) ['web_lookup']; known
-tools: ['edit_file', 'glob', 'grep', 'private_chat', 'read_file',
-'shell', 'todo_view', 'todo_write', 'web_fetch', 'web_search',
-'write_file']
+tools: ['execute_code', 'patch', 'private_chat', 'process',
+'read_file', 'search_files', 'terminal', 'todo', 'web_extract',
+'web_fetch', 'web_search', 'write_file']
 ```
 
-The registry is populated by `tools/discovery.py` at process import
-time. To add a new tool to the registry, drop a `.py` file under
-`src/calfcord/tools/builtin/` — see
-`docs/authoring-tools.md` for the contract.
+The registry is the explicit `ALL_TOOLS` list in
+`src/calfcord/tools/__init__.py`, narrowed/aliased at boot by
+`deploy_filters.apply_deploy_filters`. Most tools are vendored from the
+`calfkit-tools` package; `private_chat` is the one first-party tool. To
+change which tools exist, edit that list — see `docs/authoring-tools.md`
+for the contract.
 
 Each agent only ever carries the `ToolNodeDef` for schema and
 subscribe-topic purposes; the actual tool body runs in the
 `calfkit-tools` process. That means every tool your agent declares is
 shared with every other agent on the deployment — there is no
-per-agent sandbox and no per-tool permission grant. The Filesystem
-and shell tools share one workspace (the calfkit-tools host's
-`CALFCORD_WORKSPACE_DIR`, default `state/workspace/`). See
-`docs/security.md` for the operator-facing deployment patterns.
+per-agent sandbox and no per-tool permission grant. The filesystem
+and terminal tools share one workspace (the calfkit-tools host's
+`CALFCORD_WORKSPACE_DIR`, default `state/workspace/`), but each agent
+gets its own isolated terminal session, working directory, and todo
+list keyed by the calling agent's identity — see `docs/security.md` for
+the per-agent tenancy model and the operator-facing deployment patterns.
 
 Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
-entirely is the opposite** — it grants every registered builtin
-(including `shell` / `write_file` / `edit_file`), per the security note
-above.
+entirely is the opposite** — it grants every registered tool
+(including `terminal` / `execute_code` / `write_file` / `patch`), per
+the security note above.
 
 #### MCP-server tools
 
@@ -239,7 +243,7 @@ cost.
 gets a "how memory works" block appended to its instructions, telling it to
 keep one-fact-per-file memories plus a `MEMORY.md` index under `memory/<name>/`
 in the shared workspace, managed with the ordinary `read_file` / `write_file` /
-`edit_file` tools — there are no dedicated memory tools. Because of that, a
+`patch` tools — there are no dedicated memory tools. Because of that, a
 `memory: true` agent **must** have at least `read_file` and `write_file` (omit
 `tools:` to grant all, or list them explicitly); the factory raises at build
 time otherwise. Memory lives in the same shared workspace as everything else,
@@ -316,7 +320,7 @@ agent's system prompt is where to add tool-selection guidance that
 spans multiple tools.
 
 The canonical "good docstring" reference is `private_chat` at
-`src/calfcord/tools/builtin/private_chat.py` — it
+`src/calfcord/tools/private_chat.py` — it
 explicitly covers *when not to use*, *how to write the `content`
 argument*, and *what the return shape means*. Lean on that pattern for
 tools you write, and reference the tool by name in the agent's body
@@ -482,8 +486,8 @@ override if you want this in production.
 - **Unknown tool at boot.** The factory raises with the full list of
   known tools:
   `agent 'foo' declares unknown tool(s) ['my_tool']; known tools: [...]`.
-  Either fix the name or add the tool under
-  `src/calfcord/tools/builtin/` and restart the tools host
+  Either fix the name or add the tool to the explicit `ALL_TOOLS` list in
+  `src/calfcord/tools/__init__.py` and restart the tools host
   (`calfcord tools stop && calfcord tools start`, or `uv run calfkit-tools` in dev).
 - **`display_name == "Clyde"`.** Pydantic rejects this at parse time
   with a clear validator error — the agent never boots.

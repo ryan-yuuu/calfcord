@@ -212,8 +212,9 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
 
     The ``TOOL_REGISTRY`` import is deferred to here (rather than module
     scope) so :func:`update_thinking_effort`'s path stays light: importing
-    ``TOOL_REGISTRY`` eagerly walks every builtin tool module, which the
-    thinking-effort slash command has no reason to pay for.
+    ``TOOL_REGISTRY`` eagerly composes the tool registry (importing the
+    vendored ``calfkit-tools`` nodes), which the thinking-effort slash
+    command has no reason to pay for.
 
     Raises:
         FileNotFoundError: ``md_path`` does not exist.

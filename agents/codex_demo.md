@@ -6,16 +6,17 @@ provider: openai-codex
 thinking_effort: high
 memory: true
 tools:
-- shell
+- terminal
+- process
 - read_file
 - write_file
-- edit_file
-- grep
-- glob
-- web_fetch
+- patch
+- search_files
+- todo
+- execute_code
 - web_search
-- todo_view
-- todo_write
+- web_extract
+- web_fetch
 - private_chat
 ---
 

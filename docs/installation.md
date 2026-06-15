@@ -43,8 +43,8 @@ calfcord init
 
 It writes `~/.calfcord/config/.env` plus the agent at
 `~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because the
-tools step defaults to *every* tool, a freshly-configured agent has shell,
-file-write, and web reach — see [`security.md`](security.md#33-tools-native-broker--others-in-docker)
+tools step defaults to *every* tool, a freshly-configured agent has terminal,
+file-write, code-execution, and web reach — see [`security.md`](security.md#33-tools-native-broker--others-in-docker)
 before exposing it.
 
 **`init` ends live.** After config it opens your workspace, brings your agent

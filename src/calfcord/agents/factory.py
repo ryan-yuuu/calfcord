@@ -544,7 +544,7 @@ class AgentFactory:
 
         The flat ``tools:`` list mixes two kinds of entry, partitioned here:
 
-        * bare *builtin* names (``shell``, ``calendar``) resolve against the
+        * bare *builtin* names (``terminal``, ``calendar``) resolve against the
           in-memory tool registry, with an aggregate unknown-name
           :class:`ValueError` (every unknown name in one message);
         * ``mcp/...`` selectors collapse into one

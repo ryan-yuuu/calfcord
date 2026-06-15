@@ -151,7 +151,7 @@ class TestPhonebookExcludesRouter:
     """The router is **filtered out** of :func:`phonebook_from_registry`
     output. It has no A2A inbox (``agent.{id}.in``), so listing it as
     a peer would mislead assistants' LLMs into calling
-    :func:`~calfcord.tools.builtin.private_chat.private_chat`
+    :func:`~calfcord.tools.private_chat.private_chat`
     against a topic with no consumer — silent timeout, wasted tokens.
     The router-side roster (built by
     :func:`calfcord.router.roster.build_router_temp_instructions`)

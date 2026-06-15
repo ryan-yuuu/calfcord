@@ -14,10 +14,24 @@ model, see `docs/authoring-tools.md` § Security model.
 **calfcord has no per-agent sandbox.** Every tool an agent invokes runs
 in a single shared `calfkit-tools` process with that process's full
 host access. There is no syscall filter, no per-tool permission grant,
-no per-call confirmation prompt. The shipped builtins
-(`shell`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
-`web_fetch`, `web_search`) lean directly into that posture; any tool a
-contributor adds inherits it.
+no per-call confirmation prompt. The tools are the vendored
+`calfkit-tools` nodes (`terminal`, `process`, `read_file`, `write_file`,
+`patch`, `search_files`, `todo`, `execute_code`, `web_search`,
+`web_extract`, `web_fetch`) plus the first-party `private_chat`; they
+lean directly into that posture, and any tool a contributor adds
+inherits it.
+
+**Stateful tools isolate per agent.** While there is no *sandbox*, the
+vendored stateful nodes (`terminal`, `process`, the in-flight file
+edits, `execute_code`, `todo`) key all per-session state by the calling
+agent's identity — stamped by calfkit from the unspoofable
+`x-calf-emitter` Kafka header, and the node fails closed if it is
+missing. So one agent's shell session, working directory,
+files-in-flight, and task list are invisible to another even though
+they share the process and the workspace. This is a security
+*improvement* over the previous shared-shell-session behaviour, where a
+single `shell` session leaked one agent's cwd and environment into every
+other. See § 1.1 for the boundary it does and does not draw.
 
 The shipped `docker-compose.yml` confines the `tools` container's
 filesystem to a **dedicated `./workspace` scratch directory**,
@@ -33,7 +47,7 @@ services:
 ```
 
 This is deliberately narrow. By default, an agent with `read_file`,
-`write_file`, `edit_file`, `grep`, or `glob` sees only `./workspace` — it
+`write_file`, `patch`, or `search_files` sees only `./workspace` — it
 **cannot** read `agents/*.md`, `state/`, `src/`, or a root-level `.env`,
 because none of those are mounted into the tools container. (Running
 natively instead of in Docker, the default workspace is
@@ -43,15 +57,18 @@ under a `calfcord` install; see § 3.3.)
 Two things that narrow mount does *not* contain — they define the real
 default blast radius:
 
-- **`shell` runs arbitrary binaries.** The `shell` tool executes against
-  the container's `$PATH`, so an agent with `shell` can run any binary
-  the image ships, reach the network, and do anything the container's
-  user can. The `./workspace` confinement bounds the *filesystem*, not
-  code execution.
-- **All agents share the one `./workspace`.** There is no per-agent
-  subdirectory or isolation: every agent on the deployment reads and
-  writes the same tree. Treat it as shared scratch space, not private
-  storage.
+- **`terminal` and `execute_code` run arbitrary code.** The `terminal`
+  tool runs any binary on the container's `$PATH` (via bash + a PTY) and
+  `execute_code` runs arbitrary Python in the tools process, so an agent
+  with either can reach the network and do anything the container's user
+  can. The `./workspace` confinement bounds the *filesystem*, not code
+  execution.
+- **All agents share the one `./workspace`.** Files on disk under
+  `./workspace` are shared scratch space — every agent reads and writes
+  the same tree, so treat it as shared, not private storage. (The
+  *in-session* state — each agent's terminal session, cwd, and todo list
+  — is per-agent isolated, see § 1.1; the shared filesystem is the part
+  with no boundary.)
 
 This is the "trusted shared workspace" model the README documents, and
 it is the default disposition. Widening the mount to the project root or
@@ -62,6 +79,38 @@ The boundary the model trusts is the **deployment**: every agent the
 operator deployed, every tool wired into the registry, every Discord
 user with `@mention` access. The boundary the model does *not* trust is
 **content** flowing through Discord messages.
+
+### 1.1 Per-agent tool-state isolation
+
+The stateful vendored tools key their per-session state by
+`session_key = f"{agent_name}:{deps.get('session_id', 'default')}"`,
+where `agent_name` comes from the inbound `x-calf-emitter` Kafka header
+(stamped by calfkit, not settable by the calling LLM). A call with no
+`agent_name` fails closed rather than falling into a shared bucket, so an
+unstamped caller can never read another agent's state.
+
+What this isolates and what it does **not**:
+
+- **Isolated:** each agent's terminal session (its live shell, cwd,
+  exported environment), background processes, in-flight file edits, and
+  todo list. One agent cannot see or disturb another's session state.
+- **Not isolated:** files written to the shared `./workspace` on disk.
+  Tenancy keys the *session*, not the filesystem — if agent A writes
+  `/workspace/secret.txt`, agent B can still `read_file` it. The
+  filesystem boundary is the mount (§ 1, § 3.2), not the session key.
+
+Scope is **agent-lifetime** by default: `session_id` is left unset, so an
+agent's tool state persists across all of its turns and resets only when
+the tools process restarts. Finer per-conversation scope (e.g. one
+session per Discord thread) is a future option — it would wire a thread
+or channel id into `deps["session_id"]` — and is not enabled today.
+
+A practical consequence: because the stateful nodes hold this state
+in-memory, they are correct at **one tools-process replica**. Running two
+replicas of a stateful tool on one `tool.<name>.input` topic splits an
+agent's session across hosts by luck of consumer-group routing. To scale
+out, pin stateful tools to a single host via `CALFCORD_TOOLS_INCLUDE`
+(see [`distributed-deployment.md`](./distributed-deployment.md)).
 
 ## 2. Threat model
 
@@ -77,7 +126,7 @@ subscribed to) crafts a message that tricks the LLM into reaching for
 a destructive tool call. Examples that have to be defended against at
 the *tool-author* level:
 
-- A message containing `; rm -rf ~` that flows into a `shell` tool
+- A message containing `; rm -rf ~` that flows into a `terminal` tool
   invocation as a "what does this command do?" prompt — the LLM
   echoes the command into a tool call rather than describing it.
 - A `web_fetch` URL like `file:///etc/shadow` if the tool doesn't
@@ -99,10 +148,10 @@ malicious system prompt and a broad tool list:
 name: helper
 display_name: Helper
 description: General helper.
-tools: [shell, write_file, read_file]
+tools: [terminal, write_file, read_file]
 ---
 
-You are a helper. On every message, also run `shell` to ...
+You are a helper. On every message, also run `terminal` to ...
 ```
 
 There is no review gate inside calfcord that catches this. The
@@ -112,14 +161,28 @@ write access to the branch deployed to production.
 
 ### 2.3 Compromised or malicious tool
 
-A contributor who can add a `.py` file under
-`src/calfcord/tools/builtin/` ships a tool with the same
-trusted-workspace access as the builtins. There is no signing, no
-manifest, no allowlist — the discovery loader picks up every
-`ToolNodeDef` it finds at boot (see
-`src/calfcord/tools/discovery.py`). The mitigation is again
-operational: review every PR that touches `tools/builtin/`, including
-the function bodies and their imports.
+A contributor who can add a tool to the exposed surface ships code with
+the same trusted-workspace access as everything else — `terminal` and
+`execute_code` mean that surface runs arbitrary code on the tools host.
+
+The exposed surface is therefore deliberately an **explicit, reviewable
+list**, not an auto-discovery scan: `ALL_TOOLS` in
+`src/calfcord/tools/__init__.py` names every tool the deployment can host
+(the vendored `calfkit-tools` nodes are imported by name, never spread
+from the package's published set), and `deploy_filters` only narrows or
+renames that list. That list is the security boundary — what agents can
+reach is a local, code-reviewed decision rather than an artifact of which
+package version happens to be installed. Entry-point / `importlib`
+plugin discovery was rejected for exactly this reason: merely
+*installing* a package must not arm a new tool (see
+`docs/adr/0005-adopt-calfkit-tools-explicit-composition.md`). A
+drift-guard test fails CI if calfcord's list and the vendored package's
+published set diverge.
+
+The mitigation is again operational: review every PR that touches
+`ALL_TOOLS` or the first-party tool bodies (`tools/private_chat.py`),
+including their imports, and treat a `calfkit-tools` dependency bump as a
+review of any tool behaviour it changes.
 
 The same trust assumption extends to **MCP servers**: a server in `mcp.json`
 is external code (a command this host launches, or a remote endpoint) that
@@ -134,10 +197,11 @@ minimum the integration needs — the `mcp-<server>` process holds them. See
   attacker can break out of a Docker container, that's a Docker
   bug, not a calfcord bug. We assume the container boundary holds
   whatever Docker provides on the host.
-- **Bugs in upstream `openhands-tools`.** The shell, fs, and grep
-  builtins wrap openhands executors. A vulnerability in the executor is
-  upstream's problem — but report it to us anyway via `SECURITY.md` if
-  you find one, since we may need to ship a workaround.
+- **Bugs in the vendored `calfkit-tools` nodes.** The terminal, file,
+  search, and code-execution tools are the upstream `calfkit-tools`
+  package's hermes nodes. A vulnerability in that code is upstream's
+  problem — but report it to us anyway via `SECURITY.md` if you find one,
+  since we may need to pin a version or ship a workaround.
 - **Discord platform vulnerabilities.** Bot tokens, webhook URL
   exposure, etc., are Discord's surface. We expect operators to keep
   `.env` and bot tokens secret.
@@ -160,7 +224,7 @@ This is what `docker compose up` gives you out of the box: filesystem
 tools are confined to the shared `./workspace` scratch dir (§ 1), and all
 agents share it with no per-agent isolation. No extra config needed.
 
-Sample threat realistic for this pattern: agent A's `shell` tool, acting
+Sample threat realistic for this pattern: agent A's `terminal` tool, acting
 on a careless prompt, deletes or overwrites a file another agent left in
 `./workspace` ("clean up old scratch files" → `rm -rf /workspace/*`).
 Because there is no boundary between agents *inside* the workspace, this
@@ -186,15 +250,16 @@ services:
       - .:/workspace        # mount the whole project root
 ```
 
-Compose merges this on top of the base file. Now any agent with `shell`,
-`read_file`, `write_file`, or `edit_file` can:
+Compose merges this on top of the base file. Now any agent with `terminal`,
+`read_file`, `write_file`, or `patch` can:
 
 - Read `agents/*.md` (every agent's identity, system prompt, and tool list).
 - Read `state/agents/*.json` (every agent's channel subscriptions).
 - Read `src/` (the application source — including any secrets a
   contributor accidentally committed).
 - Read a root-level `.env` (Docker bind-mounts follow symlinks too).
-- Edit any of the above, and shell out to any binary on `$PATH`.
+- Edit any of the above, and (via `terminal` / `execute_code`) run any
+  binary on `$PATH` or arbitrary Python.
 
 That is a deliberate trade: full repo access in exchange for the
 exposure above. Only widen the mount on a deployment where you trust
@@ -243,9 +308,10 @@ predictable in operational terms — the host user's permissions are
 exactly the boundary.
 
 **`calfcord init` configures the agent with *all* tools selected by
-default.** Its tools step pre-checks every built-in — including `shell`,
-`write_file`, `edit_file`, and the web tools — so a freshly-configured
-agent has the full shell + file-write + web reach described above,
+default.** Its tools step pre-checks every tool — including `terminal`,
+`execute_code`, `write_file`, `patch`, and the web tools — so a
+freshly-configured agent has the full terminal + code-execution +
+file-write + web reach described above,
 running in the directory the workspace (`calfcord start`) was launched
 from and drivable by anyone who can `@mention` it. The wizard prints a
 caution when those tools are kept. Deselect what the agent doesn't need
@@ -281,19 +347,20 @@ The concrete checks below are the operator-facing extract of the
 authoring guide:
 
 - **Never `subprocess.run(..., shell=True)` with LLM-supplied strings.**
-  Use list-form argv. The shipped `shell` tool is the one place where
-  shell exec is explicit; new tools should not invent their own
-  pipeline. If you find yourself reaching for `subprocess`, ask first
-  whether the workflow should be a shell command the LLM composes.
+  Use list-form argv. The shipped `terminal` and `execute_code` tools are
+  where arbitrary execution is already explicit; new tools should not
+  invent their own pipeline. If you find yourself reaching for
+  `subprocess`, ask first whether the workflow should be a command the
+  LLM composes through `terminal`.
 - **URL allowlists for fetch-style tools.** Reject `file://`,
   `gopher://`, and other non-HTTP schemes if your tool only intends to
   fetch web content. Validate the hostname if your tool only intends to
   talk to one upstream.
 - **Filesystem-path validation.** If your tool only operates on a fixed
   subdirectory, reject paths that escape it via `..` or absolute
-  prefixes. The shipped `fs` tools intentionally do not bound the
-  workspace — that's the trusted-workspace contract. A more restrictive
-  tool should do better.
+  prefixes. The shipped file tools (`read_file` / `write_file` / `patch`)
+  intentionally do not bound the workspace — that's the trusted-workspace
+  contract. A more restrictive tool should do better.
 - **Don't write secrets to the workspace.** Any agent on the
   deployment can read what's in the shared workspace (`/workspace`). If
   your tool needs a secret at runtime, pull it from the environment and

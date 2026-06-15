@@ -35,7 +35,7 @@ Why the addressed-to-me gate is strict slash-only:
     consumer feeds back through ``BridgeIngress.handle()`` onto the channel
     topic. So every legitimate envelope reaching an assistant via the
     channel topic — whether from a real Discord slash, a router fan-out, or
-    an A2A invocation from :func:`~calfcord.tools.builtin.private_chat`
+    an A2A invocation from :func:`~calfcord.tools.private_chat`
     (which synthesizes ``kind="slash"`` with the target's id, see
     ``private_chat.py``'s ``model_copy(update=...)`` pattern) — is a slash
     wire. The "ambient on channel topic" path is gone; rejecting it
@@ -97,7 +97,7 @@ def make_addressed_to_me_gate(agent_id: str) -> Callable[[SessionRunContext], bo
               the absence of a reply rather than a runaway broadcast.
 
     A2A (peer→peer) compatibility:
-        :func:`~calfcord.tools.builtin.private_chat.private_chat`
+        :func:`~calfcord.tools.private_chat.private_chat`
         synthesizes its outgoing envelope with ``kind="slash"`` and
         ``slash_target`` pointed at the target agent (see
         ``private_chat.py``'s ``WireMessage.model_copy(update=...)``
