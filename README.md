@@ -1,12 +1,12 @@
-# 🐮 Calfcord
+# Agent Disco
 
 [![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ryan-yuuu/calfcord/python-coverage-comment-action-data/endpoint.json)](https://github.com/ryan-yuuu/calfcord/tree/python-coverage-comment-action-data)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
-**Collaborate with your team of AI agents on Discord** — each with its own responsibilities and memories, all able to talk to you *and to each other*.
+**Chat with your personal agents network on Discord** — agents in the network are able to freely talk to you *and to each other*. Each agent has configurable roles, capabilities, and memories allowing the swarm to divide-and-conquer difficult, deep tasks.
 
-Distributed by design: agents and tools are independently deployable anywhere. Have agents deployed on your personal laptop, work laptop, and cloud VM all seamlessly collaborate with eachother.
+Distributed by design: agents and tools are independently deployable anywhere. Agents deployed on your laptop, home desktop, and cloud VM all seamlessly collaborate with eachother.
 
 <!-- Demo image, save to docs/assets/demo.gif, then uncomment the line below. -->
 <!-- ![Calfcord demo](docs/assets/demo.gif) -->
@@ -14,68 +14,54 @@ Distributed by design: agents and tools are independently deployable anywhere. H
 
 ## What you get
 
-- 💬 **Communicate with the team on Discord.** You and your agent team collaborate on work and provide updates through Discord.
-- 🎭 **Agents with distinct job responsibilities and tools.** Each agent is a first-class worker with personal responsibilities, tools, and memories.
-- 🌎 **Split agents and tools across hosts anywhere in the world.** Agents and tools within a team are microservices deployable anywhere, even across hosts.
-- ✏️ **Easily onboard new agents to the team.** A new agent can be configured in a Markdown file, independently deployed, and added to the team in <2 minutes.
-- 🤝 **Agents seamlessly collaborate.** Agents chat with each other through private chats, and every exchange is recorded in a Discord thread.
-- 🧠 **Bring your own model.** Anthropic, OpenAI, other OpenAI-compatible APIs, or use your ChatGPT Plus/Pro subscription (via Codex) — set it per agent.
-- 🛠️ **Built-in tools.** Agents can get task-tracking, computer filesystem access, and web search tools by default.
-- 🔌 **Plug in MCP servers.** Point agents at any [Model Context Protocol](https://modelcontextprotocol.io) server (GitHub, docs, your own) with one line of config — credentials stay on the host running the server.
+- 💬 **Communicate with the team on Discord.** You and your agent team collaborate on work through Discord.
+- 🎭 **Agents with distinct responsibilities and tools.** Each agent is a first-class worker with personal responsibilities, tools, and memories.
+- 🌎 **Split agents and tools across hosts anywhere in the world.** Agents and tools can run anywhere and still communicate with eachother, even across hosts.
+- ✏️ **Easily onboard new agents to the team.** A new agent can be configured in a Markdown file and added to the team in under 2 minutes.
+- 🤝 **Agents seamlessly collaborate.** Agents privately message with each other through private chats, and every exchange is recorded in a Discord thread for full transparency.
+- 🧠 **Bring your own model.** Use Anthropic, OpenAI, other OpenAI-compatible models, or use your ChatGPT subscription to run your agents.
+- 🛠️ **Built-in tools.** Agents get task-tracking, local filesystem access, and web search tools by default.
+- 🔌 **Plug in MCP tools.** Point agents at any [Model Context Protocol](https://modelcontextprotocol.io) server with one line of config.
 
 ## Quick start
 
-You'll need a Discord server you own. No Docker required — the installer
-bootstraps everything calfcord needs to run locally (a native Tansu broker, a
-single Kafka-compatible binary, plus the process supervisor).
+You'll need a Discord server. No Docker required.
 
 **1. Set up the Discord app** (~5 min, one time) — follow
 [`docs/discord-setup.md`](./docs/discord-setup.md). All you need from it is the
-bot **token** and **application ID**; the wizard discovers your server and
+bot **token** and **application ID**; the CLI setup wizard discovers your server and
 channel for you.
 
-**2. Install.** One line, no Python/Docker/git needed first:
+**2. Install.**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
 ```
 
-When it finishes, **restart your shell** (or open a new terminal) so the
-`calfcord` command is on your `PATH`.
+When it finishes, **restart your terminal**.
 
-**3. Run the guided setup.** One continuous session takes you all the way to a
-live agent:
+**3. Run the guided setup.**
 
 ```bash
 calfcord init
 ```
 
-It walks you through picking a provider + model (the model is **chosen from a
-live list fetched from the provider** — you can't mistype an invalid slug),
-naming your agent (default `assistant`), and choosing its tools (every built-in,
-all selected by default). Then you paste your Discord token (**verified on the
-spot**) and invite the bot — the wizard **waits and auto-detects the moment it
-joins**, then discovers your server and channels for you. Finally it **opens
-your workspace, brings your agent online, and watches until it sees the first
-reply.** No separate broker terminal, no juggling processes. Pick **Codex** for
-your provider and it logs you in inline via a device code (a URL + one-time code
-you open on any device, so it works the same locally or over SSH).
+It walks you through picking a provider + model, setting up your first agent, and setting up your discord connection.
 
-**4. Say hello.** In any channel the bot can see:
+**4. Say hello.** After finishing the guided setup flow, send a message to your first agent:
 
 ```
-@assistant hello
+@<agent_name> hello
 ```
 
-A reply appears from your agent. `init` has already verified this end-to-end, so
-this is your confirmation. You're live. 🎉
+A reply should appear. Your first agent is up and running! 🎉
 
 ## What you just built
 
 Your **workspace** — a local message bus and the Discord bridge — now runs in
 the background. Your agent is a **teammate** that clocked in. From here you can
-add more teammates, turn on the receptionist that answers messages nobody
-`@mentioned`, or split the team across machines — all *without restarting the
+add more teammates, turn on the receptionist that routes messages without
+`@mentioned`, or split the team remotely across machines — all *without restarting the
 workspace*. The same config and the same commands work whether your org runs on
 one laptop or twenty hosts.
 
@@ -116,10 +102,7 @@ Pick your next move by goal:
 
 ## Define your own agent
 
-The installer seeds a provider-agnostic starter, `assistant`, in
-`~/.calfcord/agents/` — text-only **until** `calfcord init` configures it (init
-bakes in the provider, model, and tools you picked, replacing the pristine
-seed). Your agents live there and survive `calfcord self update`. This section
+The installer stores agents `~/.calfcord/agents/`. Your agents live there and survive `calfcord self update`. This section
 is the guide for adding *more* agents by hand.
 
 An agent is one Markdown file. Drop a new one into `~/.calfcord/agents/`:
@@ -158,13 +141,12 @@ Full field reference (providers, models, tool scoping, thinking effort) and the
 ## How it works
 
 Calfcord runs in two layers, so you can scale the team without touching the
-plumbing:
+wiring:
 
 - **The workspace (substrate)** — the always-on background office: the **broker**
   (a local message bus) and the **`calfkit-bridge`** (the single Discord
-  gateway). `calfcord start` brings this up, detached and health-gated; nothing
-  else runs until you ask for it.
-- **The roster** — teammates that clock in and out of the running workspace.
+  gateway). `calfcord start` brings this up.
+- **The agent roster** — teammates that chat in the running workspace.
   Each maps to one of calfcord's worker process types:
   - **`calfkit-agent`** — runs the agent(s). `calfcord agent start <name>`.
   - **`calfkit-router`** — decides who answers un-mentioned ambient messages.
