@@ -54,6 +54,12 @@
       "sourceType": "github",
       "skillPath": "skills/test-driven-development/SKILL.md",
       "computedHash": "126f1ebf6ccd414f42544f6e83d8cc5adb089e1108eaffb7c400701e37eecd9f"
+    },
+    "uv": {
+      "source": "astral-sh/claude-code-plugins",
+      "sourceType": "github",
+      "skillPath": "plugins/astral/skills/uv/SKILL.md",
+      "computedHash": "b1ca9e9826d906f6ee6ea172da50018ec13bb622ac9ba7204bda8b10e7fc8d0a"
     }
   }
 }
