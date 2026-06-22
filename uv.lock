@@ -477,7 +477,7 @@ requires-dist = [
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
-    { name = "openhands-sdk", specifier = ">=1.23.1" },
+    { name = "openhands-sdk", specifier = ">=1.29.0" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-frontmatter", specifier = ">=1.3.0,<2" },
@@ -2267,7 +2267,7 @@ wheels = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.23.1"
+version = "1.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -2288,9 +2288,9 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/28/8ee31659c76951429307fb8e65155d2797cf3337f1075f5625b2699c2489/openhands_sdk-1.23.1.tar.gz", hash = "sha256:16c75b1da35d093a3db8422574e7c850a8b57c80c9a5e9b5220f8ee199cc7f56", size = 460351, upload-time = "2026-05-25T19:47:27.987Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/d7/03c75453aa50e016e10989bb11e6fe5015db659c3d6d541a38aa60ec7920/openhands_sdk-1.29.0.tar.gz", hash = "sha256:2b38dec04858535ff78fdc961ffc44cee338aca6947c0ddb70c6926e5ac883af", size = 588347, upload-time = "2026-06-18T16:10:58.279Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/7d/d5848bbdd927e8bc94fa54312d0e286a32da83873a457d6816f3af5edd08/openhands_sdk-1.23.1-py3-none-any.whl", hash = "sha256:4c7b00a871c4c9421941fb05c3ad425ffe401a4215cd71f499bd106e63157044", size = 569173, upload-time = "2026-05-25T19:47:30.398Z" },
+    { url = "https://files.pythonhosted.org/packages/95/7d/faacecdc314f1deb85f7f123147c4522a77200c8b744496269b830dded36/openhands_sdk-1.29.0-py3-none-any.whl", hash = "sha256:ae9f4ec0b1fd86e3fd4c74682a9ee477614e790457ed06c675ad6caf9eef5194", size = 710013, upload-time = "2026-06-18T16:10:59.683Z" },
 ]
 
 [[package]]
