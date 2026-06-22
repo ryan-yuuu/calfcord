@@ -130,7 +130,7 @@ jobs:
       - name: Build calfcord image
         # No ``push``; this job exists to catch Dockerfile breakage early.
         # ``type=gha`` cache keeps subsequent runs cheap.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
