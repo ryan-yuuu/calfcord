@@ -23,10 +23,12 @@ filesystem guarantees the replace is atomic.
 
 Locations
 ---------
-Default base dir: ``~/.calfcord/codex_prompts/``. Override via the
-``CALFCORD_PROMPT_CACHE_DIR`` environment variable. The directory is
-created with mode ``0o700`` on POSIX so other users on the host can't
-read a body that may eventually contain proprietary upstream content.
+Default base dir: ``$CALFCORD_HOME/codex_prompts/`` (``~/.calfcord/codex_prompts/``
+when ``CALFCORD_HOME`` is unset), so the cache moves with a relocated or
+per-host install. Override via the ``CALFCORD_PROMPT_CACHE_DIR`` environment
+variable. The directory is created with mode ``0o700`` on POSIX so other users
+on the host can't read a body that may eventually contain proprietary upstream
+content.
 """
 
 from __future__ import annotations
@@ -42,10 +44,11 @@ from typing import NamedTuple
 
 from filelock import FileLock
 
+from calfcord.providers.codex._paths import calfcord_home
+
 logger = logging.getLogger(__name__)
 
 _ENV_OVERRIDE = "CALFCORD_PROMPT_CACHE_DIR"
-_DEFAULT_BASE_DIR = Path.home() / ".calfcord" / "codex_prompts"
 _LOCK_TIMEOUT_SECONDS = 30.0
 
 
@@ -70,7 +73,7 @@ class CachedEntry(NamedTuple):
 
 def _resolve_default_base_dir() -> Path:
     override = os.environ.get(_ENV_OVERRIDE)
-    return Path(override) if override else _DEFAULT_BASE_DIR
+    return Path(override) if override else calfcord_home() / "codex_prompts"
 
 
 class PromptCache:

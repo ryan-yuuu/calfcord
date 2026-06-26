@@ -8,7 +8,8 @@ having to rename the entry point.
 Commands:
 
   calfkit-auth codex login [--device-code] [--no-browser] [--force]
-      Run the OAuth flow and cache credentials under ``~/.calfcord/auth/``.
+      Run the OAuth flow and cache credentials under ``$CALFCORD_HOME/auth/``
+      (``~/.calfcord/auth/`` by default).
   calfkit-auth codex logout
       Delete cached credentials.
   calfkit-auth codex status

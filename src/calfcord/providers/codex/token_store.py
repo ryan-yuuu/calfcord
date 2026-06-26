@@ -9,10 +9,11 @@ time units:
   in **seconds**, ``token_type``, and standard OAuth2 fields.
 
 This module owns the conversion in both directions and provides a single
-canonical on-disk location at ``~/.calfcord/auth/`` (override with
-``CALFCORD_AUTH_DIR``). OpenHands writes during initial login; authlib
-writes during runtime refresh — both go through the same OpenHands
-``CredentialStore`` so the file format stays consistent.
+canonical on-disk location under the install root — ``$CALFCORD_HOME/auth/``
+(default ``~/.calfcord/auth/``), override with ``CALFCORD_AUTH_DIR``. OpenHands
+writes during initial login; authlib writes during runtime refresh — both go
+through the same OpenHands ``CredentialStore`` so the file format stays
+consistent.
 """
 
 from __future__ import annotations
@@ -25,17 +26,24 @@ from typing import Any
 
 from openhands.sdk.llm.auth import CredentialStore, OAuthCredentials
 
+from calfcord.providers.codex._paths import calfcord_home
+
 logger = logging.getLogger(__name__)
 
 _VENDOR = "openai"
 _AUTH_DIR_ENV = "CALFCORD_AUTH_DIR"
-_DEFAULT_AUTH_DIR = Path.home() / ".calfcord" / "auth"
 
 
 def get_credentials_dir() -> Path:
-    """Resolve the credential directory, honouring ``CALFCORD_AUTH_DIR``."""
+    """Resolve the credential directory.
+
+    ``CALFCORD_AUTH_DIR`` wins (explicit operator intent); otherwise the
+    credentials live beside the rest of the install at ``$CALFCORD_HOME/auth``
+    (``~/.calfcord/auth`` when ``CALFCORD_HOME`` is unset) so they move with a
+    relocated or per-host install rather than always landing at ``~/.calfcord``.
+    """
     override = os.environ.get(_AUTH_DIR_ENV)
-    return Path(override) if override else _DEFAULT_AUTH_DIR
+    return Path(override) if override else calfcord_home() / "auth"
 
 
 def get_credential_store() -> CredentialStore:
