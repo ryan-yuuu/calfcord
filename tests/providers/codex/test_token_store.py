@@ -178,10 +178,24 @@ class TestMakePersistCallback:
 
 
 class TestGetCredentialsDir:
-    def test_default_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_path_when_neither_set(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("CALFCORD_AUTH_DIR", raising=False)
-        assert get_credentials_dir() == Path.home() / ".calfcord" / "auth"
+        monkeypatch.delenv("CALFCORD_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_credentials_dir() == tmp_path / ".calfcord" / "auth"
 
     def test_respects_env_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path))
         assert get_credentials_dir() == tmp_path
+
+    def test_lands_under_calfcord_home_when_set(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # The bug: a relocated install (or systemd Environment=CALFCORD_HOME=…)
+        # must keep credentials beside config/agents/state, not at ~/.calfcord.
+        monkeypatch.delenv("CALFCORD_AUTH_DIR", raising=False)
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "opt" / "calfcord"))
+        assert get_credentials_dir() == tmp_path / "opt" / "calfcord" / "auth"
+
+    def test_override_wins_over_calfcord_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path / "explicit"))
+        assert get_credentials_dir() == tmp_path / "explicit"

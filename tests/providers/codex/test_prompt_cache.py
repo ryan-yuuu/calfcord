@@ -197,21 +197,28 @@ class TestBaseDirResolution:
         assert cache.base_dir == target
         assert cache.base_dir.exists()
 
-    def test_default_path_used_when_env_unset(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_lands_under_calfcord_home_when_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bug: a relocated install must keep the prompt cache beside the
+        # rest of the install, not always at ~/.calfcord.
+        monkeypatch.delenv("CALFCORD_PROMPT_CACHE_DIR", raising=False)
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "opt" / "calfcord"))
+        cache = PromptCache()
+        assert cache.base_dir == tmp_path / "opt" / "calfcord" / "codex_prompts"
+        assert cache.base_dir.exists()
+
+    def test_override_wins_over_calfcord_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("CALFCORD_PROMPT_CACHE_DIR", str(tmp_path / "explicit"))
+        cache = PromptCache()
+        assert cache.base_dir == tmp_path / "explicit"
+
+    def test_default_path_when_neither_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Redirect HOME so we don't actually pollute the user's filesystem.
         monkeypatch.delenv("CALFCORD_PROMPT_CACHE_DIR", raising=False)
+        monkeypatch.delenv("CALFCORD_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
-        # Force Path.home() to recompute by patching the module-level helper.
-        import importlib
-
-        from calfcord.providers.codex import prompt_cache as module
-
-        importlib.reload(module)
-        try:
-            cache = module.PromptCache()
-            assert cache.base_dir == tmp_path / ".calfcord" / "codex_prompts"
-        finally:
-            importlib.reload(module)
+        cache = PromptCache()
+        assert cache.base_dir == tmp_path / ".calfcord" / "codex_prompts"
 
 
 class TestEntryShape:
