@@ -1,9 +1,14 @@
 """Unit tests for AgentFactory.
 
-The factory constructs a calfkit ``Worker`` over a single vanilla
-``Agent`` node. These tests verify the wiring without invoking a real LLM:
-the ``model_client_factory`` constructor argument lets us inject a fake
-so no provider client is constructed.
+The factory constructs a calfkit ``Worker`` over a single vanilla, **name-
+addressed** ``Agent`` node. These tests verify the wiring without invoking a
+real LLM: the ``model_client_factory`` constructor argument lets us inject a
+fake so no provider client is constructed.
+
+Name-addressing (calfkit 0.12, ADR-0017) means the built agent declares no
+channel ``subscribe_topics`` and no addressing gate — it is reached by name on
+its automatic private input topic. A2A/handoff reach is declared natively via
+``peers`` from the ``a2a``/``handoff`` frontmatter fields.
 """
 
 from __future__ import annotations
@@ -14,31 +19,36 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from calfkit import Handoff, Messaging
 from calfkit.nodes import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.memory import MEMORY_PROMPT_DEPS_KEY
-from calfcord.agents.state import AgentRuntimeState
 
 
 def _definition(
     *,
     agent_id: str = "scheduler",
+    description: str = "A test agent.",
     provider: Provider | None = None,
     model: str | None = None,
     tools: tuple[str, ...] = (),
     thinking_effort: str | None = None,
+    a2a: bool | tuple[str, ...] = True,
+    handoff: bool | tuple[str, ...] = True,
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
         display_name=f"Test ({agent_id})",
-        description="A test agent.",
+        description=description,
         provider=provider,
         model=model,
         tools=tools,
         thinking_effort=thinking_effort,  # type: ignore[arg-type]
+        a2a=a2a,
+        handoff=handoff,
         system_prompt="You are a test agent.",
     )
 
@@ -70,6 +80,22 @@ def _model_factory_spy() -> tuple[list[tuple[str, str]], Any]:
     return calls, factory
 
 
+def _factory(**kwargs: Any) -> AgentFactory:
+    """Construct an AgentFactory with a spy model-client factory by default."""
+    kwargs.setdefault("model_client_factory", _model_factory_spy()[1])
+    return AgentFactory(persona_sender=MagicMock(), calfkit_client=MagicMock(), **kwargs)
+
+
+def _registered_before_node_seams(node: Agent) -> list[Any]:
+    """Return the agent's ``before_node`` seam chain (the 0.12 gate successor).
+
+    A freshly built node only grows the lazy ``_seam_chains`` dict once a seam
+    is registered, so an agent with no gate has either no attribute or an empty
+    chain — both collapse to ``[]`` here.
+    """
+    return getattr(node, "_seam_chains", {}).get("before_node", [])
+
+
 class TestConstruction:
     def test_constructs_with_required_args(self) -> None:
         factory = AgentFactory(persona_sender=MagicMock(), calfkit_client=MagicMock())
@@ -78,251 +104,112 @@ class TestConstruction:
 
 class TestBuild:
     def test_returns_worker_with_one_node(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition())
         # Worker stores nodes in ``_nodes`` (internal; verified by reading
         # calfkit/worker/worker.py).
         assert len(worker._nodes) == 1
         assert isinstance(worker._nodes[0], Agent)
 
-    def test_node_identity_matches_definition(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(agent_id="scheduler"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+    def test_node_name_matches_definition(self) -> None:
+        """The agent is addressed by name: ``Agent(name=...)`` -> ``node_id``."""
+        worker = _factory().build(_definition(agent_id="scheduler"))
         assert worker._nodes[0].node_id == "scheduler"
 
-    def test_subscribe_topics_use_in_suffix(self) -> None:
-        """Bridge publishes to ``discord.channel.{cid}.in``; agent must match.
-        Per-agent private return topic is at index [0]; per-agent inbox
-        ``agent.{id}.in`` is appended last for A2A."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(),
-            AgentRuntimeState(channels=[100, 200, 300]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].subscribe_topics == [
-            "scheduler.private.return",
-            "discord.channel.100.in",
-            "discord.channel.200.in",
-            "discord.channel.300.in",
-            "agent.scheduler.in",
-        ]
+    def test_description_is_wired_into_agent(self) -> None:
+        """``description=`` must reach the Agent or every AgentCard.description
+        is ``None`` and both the mesh roster and the message_agent peer
+        directory render blank."""
+        node = _factory().build_node(_definition(description="Books and preps meetings"))
+        assert node._description == "Books and preps meetings"
 
-    def test_subscribe_topic_template_override(self) -> None:
-        """The template is configurable for tests / alternate deployments.
-        The per-agent inbox and private return topic are independent of
-        the channel template."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            subscribe_topic_template="my.test.channel.{cid}",
-        )
-        worker = factory.build(
-            _definition(),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].subscribe_topics == [
-            "scheduler.private.return",
-            "my.test.channel.100",
-            "agent.scheduler.in",
-        ]
+    def test_no_channel_subscribe_topics(self) -> None:
+        """Name-addressing: the agent declares no channel subscriptions; calfkit
+        reaches it on its automatic private input topic."""
+        node = _factory().build_node(_definition())
+        assert node.subscribe_topics == []
 
-    def test_per_agent_inbox_uses_agent_id(self) -> None:
-        """Inbox suffix derives from agent_id, not display_name or slash."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(agent_id="researcher"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].subscribe_topics[-1] == "agent.researcher.in"
+    def test_no_publish_topic_steps_mirror(self) -> None:
+        """The old ``publish_topic=AGENT_STEPS_TOPIC`` steps mirror is gone —
+        live progress now rides the caller's run stream."""
+        node = _factory().build_node(_definition())
+        assert node.publish_topic is None
 
-    def test_private_return_topic_is_at_index_zero(self) -> None:
-        """Calfkit uses ``subscribe_topics[0]`` as the callback topic for
-        tool ``Call`` envelopes (``base.py:_publish_action``) and as the
-        ``TailCall`` retry target (``agent.py``). If a co-tenant agent's
-        channel topic ever ended up at index 0, the other agent would
-        receive every tool return and emit duplicate replies — pin the
-        ordering invariant here so a future refactor that reorders the
-        list trips this test first."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(agent_id="researcher"),
-            AgentRuntimeState(channels=[100, 200]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].subscribe_topics[0] == "researcher.private.return"
+    def test_no_addressing_gates_registered(self) -> None:
+        """The addressable / addressed-to-me gates are removed: a name-addressed
+        agent registers no ``before_node`` seam."""
+        node = _factory().build_node(_definition())
+        assert _registered_before_node_seams(node) == []
 
-    def test_private_return_topic_is_per_agent(self) -> None:
-        """Two co-tenant agents must get distinct private return topics —
-        otherwise the workaround collapses back to the shared-topic bug.
-        The topic name is derived from agent_id, so distinct ids produce
-        distinct topics by construction; this guard pins that contract."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker_a = factory.build(
-            _definition(agent_id="alpha"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
-        worker_b = factory.build(
-            _definition(agent_id="bravo"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
-        assert worker_a._nodes[0].subscribe_topics[0] != worker_b._nodes[0].subscribe_topics[0]
-        assert worker_a._nodes[0].subscribe_topics[0] == "alpha.private.return"
-        assert worker_b._nodes[0].subscribe_topics[0] == "bravo.private.return"
 
-    def test_gates_registered_in_short_circuit_order(self) -> None:
-        """Addressable gate first (cheap), addressed-to-me second (content-based)."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(agent_id="scheduler"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
-        node = worker._nodes[0]
-        assert len(node.gates) == 2
-        assert node.gates[0].__name__ == "addressable_scheduler"
-        assert node.gates[1].__name__ == "addressed_to_me_scheduler"
+class TestPeers:
+    """``a2a``/``handoff`` frontmatter -> native ``peers`` (Messaging/Handoff)."""
 
-    def test_empty_channels_raises(self) -> None:
-        """An inert worker (no subscriptions) is a configuration bug; fail fast."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        with pytest.raises(ValueError, match="no channels"):
-            factory.build(_definition(), AgentRuntimeState(channels=[]), MagicMock())
+    def test_default_both_a2a_and_handoff_discover(self) -> None:
+        """Both fields default ``True`` -> a discovering Messaging + Handoff."""
+        node = _factory().build_node(_definition())
+        assert node._peers == (Messaging(discover=True), Handoff(discover=True))
+
+    def test_a2a_false_omits_messaging(self) -> None:
+        node = _factory().build_node(_definition(a2a=False))
+        assert node._peers == (Handoff(discover=True),)
+
+    def test_handoff_false_omits_handoff(self) -> None:
+        node = _factory().build_node(_definition(handoff=False))
+        assert node._peers == (Messaging(discover=True),)
+
+    def test_both_false_yields_no_peers(self) -> None:
+        """No A2A and no handoff -> ``peers=None`` reaches the Agent (empty tuple)."""
+        node = _factory().build_node(_definition(a2a=False, handoff=False))
+        assert node._peers == ()
+
+    def test_a2a_list_restricts_to_named_peers(self) -> None:
+        node = _factory().build_node(_definition(a2a=("scribe", "researcher")))
+        assert Messaging("scribe", "researcher") in node._peers
+        # The named-peer Messaging does not discover.
+        messaging = next(p for p in node._peers if isinstance(p, Messaging))
+        assert messaging.names == ("scribe", "researcher")
+        assert messaging.discover is False
+
+    def test_handoff_list_restricts_to_named_targets(self) -> None:
+        node = _factory().build_node(_definition(handoff=("scribe",)))
+        handoff = next(p for p in node._peers if isinstance(p, Handoff))
+        assert handoff.names == ("scribe",)
+        assert handoff.discover is False
 
 
 class TestProviderResolution:
     def test_default_provider_is_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        _factory(model_client_factory=model_factory).build(_definition(provider=None))
         assert calls[0][0] == "anthropic"
 
     def test_definition_provider_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "anthropic")
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_provider="anthropic",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider="openai", model="gpt-5"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_provider="anthropic", model_client_factory=model_factory)
+        factory.build(_definition(provider="openai", model="gpt-5"))
         assert calls[0][0] == "openai"
 
     def test_env_provider_used_when_definition_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai")
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_provider="anthropic",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider=None, model="gpt-5"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_provider="anthropic", model_client_factory=model_factory)
+        factory.build(_definition(provider=None, model="gpt-5"))
         assert calls[0][0] == "openai"
 
     def test_ctor_default_used_when_neither_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_provider="openai",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider=None, model="gpt-5"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_provider="openai", model_client_factory=model_factory)
+        factory.build(_definition(provider=None, model="gpt-5"))
         assert calls[0][0] == "openai"
 
     def test_unknown_env_provider_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Env var can carry a typo; surface it at build time."""
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "cohere")
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
         with pytest.raises(ValueError, match="unknown provider 'cohere'"):
-            factory.build(
-                _definition(provider=None),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            _factory().build(_definition(provider=None))
 
 
 class TestModelResolution:
@@ -330,49 +217,22 @@ class TestModelResolution:
         """Definition takes precedence over env var, ctor default, and provider default."""
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_MODEL", "claude-from-env")
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_model="claude-from-ctor",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(model="claude-from-defn"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_model="claude-from-ctor", model_client_factory=model_factory)
+        factory.build(_definition(model="claude-from-defn"))
         assert calls[0][1] == "claude-from-defn"
 
     def test_env_var_used_when_definition_model_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_MODEL", "claude-from-env")
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_model="claude-from-ctor",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(model=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_model="claude-from-ctor", model_client_factory=model_factory)
+        factory.build(_definition(model=None))
         assert calls[0][1] == "claude-from-env"
 
     def test_ctor_default_used_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            default_model="claude-from-ctor",
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(model=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(default_model="claude-from-ctor", model_client_factory=model_factory)
+        factory.build(_definition(model=None))
         assert calls[0][1] == "claude-from-ctor"
 
     def test_provider_default_used_as_final_fallback_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -380,32 +240,14 @@ class TestModelResolution:
         default Claude model."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider="anthropic", model=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        _factory(model_client_factory=model_factory).build(_definition(provider="anthropic", model=None))
         assert calls[0] == ("anthropic", "claude-sonnet-4-5")
 
     def test_provider_default_used_as_final_fallback_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without any model hint, openai agents fall back to the OpenAI default."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider="openai", model=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        _factory(model_client_factory=model_factory).build(_definition(provider="openai", model=None))
         assert calls[0] == ("openai", "gpt-5-mini")
 
     def test_openai_codex_resolves_to_none_when_no_model_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,16 +255,7 @@ class TestModelResolution:
         passed through so the Codex client resolves a live-catalog default."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _definition(provider="openai-codex", model=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        _factory(model_client_factory=model_factory).build(_definition(provider="openai-codex", model=None))
         assert calls[0] == ("openai-codex", None)
 
 
@@ -443,69 +276,28 @@ class TestThinkingEffortBaking:
     into the calfkit Agent constructor as a tier-2 default."""
 
     def test_anthropic_high_passes_thinking_dict(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(provider="anthropic", thinking_effort="high"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition(provider="anthropic", thinking_effort="high"))
         agent_loop = worker._nodes[0]._agent_loop  # internal access acceptable in tests
         assert agent_loop.model_settings == {"anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}}
 
     def test_openai_medium_passes_reasoning_effort(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(provider="openai", thinking_effort="medium"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition(provider="openai", thinking_effort="medium"))
         agent_loop = worker._nodes[0]._agent_loop
         # Matches the operator → OpenAI mapping in
-        # :mod:`calfcord.agents.thinking`: operator
-        # ``medium`` → OpenAI ``"medium"`` after the ramp shift that
-        # accompanied the ``minimal`` tier addition. Was ``"low"``
-        # under the previous mapping.
+        # :mod:`calfcord.agents.thinking`: operator ``medium`` → OpenAI
+        # ``"medium"`` after the ramp shift that accompanied the ``minimal``
+        # tier addition.
         assert agent_loop.model_settings == {"openai_reasoning_effort": "medium"}
 
     def test_no_effort_in_definition_no_model_settings(self) -> None:
         """thinking_effort=None → no tier-2 model_settings."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(provider="anthropic"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition(provider="anthropic"))
         agent_loop = worker._nodes[0]._agent_loop
         assert agent_loop.model_settings is None
 
     def test_effort_none_passes_empty_dict(self) -> None:
         """Explicit "none" → empty dict (calfkit merges as no-op)."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(provider="openai", thinking_effort="none"),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition(provider="openai", thinking_effort="none"))
         agent_loop = worker._nodes[0]._agent_loop
         assert agent_loop.model_settings == {}
 
@@ -558,39 +350,15 @@ class TestToolsWiring:
     def test_empty_tools_passes_none_to_agent(self) -> None:
         """Empty tuple → ``Agent(tools=None)`` (calfkit's no-tools sentinel).
         ``tools=()`` is the explicit "I want no tools" frontmatter case."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={},
-        )
-        worker = factory.build(
-            _definition(tools=()),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory(tool_registry={}).build(_definition(tools=()))
         assert worker._nodes[0].tools == []
 
     def test_tools_none_expands_to_every_registered_tool(self) -> None:
         """``definition.tools is None`` means "frontmatter omitted ``tools:``
-        line" — the factory expands it to every entry in the tool registry.
-        The loader normalizes this for .md-loaded specs, but code-built
-        definitions (tests, the router build path) hit this branch directly."""
-        _, model_factory = _model_factory_spy()
+        line" — the factory expands it to every entry in the tool registry."""
         fake_a = _fake_tool_node("alpha")
         fake_b = _fake_tool_node("beta")
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"alpha": fake_a, "beta": fake_b},
-        )
-        worker = factory.build(
-            _definition(tools=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory(tool_registry={"alpha": fake_a, "beta": fake_b}).build(_definition(tools=None))
         # ``_resolve_tools`` returns ``registry.values()`` for ``tools=None``,
         # so the agent's bindings are exactly the registry nodes' bindings, in
         # insertion order (calfkit ≥ 0.9 expands ToolNodeDefs to ToolBindings
@@ -600,53 +368,22 @@ class TestToolsWiring:
     def test_known_tool_name_is_wired_through_registry(self) -> None:
         """A name listed in ``tools:`` resolves to the registry's ToolNodeDef,
         whose bindings land in ``Agent.tools``."""
-        _, model_factory = _model_factory_spy()
         fake_calendar = _fake_tool_node("calendar")
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"calendar": fake_calendar},
-        )
-        worker = factory.build(
-            _definition(tools=("calendar",)),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory(tool_registry={"calendar": fake_calendar}).build(_definition(tools=("calendar",)))
         assert worker._nodes[0].tools == list(fake_calendar.tool_bindings())
 
     def test_unknown_tool_name_raises_with_known_list(self) -> None:
         """Typo in ``.md`` fails at build, listing every unknown plus
         what the registry actually contains so the operator can fix it."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"calendar": _fake_tool_node("calendar")},
-        )
+        factory = _factory(tool_registry={"calendar": _fake_tool_node("calendar")})
         with pytest.raises(ValueError, match="unknown tool"):
-            factory.build(
-                _definition(agent_id="scheduler", tools=("calndar",)),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            factory.build(_definition(agent_id="scheduler", tools=("calndar",)))
 
     def test_unknown_tool_error_aggregates_multiple_names(self) -> None:
         """Several typos surface in one message — operator fixes the .md once."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"calendar": _fake_tool_node("calendar")},
-        )
+        factory = _factory(tool_registry={"calendar": _fake_tool_node("calendar")})
         with pytest.raises(ValueError) as excinfo:
-            factory.build(
-                _definition(agent_id="scheduler", tools=("calndar", "emial")),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            factory.build(_definition(agent_id="scheduler", tools=("calndar", "emial")))
         assert "calndar" in str(excinfo.value)
         assert "emial" in str(excinfo.value)
 
@@ -656,46 +393,26 @@ class TestToolsWiring:
         ``_tool_selectors``) — one per server, with explicit tool picks
         merged into a sorted ``include`` tuple. The deferred side is what
         makes the Worker auto-register the capability view."""
-        from calfkit.mcp import MCPToolboxRef
+        from calfkit.mcp import MCPToolbox
 
-        _, model_factory = _model_factory_spy()
         fake_shell = _fake_tool_node("shell")
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"shell": fake_shell},
-        )
-        worker = factory.build(
-            _definition(tools=("shell", "mcp/gmail/send", "mcp/gmail/search", "mcp/docs")),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        factory = _factory(tool_registry={"shell": fake_shell})
+        worker = factory.build(_definition(tools=("shell", "mcp/gmail/send", "mcp/gmail/search", "mcp/docs")))
         agent = worker._nodes[0]
         assert agent.tools == list(fake_shell.tool_bindings())
         assert agent._tool_selectors == [
-            MCPToolboxRef("docs"),
-            MCPToolboxRef("gmail", include=("search", "send")),
+            MCPToolbox("docs"),
+            MCPToolbox("gmail", include=("search", "send")),
         ]
 
     def test_build_log_lists_mcp_grants_by_server(self, caplog: pytest.LogCaptureFixture) -> None:
         """The build log enumerates MCP grants as ``mcp:<server>`` — the
         operator-facing record of which servers an agent may reach. The
-        label rides on the upstream ref's ``toolbox_id`` field, so a silent
+        label rides on the public ``MCPToolbox.name`` field, so a silent
         upstream rename must fail here, not in production logs."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"shell": _fake_tool_node("shell")},
-        )
+        factory = _factory(tool_registry={"shell": _fake_tool_node("shell")})
         with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
-            factory.build(
-                _definition(tools=("shell", "mcp/gmail/send", "mcp/docs")),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            factory.build(_definition(tools=("shell", "mcp/gmail/send", "mcp/docs")))
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
         assert "mcp:docs" in message
         assert "mcp:gmail" in message
@@ -703,18 +420,7 @@ class TestToolsWiring:
     def test_mcp_only_agent_builds_with_no_builtin_bindings(self) -> None:
         """An agent may declare only MCP tools; it builds with zero static
         bindings and resolves everything per turn from the capability view."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={},
-        )
-        worker = factory.build(
-            _definition(tools=("mcp/gmail",)),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory(tool_registry={}).build(_definition(tools=("mcp/gmail",)))
         agent = worker._nodes[0]
         assert agent.tools == []
         assert len(agent._tool_selectors) == 1
@@ -722,38 +428,17 @@ class TestToolsWiring:
     def test_tools_none_grants_builtins_only_never_mcp(self) -> None:
         """The "tools omitted -> all tools" default expands to every BUILTIN;
         MCP tools are always explicit, so no selectors appear."""
-        _, model_factory = _model_factory_spy()
         fake_a = _fake_tool_node("alpha")
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={"alpha": fake_a},
-        )
-        worker = factory.build(
-            _definition(tools=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory(tool_registry={"alpha": fake_a}).build(_definition(tools=None))
         assert worker._nodes[0]._tool_selectors == []
 
     def test_unknown_builtin_error_not_confused_by_mcp_entries(self) -> None:
         """A bogus bare name still raises the aggregate unknown-tool error;
         the co-declared ``mcp/...`` entry is NOT reported as unknown (it is
         not a builtin lookup)."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            tool_registry={},
-        )
+        factory = _factory(tool_registry={})
         with pytest.raises(ValueError, match=r"\['definitely_not_real'\]"):
-            factory.build(
-                _definition(tools=("definitely_not_real", "mcp/gmail")),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            factory.build(_definition(tools=("definitely_not_real", "mcp/gmail")))
 
     @pytest.mark.parametrize(
         "tool_name",
@@ -778,27 +463,19 @@ class TestToolsWiring:
         if a new tool is added to the registry but a wrapper isn't, or
         vice versa, this test will fail.
         """
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-            # tool_registry=None → use the real TOOL_REGISTRY.
-        )
-        worker = factory.build(
-            _definition(tools=(tool_name,)),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        # tool_registry=None → use the real TOOL_REGISTRY.
+        worker = _factory().build(_definition(tools=(tool_name,)))
         resolved = worker._nodes[0].tools
         assert resolved is not None and len(resolved) == 1
         assert resolved[0].name == tool_name
 
 
 class TestRouterDefinitionValidation:
-    """Schema-level invariants on the router definition itself.
+    """Schema-level invariants on the (still-present) ``role`` field validator.
 
-    The model_validator on AgentDefinition catches:
+    These exercise :class:`AgentDefinition` validation directly — no factory
+    build, no name-addressing — so they are unaffected by the 0.12 migration.
+    The model_validator catches:
         - role=router + tools=... (forbidden)
         - role=router + publish_topic=None (required)
     """
@@ -813,7 +490,7 @@ class TestRouterDefinitionValidation:
                 description="x",
                 role="router",
                 publish_topic="routing.decisions",
-                tools=("private_chat",),
+                tools=("calendar",),
                 system_prompt="x",
             )
 
@@ -836,7 +513,7 @@ class TestRouterDefinitionValidation:
             agent_id="scribe",
             display_name="Scribe",
             description="x",
-            tools=("private_chat",),
+            tools=("calendar",),
             system_prompt="x",
         )
 
@@ -856,23 +533,6 @@ class TestRouterDefinitionValidation:
                 system_prompt="x",
             )
 
-    def test_router_with_empty_publish_topic_raises(self) -> None:
-        """``min_length=1`` on the field catches the empty-string case
-        BEFORE the model_validator runs — pydantic's field validation
-        runs first, so the error mentions the field constraint rather
-        than the router-specific message."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            AgentDefinition(
-                agent_id="_router",
-                display_name="Router",
-                description="x",
-                role="router",
-                publish_topic="",
-                system_prompt="x",
-            )
-
 
 class TestMemoryFlag:
     """``memory: true`` requires the filesystem tools the memory block tells the
@@ -883,90 +543,30 @@ class TestMemoryFlag:
         """MCP selectors cannot satisfy the memory guard: their tools resolve
         at runtime, so the factory cannot prove read_file/write_file exist.
         memory: true therefore requires the BUILTIN fs tools explicitly."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
         with pytest.raises(ValueError, match="memory needs read_file and"):
-            factory.build(
-                _memory_definition(tools=("mcp/files",)),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            _factory().build(_memory_definition(tools=("mcp/files",)))
 
     def test_memory_agent_with_explicit_fs_tools_builds(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _memory_definition(tools=("read_file", "write_file")),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_memory_definition(tools=("read_file", "write_file")))
         assert worker._nodes[0].node_id == "scribe"
 
     def test_memory_agent_with_all_tools_builds(self) -> None:
         """``tools`` omitted (None) grants every builtin — includes the fs
         tools, so the guard passes."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _memory_definition(tools=None),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_memory_definition(tools=None))
         assert worker._nodes[0].node_id == "scribe"
 
     def test_memory_true_without_tools_raises(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
         with pytest.raises(ValueError, match="memory: true"):
-            factory.build(
-                _memory_definition(tools=()),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            _factory().build(_memory_definition(tools=()))
 
     def test_memory_true_missing_write_file_raises(self) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
         with pytest.raises(ValueError, match="write_file"):
-            factory.build(
-                _memory_definition(tools=("read_file",)),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
+            _factory().build(_memory_definition(tools=("read_file",)))
 
     def test_non_memory_agent_unaffected_by_guard(self) -> None:
         """A ``memory=False`` agent with no tools builds fine (guard skipped)."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _definition(tools=()),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        worker = _factory().build(_definition(tools=()))
         assert worker._nodes[0].system_prompt == "You are a test agent."
 
     def test_memory_agent_registers_the_instructions_hook(self) -> None:
@@ -975,16 +575,8 @@ class TestMemoryFlag:
         ``_agent_loop._instructions`` (alongside the literal system prompt). Without
         this, the template would reach ``deps`` but never be injected — a silent
         no-op the guard alone can't catch."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        node = factory.build_node(
+        node = _factory().build_node(
             _memory_definition(agent_id="scribe", tools=("read_file", "write_file")),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
         )
         hooks = [i for i in node._agent_loop._instructions if callable(i)]
         assert len(hooks) == 1, "memory agent should register exactly one instructions hook"
@@ -995,15 +587,5 @@ class TestMemoryFlag:
     def test_non_memory_agent_registers_no_instructions_hook(self) -> None:
         """A memory=False agent must NOT carry the hook — only the literal
         system prompt is in ``_instructions``."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        node = factory.build_node(
-            _definition(tools=("read_file",)),
-            AgentRuntimeState(channels=[100]),
-            MagicMock(),
-        )
+        node = _factory().build_node(_definition(tools=("read_file",)))
         assert [i for i in node._agent_loop._instructions if callable(i)] == []
