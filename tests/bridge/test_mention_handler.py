@@ -81,6 +81,10 @@ class _FakeClient:
 class _FakeRoster:
     def __init__(self, online: frozenset[str] | None) -> None:
         self._online = online
+        self.refreshes = 0
+
+    async def refresh(self) -> None:
+        self.refreshes += 1
 
     def online(self) -> frozenset[str] | None:
         return self._online

@@ -144,6 +144,10 @@ class MentionHandler:
         self._memory_deps = memory_deps
 
     async def handle(self, req: MentionRequest) -> None:
+        # Refresh the mesh snapshot once per turn so the (synchronous) online()
+        # read below reflects the current roster — there is no background refresh
+        # loop; a mesh read is an in-memory ktable snapshot.
+        await self._roster.refresh()
         online = self._roster.online()
         if online is None:
             # Mesh unavailable — we cannot tell who is online, so fail fast
