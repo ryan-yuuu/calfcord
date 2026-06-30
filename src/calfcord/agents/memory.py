@@ -27,6 +27,7 @@ example survive untouched.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -34,6 +35,8 @@ from pathlib import Path
 from calfkit._vendor.pydantic_ai import RunContext
 
 from calfcord.agents.definition import AgentDefinition
+
+logger = logging.getLogger(__name__)
 
 _PROMPT_PATH_ENV = "CALFCORD_MEMORY_PROMPT_PATH"
 _DEFAULT_PROMPT_PATH = Path(__file__).with_name("memory_prompt.md")
@@ -73,9 +76,7 @@ def load_memory_prompt() -> str:
         # ``UnicodeError`` (covers ``UnicodeDecodeError``) is a ``ValueError``
         # subclass, not an ``OSError`` — a readable-but-non-UTF-8 override file
         # would otherwise escape as a bare, context-less ``ValueError``.
-        raise ValueError(
-            f"cannot read memory prompt at {path} ({_PROMPT_PATH_ENV}={override!r}): {e}"
-        ) from e
+        raise ValueError(f"cannot read memory prompt at {path} ({_PROMPT_PATH_ENV}={override!r}): {e}") from e
     if not text.strip():
         raise ValueError(f"memory prompt at {path} is empty")
     _cached_prompt = text
@@ -141,6 +142,45 @@ def memory_prompt_deps_for_registry(specs: Iterable[AgentDefinition]) -> dict[st
     if not any(spec.memory for spec in specs):
         return {}
     return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
+
+
+class MemoryPromptDeps:
+    """Always-ship memory-prompt ``deps`` provider for the pure-``Client`` bridge (R-A4).
+
+    The bridge no longer holds a registry, so the old ``any(spec.memory)`` gate
+    (:func:`memory_prompt_deps_for_registry`) is gone: the template is shipped on
+    **every** bridge-originated call. Non-memory agents ignore the key (their
+    instructions hook returns ``None``), so the only cost is a small constant wire
+    payload — and ``deps`` propagate to native ``message_agent`` peers and handoff
+    targets, so A2A memory still works.
+
+    Callable so the ``MentionHandler`` invokes it per turn as ``memory_deps()``.
+    Holds one-shot load-error state: a bad ``CALFCORD_MEMORY_PROMPT_PATH`` logs
+    once (not once-per-turn) and degrades to ``{}``; because
+    :func:`load_memory_prompt` re-reads on failure, a fixed path self-heals on the
+    next turn and the recovery is logged once as the error log re-arms.
+    """
+
+    def __init__(self) -> None:
+        self._load_failed = False
+
+    def __call__(self) -> dict[str, str]:
+        try:
+            template = load_memory_prompt()
+        except ValueError as exc:
+            if not self._load_failed:
+                self._load_failed = True
+                logger.error(
+                    "failed to load the memory prompt (%s); memory-enabled agents will "
+                    "run without their memory instructions until it loads successfully",
+                    exc,
+                    exc_info=True,
+                )
+            return {}
+        if self._load_failed:
+            self._load_failed = False
+            logger.info("memory prompt loaded successfully; memory instructions restored")
+        return {MEMORY_PROMPT_DEPS_KEY: template}
 
 
 def _reset_cache_for_tests() -> None:

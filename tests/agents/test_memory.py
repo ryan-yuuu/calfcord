@@ -96,3 +96,41 @@ class TestMemoryInstructionsHook:
         deps = {memory.MEMORY_PROMPT_DEPS_KEY: "{{MEMORY_DIR}}"}
         assert memory.memory_instructions("scribe")(self._ctx(deps)) == "memory/scribe/"
         assert memory.memory_instructions("conan")(self._ctx(deps)) == "memory/conan/"
+
+
+class TestMemoryPromptDeps:
+    """The always-ship provider (R-A4): no registry gate, one-shot error logging."""
+
+    def test_always_ships_template(self) -> None:
+        deps = memory.MemoryPromptDeps()()
+        assert memory.MEMORY_PROMPT_DEPS_KEY in deps
+        assert deps[memory.MEMORY_PROMPT_DEPS_KEY].strip()
+
+    def test_load_failure_degrades_to_empty_and_logs_once(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv(memory._PROMPT_PATH_ENV, str(tmp_path / "missing.md"))
+        memory._reset_cache_for_tests()
+        provider = memory.MemoryPromptDeps()
+        with caplog.at_level("ERROR"):
+            assert provider() == {}
+            assert provider() == {}  # second call: still degraded
+        # one-shot: the error is logged exactly once, not once per turn
+        assert sum("failed to load the memory prompt" in r.message for r in caplog.records) == 1
+
+    def test_recovers_and_logs_once_after_fix(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        bad = tmp_path / "missing.md"
+        monkeypatch.setenv(memory._PROMPT_PATH_ENV, str(bad))
+        memory._reset_cache_for_tests()
+        provider = memory.MemoryPromptDeps()
+        assert provider() == {}  # arm the failure state
+        good = tmp_path / "prompt.md"
+        good.write_text("recovered memory template", encoding="utf-8")
+        monkeypatch.setenv(memory._PROMPT_PATH_ENV, str(good))
+        memory._reset_cache_for_tests()
+        with caplog.at_level("INFO"):
+            deps = provider()
+        assert deps[memory.MEMORY_PROMPT_DEPS_KEY] == "recovered memory template"
+        assert sum("memory prompt loaded successfully" in r.message for r in caplog.records) == 1
