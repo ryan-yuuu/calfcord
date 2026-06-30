@@ -187,6 +187,28 @@ class TestAgentDefinitionValidators:
         d = _make_definition(thinking_effort=effort)
         assert d.thinking_effort == effort
 
+    def test_a2a_defaults_to_true(self) -> None:
+        """Native A2A (message_agent) is on by default — every agent can reach
+        any peer unless it opts out (`a2a: false`) or restricts (`a2a: [names]`)."""
+        assert _make_definition().a2a is True
+
+    def test_a2a_accepts_false(self) -> None:
+        assert _make_definition(a2a=False).a2a is False
+
+    def test_a2a_accepts_peer_list_coerced_to_tuple(self) -> None:
+        assert _make_definition(a2a=["scribe", "conan"]).a2a == ("scribe", "conan")
+
+    def test_handoff_defaults_to_true(self) -> None:
+        """Native handoff is on by default (replaces the in-channel @<agent>
+        convention); opt out with `handoff: false` or restrict with a list."""
+        assert _make_definition().handoff is True
+
+    def test_handoff_accepts_false(self) -> None:
+        assert _make_definition(handoff=False).handoff is False
+
+    def test_handoff_accepts_peer_list_coerced_to_tuple(self) -> None:
+        assert _make_definition(handoff=["scribe"]).handoff == ("scribe",)
+
     @pytest.mark.parametrize("bad_effort", ["ludicrous", "HIGH", "", "veryhigh"])
     def test_thinking_effort_rejects_unknown_values(self, bad_effort: str) -> None:
         with pytest.raises(ValidationError, match="thinking_effort"):

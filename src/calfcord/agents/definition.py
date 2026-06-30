@@ -191,6 +191,26 @@ class AgentDefinition(BaseModel):
     Default ``False`` so existing agents are unchanged. A memory-enabled agent
     must have the ``read_file`` and ``write_file`` tools — the factory enforces
     this at build time. See :doc:`docs/authoring-agents`."""
+    a2a: bool | tuple[str, ...] = True
+    """Native agent-to-agent messaging (calfkit's auto-injected ``message_agent``
+    tool + ``peers=[Messaging(...)]``).
+
+    - ``True`` (default) — reach any agent (``Messaging(discover=True)``); the
+      live peer directory is rendered into the agent's prompt.
+    - ``False`` — no A2A (the agent gets no ``message_agent`` tool).
+    - ``[name, ...]`` — restrict to those peers (``Messaging(*names)``).
+
+    Replaces the old opt-in (listing the now-removed ``private_chat`` tool);
+    default-on makes native A2A frictionless."""
+    handoff: bool | tuple[str, ...] = True
+    """Native handoff — transfer the caller's turn to a peer
+    (``peers=[Handoff(...)]``; the model emits ``HandoffRequest``).
+
+    - ``True`` (default) — hand off to any agent (``Handoff(discover=True)``).
+    - ``False`` — no handoff.
+    - ``[name, ...]`` — restrict to those targets (``Handoff(*names)``).
+
+    Replaces the in-channel ``@<agent_id>`` handoff convention (C7)."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by
