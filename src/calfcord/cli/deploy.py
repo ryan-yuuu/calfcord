@@ -20,7 +20,7 @@ Three targets, each with a different honesty posture (§11.6):
   still headed as a reference because per-host paths/users vary.
 * **k8s** — *reference* manifests (clearly annotated): a broker workload, a
   ConfigMap with the shared ``CALF_HOST_URL``, and one Deployment per process type
-  (bridge / router / tools) plus one per *defined* agent, all on the shipped
+  (bridge / tools) plus one per *defined* agent, all on the shipped
   calfcord image running the ``calfkit-*`` console scripts the compose uses. NOT
   ``calfcord start`` (there is no in-pod supervisor); each process type is its own
   workload dialing the shared broker — the Altitude-3 distributed shape. Secrets
@@ -122,7 +122,6 @@ def _resolve_config_host_url(server_urls: str) -> str:
 # `calfkit-agent <name>` so a pod runs exactly one agent (crash isolation).
 _PROCESS_COMMANDS = {
     "bridge": "calfkit-bridge",
-    "router": "calfkit-router",
     "tools": "calfkit-tools",
 }
 
@@ -192,9 +191,7 @@ def render_systemd(*, home: str, launcher: str) -> str:
 # --- k8s ---------------------------------------------------------------------
 
 
-def _k8s_container(
-    *, name: str, image: str, command: list[str]
-) -> dict:
+def _k8s_container(*, name: str, image: str, command: list[str]) -> dict:
     """One reference container: the shipped image, a calfkit-* command, env from
     the shared ConfigMap + the out-of-band Secret (never inlined, §12.3)."""
     return {
@@ -211,7 +208,7 @@ def _k8s_container(
 def _k8s_deployment(*, name: str, image: str, command: list[str]) -> dict:
     """A single-replica Deployment running one calfcord process type/agent.
 
-    One replica per workload: the bridge/router are singletons, and an agent
+    One replica per workload: the bridge and tools are singletons, and an agent
     Deployment runs exactly one agent id for crash isolation (a second replica of
     the same agent id would double-reply, §12.5).
     """
@@ -243,7 +240,7 @@ def render_k8s(
     ``CALF_HOST_URL`` (an external ``server_urls`` flows through verbatim; a
     localhost-ish one is rewritten to the bundled broker Service so pods don't dial
     their own loopback), a broker Service + Deployment, and one Deployment per
-    process type (bridge / router / tools) plus one per *defined* agent —
+    process type (bridge / tools) plus one per *defined* agent —
     each running a ``calfkit-*`` console script on the shipped image, dialing the
     shared broker. This is the Altitude-3 distributed shape, NOT ``calfcord start``
     (no in-pod supervisor). The roster is sorted so the document order never
@@ -325,8 +322,7 @@ def render_k8s(
                                     "broker",
                                     "--storage-engine=memory://tansu/",
                                     f"--listener-url=tcp://0.0.0.0:{_K8S_BROKER_PORT}",
-                                    "--advertised-listener-url="
-                                    f"tcp://{_K8S_BROKER_SERVICE}:{cluster_broker_port}",
+                                    f"--advertised-listener-url=tcp://{_K8S_BROKER_SERVICE}:{cluster_broker_port}",
                                 ],
                                 "ports": [{"containerPort": _K8S_BROKER_PORT}],
                             }
@@ -491,9 +487,7 @@ def run(
         mcp_servers = configured_mcp_servers_or_none()
         if mcp_servers is None:
             return 1
-        manifest = render_k8s(
-            agent_ids=roster, server_urls=server_urls, mcp_servers=mcp_servers
-        )
+        manifest = render_k8s(agent_ids=roster, server_urls=server_urls, mcp_servers=mcp_servers)
     else:  # docker — guarded by the membership check above
         manifest = render_docker(repo_compose_path="docker-compose.yml", agent_ids=roster)
 

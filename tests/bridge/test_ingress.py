@@ -119,6 +119,18 @@ class TestPublish:
         assert kwargs["deps"]["discord"]["channel_id"] == 6789
         assert kwargs["deps"]["discord"]["slash_target"] == "scheduler"
 
+    async def test_ambient_message_is_dropped_without_publishing(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Ambient (non-@mention) messages go unanswered once the router is
+        removed (C2): the bridge accepts a ``kind="message"`` wire but
+        publishes nothing — there is no agent to route it to."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire(slash_target=None, kind="message"))
+        client.send.assert_not_awaited()
+
     async def test_includes_phonebook_in_deps(
         self,
         client: MagicMock,
@@ -266,28 +278,6 @@ class TestModelSettings:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.send.call_args.kwargs["model_settings"] is None
-
-    async def test_ambient_message_passes_no_model_settings(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """slash_target=None → bridge doesn't know the recipient → no
-        per-call thinking override. The ambient publish goes via
-        ``send`` to the router's ambient ingress and passes no
-        ``model_settings`` (the recipient that an override would target
-        isn't known until the fan-out picks one)."""
-        ingress = BridgeIngress(
-            client, _registry(scheduler_effort="max"), pending_wires
-        )
-        await ingress.handle(_wire(slash_target=None, kind="message"))
-        # Ambient publishes once, to the router's ambient ingress —
-        # not a channel topic.
-        client.send.assert_awaited_once()
-        kwargs = client.send.await_args.kwargs
-        assert not kwargs["topic"].startswith("discord.channel.")
-        # No per-call thinking override on the ambient publish.
-        assert kwargs.get("model_settings") is None
 
     async def test_target_missing_from_registry_passes_none(
         self,
@@ -443,40 +433,6 @@ class TestBootValidation:
         ingress = BridgeIngress(client, registry, pending_wires)
         assert ingress is not None
 
-    def test_router_included_registry_passes_boot_validation(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Production registries include the built-in router (via
-        ``AgentRegistry.from_agents_dir``'s auto-append); the boot
-        validation loops at ``BridgeIngress.__init__`` iterate
-        ``registry.all()``, which contains the router. A future
-        refactor of ``resolve_provider`` that broke on the router's
-        attributes (e.g. ``source_path=None``, empty ``tools``)
-        would crash bridge boot in production while every previous
-        test passed. Pin the contract: a router-included registry
-        must construct cleanly."""
-        from calfcord.router.definition import (
-            build_router_definition,
-        )
-
-        registry = AgentRegistry(
-            [
-                AgentDefinition(
-                    agent_id="scribe",
-                    display_name="Scribe",
-                    description="Notes.",
-                    provider="openai",
-                    tools=("private_chat",),
-                    system_prompt="x",
-                ),
-                build_router_definition(),
-            ]
-        )
-        ingress = BridgeIngress(client, registry, pending_wires)
-        assert ingress is not None
-
 
 class TestTempInstructions:
     """Per-call ``temp_instructions`` carries the channel peer roster and
@@ -522,26 +478,6 @@ class TestTempInstructions:
         ingress = BridgeIngress(client, solo, pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.send.call_args.kwargs["temp_instructions"] is None
-
-    async def test_ambient_messages_skip_slash_path(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Ambient (no slash_target) is now routed to the router's
-        ambient ingress (Phase 4), not to a channel topic. Ambient and
-        slash both publish via ``send`` now, so the invariant is
-        the topic: an ambient publish MUST NOT land on a channel topic
-        (which would bypass the router and broadcast to every
-        assistant). The router-roster ``temp_instructions`` injection
-        for ambient is covered by
-        ``tests/bridge/test_ingress_router.py``."""
-        ingress = BridgeIngress(client, _registry(), pending_wires)
-        await ingress.handle(_wire(slash_target=None, kind="message"))
-        client.send.assert_awaited_once()
-        assert not client.send.await_args.kwargs["topic"].startswith(
-            "discord.channel."
-        )
 
     async def test_instructions_injected_when_target_has_private_chat(
         self,

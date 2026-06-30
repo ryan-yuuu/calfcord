@@ -445,14 +445,12 @@ usage:
   calfcord deploy <systemd|k8s|docker> [-o PATH]
                                  generate deployment manifests (advanced)
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
-  calfcord run <bridge|agent|router|tools|mcp>
+  calfcord run <bridge|agent|tools|mcp>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
   calfcord agent <start|stop|restart> [<name>|--all]
                                  clock an agent (or every agent on this host) in/out/reload
-  calfcord router <show|set|edit|start|stop|restart [--all]>
-                                 configure / run the optional ambient-message router
   calfcord tools <start|stop|restart> [--all]
                                  bring the tools host online / offline / reload
   calfcord mcp <add|list|remove> [<server>]
@@ -516,11 +514,11 @@ case "${1:-}" in
   # The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
   # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
-  init|agent|router|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
+  init|agent|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
-      bridge|agent|router|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
+      bridge|agent|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
     esac ;;

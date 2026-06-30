@@ -52,7 +52,6 @@ from calfcord.bridge.pending_wires import PendingWires
 from calfcord.bridge.registry import AgentRegistry
 from calfcord.bridge.transcripts import TranscriptRow, TranscriptStore
 from calfcord.bridge.wire import WireAuthor, WireMessage
-from calfcord.router.definition import build_router_definition
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -84,9 +83,7 @@ def _tool_delta(*, tool_name: str = "weather", content: str = "18C") -> list[Mod
                 ToolCallPart(tool_name=tool_name, args={"q": "Tokyo"}, tool_call_id="t1"),
             ]
         ),
-        ModelRequest(
-            parts=[ToolReturnPart(tool_name=tool_name, content=content, tool_call_id="t1")]
-        ),
+        ModelRequest(parts=[ToolReturnPart(tool_name=tool_name, content=content, tool_call_id="t1")]),
     ]
 
 
@@ -145,7 +142,6 @@ def _registry(scribe_history_turns: int = 30) -> AgentRegistry:
                 history_turns=scribe_history_turns,
                 system_prompt="OpenAI scribe.",
             ),
-            build_router_definition(),
         ]
     )
 
@@ -173,9 +169,7 @@ def _fake_fetcher(records: list[HistoryRecord]) -> MagicMock:
 def _fake_store(rows: dict[str, TranscriptRow]) -> MagicMock:
     """A store stub exposing the one batch method replay calls."""
     store = MagicMock(spec=TranscriptStore)
-    store.get_by_final_message_ids = AsyncMock(
-        side_effect=lambda ids: {i: rows[i] for i in ids if i in rows}
-    )
+    store.get_by_final_message_ids = AsyncMock(side_effect=lambda ids: {i: rows[i] for i in ids if i in rows})
     return store
 
 
@@ -371,9 +365,7 @@ class TestProjectHistoryHydration:
 
 
 class TestSlashReplay:
-    async def test_two_turn_replay_splices_tools(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
+    async def test_two_turn_replay_splices_tools(self, client: MagicMock, pending_wires: PendingWires) -> None:
         """Seed a row for agent A's reply; on the next turn the tool call +
         return are spliced immediately before A's final-answer response."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
@@ -409,9 +401,7 @@ class TestSlashReplay:
         assert isinstance(message_history[3], ModelResponse)
         assert message_history[3].parts[0].content == "It's 18C."
 
-    async def test_consistency_invariant_initial_length(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
+    async def test_consistency_invariant_initial_length(self, client: MagicMock, pending_wires: PendingWires) -> None:
         """MANDATORY: the PendingEntry's initial_message_history_length equals
         len(message_history) after a HYDRATED slash build — the steps cursor
         and the snapshot must agree on the now-longer list."""
@@ -439,9 +429,7 @@ class TestSlashReplay:
         assert entry.initial_message_history_length == 4
         assert len(entry.message_history) == 4
 
-    async def test_missing_row_no_splice(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
+    async def test_missing_row_no_splice(self, client: MagicMock, pending_wires: PendingWires) -> None:
         """A self reply record with no transcript row → projection unchanged."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         records = [
@@ -460,15 +448,9 @@ class TestSlashReplay:
 
         message_history = client.send.call_args.kwargs["message_history"]
         assert len(message_history) == 2  # just request + final reply, no splice
-        assert not any(
-            isinstance(p, (ToolCallPart, ToolReturnPart))
-            for m in message_history
-            for p in m.parts
-        )
+        assert not any(isinstance(p, (ToolCallPart, ToolReturnPart)) for m in message_history for p in m.parts)
 
-    async def test_store_unset_degrades_to_no_replay(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
+    async def test_store_unset_degrades_to_no_replay(self, client: MagicMock, pending_wires: PendingWires) -> None:
         """Pre-ready window: no store injected → today's behavior, no crash."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         records = [
@@ -526,55 +508,6 @@ class TestSlashReplay:
         assert queried_ids == ["40"]
         assert "20" not in queried_ids
 
-    async def test_router_path_passes_no_hydration(
-        self, client: MagicMock, pending_wires: PendingWires
-    ) -> None:
-        """The ambient/router path must never query the store nor see tools."""
-        ingress = BridgeIngress(client, _registry(), pending_wires)
-        records = [
-            _record(message_id=10, content="hi", author_display_name="ryan"),
-            _record(
-                message_id=20,
-                content="prior",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-        ]
-        store = _fake_store({"20": _transcript_row(final_message_id=20)})
-        ingress.set_fetcher(_fake_fetcher(records))
-        ingress.set_transcript_store(store)
-
-        ambient = WireMessage(
-            event_id="evt-amb",
-            kind="message",
-            slash_target=None,
-            message_id=99,
-            channel_id=6789,
-            source_channel_id=None,
-            guild_id=4242,
-            content="just chatting",
-            author=WireAuthor(
-                discord_user_id=111,
-                display_name="ryan",
-                is_bot=False,
-                is_webhook=False,
-                avatar_url="https://cdn.discordapp.com/avatars/111/abc.png",
-                is_human_owner=True,
-            ),
-            created_at=datetime.now(UTC),
-        )
-        await ingress.handle(ambient)
-
-        # Router path never touches the transcript store.
-        store.get_by_final_message_ids.assert_not_called()
-        kw = client.send.call_args.kwargs
-        # Ambient/router sends are fire-and-forget: no point-to-point reply.
-        assert kw["reply_to"] is None
-        assert "output_type" not in kw
-        # And the router's message_history carries no tool parts.
-        router_msgs = kw["message_history"]
-        assert all(isinstance(m, ModelRequest) for m in router_msgs)
-
 
 # ---------------------------------------------------------------------------
 # _truncate_replay_tool_returns
@@ -584,9 +517,7 @@ class TestSlashReplay:
 class TestTruncateReplayToolReturns:
     def test_oversized_str_return_is_truncated(self) -> None:
         big = "x" * (REPLAY_TOOL_RETURN_MAX_CHARS + 500)
-        delta = [
-            ModelRequest(parts=[ToolReturnPart(tool_name="t", content=big, tool_call_id="t1")])
-        ]
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=big, tool_call_id="t1")])]
         out = _truncate_replay_tool_returns(delta)
         content = out[0].parts[0].content
         assert len(content) <= REPLAY_TOOL_RETURN_MAX_CHARS
@@ -595,9 +526,7 @@ class TestTruncateReplayToolReturns:
         assert delta[0].parts[0].content == big
 
     def test_short_str_return_untouched(self) -> None:
-        delta = [
-            ModelRequest(parts=[ToolReturnPart(tool_name="t", content="18C", tool_call_id="t1")])
-        ]
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content="18C", tool_call_id="t1")])]
         out = _truncate_replay_tool_returns(delta)
         # Same object (no copy when nothing needs trimming).
         assert out[0] is delta[0]
@@ -610,9 +539,7 @@ class TestTruncateReplayToolReturns:
         is lossless from the model's POV. (The old ``str``-only check missed
         this entirely.)"""
         payload = {"temp": 18, "unit": "C", "blob": "y" * (REPLAY_TOOL_RETURN_MAX_CHARS + 100)}
-        delta = [
-            ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])
-        ]
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])]
         out = _truncate_replay_tool_returns(delta)
         content = out[0].parts[0].content
         # Content is now a TRUNCATED STR (the JSON render, capped), not the dict.
@@ -626,9 +553,7 @@ class TestTruncateReplayToolReturns:
         """A structured tool return whose serialized form is well under the
         cap is left entirely alone (same object, dict content preserved)."""
         payload = {"temp": 18, "unit": "C"}
-        delta = [
-            ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])
-        ]
+        delta = [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])]
         out = _truncate_replay_tool_returns(delta)
         assert out[0] is delta[0]
         assert out[0].parts[0].content == payload
@@ -638,11 +563,7 @@ class TestTruncateReplayToolReturns:
         truncated by the same model-facing-string rule — the old check only
         matched plain ``ToolReturnPart`` and missed this subtype."""
         big = "b" * (REPLAY_TOOL_RETURN_MAX_CHARS + 200)
-        delta = [
-            ModelRequest(
-                parts=[BuiltinToolReturnPart(tool_name="web", content=big, tool_call_id="t1")]
-            )
-        ]
+        delta = [ModelRequest(parts=[BuiltinToolReturnPart(tool_name="web", content=big, tool_call_id="t1")])]
         out = _truncate_replay_tool_returns(delta)
         part = out[0].parts[0]
         # Same subtype is preserved (dataclasses.replace keeps the class).

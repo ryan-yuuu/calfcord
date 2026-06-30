@@ -17,7 +17,7 @@ Discord):
   This mirrors the agents runner's blind-spot hook, on the embedded surface.
 
 * **register-before-serve ordering** (``_run``): every consumer group — the
-  three Worker nodes (outbox / synthesized / steps) AND the raw state consumer —
+  two Worker nodes (outbox / steps) AND the raw state consumer —
   must JOIN before the Discord gateway accepts events and before the discovery
   ping is published, or replies arriving in the gap are LOST
   (``auto_offset_reset="latest"``). The embedded ``worker.start()`` joins the
@@ -223,7 +223,6 @@ def _patched_run(monkeypatch):
     monkeypatch.setattr("calfcord.bridge.gateway.DiscordIngressGateway", _make_gateway)
     monkeypatch.setattr("calfcord.bridge.gateway.Worker", _make_worker)
     monkeypatch.setattr("calfcord.bridge.gateway.build_outbox_consumer", MagicMock())
-    monkeypatch.setattr("calfcord.bridge.gateway.build_synthesized_consumer", MagicMock())
     monkeypatch.setattr("calfcord.bridge.gateway.build_steps_consumer", MagicMock())
     monkeypatch.setattr("calfcord.bridge.gateway.StepsState", MagicMock())
     monkeypatch.setattr("calfcord.bridge.gateway.run_refresher", _fake_refresher)

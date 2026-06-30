@@ -34,7 +34,6 @@ from typing import Self
 
 from calfcord.agents.definition import AgentDefinition, ThinkingEffort
 from calfcord.agents.loader import load_agents_dir
-from calfcord.router.definition import build_router_definition
 
 logger = logging.getLogger(__name__)
 
@@ -56,31 +55,6 @@ class AgentRegistry:
 
         for d in self._all:
             self._index(d)
-
-        # Multi-router detection runs after indexing so duplicate-id /
-        # display_name errors (which also fire if two routers share those
-        # fields) take precedence — operators see the more actionable
-        # "duplicate" message before the role error.
-        # Zero-router is NOT rejected here: the "exactly one router"
-        # invariant applies to the production load path
-        # (the bridge constructs the registry with
-        # ``[build_router_definition()]`` at boot;
-        # :meth:`router` raises at lookup time on a zero-router
-        # registry), but in-memory test fixtures that don't exercise
-        # routing should be allowed to omit it. A multi-router list,
-        # by contrast, is always a wiring bug (only the built-in
-        # singleton should declare role="router"; a user-defined
-        # ``agents/*.md`` accidentally setting it would land here too).
-        routers = [d for d in self._all if d.role == "router"]
-        if len(routers) > 1:
-            ids = [r.agent_id for r in routers]
-            raise ValueError(
-                f"AgentRegistry has multiple router agents {ids!r}; "
-                f"exactly one router is allowed (only the built-in "
-                f"router declared via build_router_definition() should "
-                f"set role='router' — check user-authored agents/*.md "
-                f"for an accidental role: router frontmatter field)"
-            )
 
     def _index(self, definition: AgentDefinition) -> None:
         """Insert ``definition`` into both indexes, rejecting duplicates."""
@@ -142,39 +116,7 @@ class AgentRegistry:
         from state events.
         """
         definitions = list(load_agents_dir(path))
-        definitions.append(build_router_definition())
         return cls(definitions)
-
-    def router(self) -> AgentDefinition:
-        """Return the singleton router :class:`AgentDefinition`.
-
-        :meth:`from_agents_dir` appends the built-in router on every
-        load, and the bridge's ``main()`` seeds the registry with the
-        same router. Test fixtures that build the registry directly
-        without a router will get a :class:`ValueError` from this
-        accessor — the failure is intentional and indicates the
-        registry was constructed without the router that production
-        always has.
-
-        The multi-router case can't be reached here: it raises in
-        :meth:`__init__`'s indexing-time validation. The zero-router
-        case CAN be reached (the constructor permits it for test
-        fixtures); it raises lazily here, on first lookup.
-
-        Raises:
-            ValueError: if the registry has no router agent. Operators
-                running production paths see this only on a wiring
-                regression (e.g., a refactor that drops the router seed
-                from bridge ``main()``).
-        """
-        for d in self._all:
-            if d.role == "router":
-                return d
-        raise ValueError(
-            "AgentRegistry has zero router agents; the registry was "
-            "constructed without one (production paths seed it with "
-            "build_router_definition() at bridge boot)"
-        )
 
     def by_id(self, agent_id: str) -> AgentDefinition | None:
         return self._by_id.get(agent_id)
@@ -207,17 +149,6 @@ class AgentRegistry:
         """
         incoming_id = definition.agent_id
         existing = self._by_id.get(incoming_id)
-        if existing is not None and existing.role == "router":
-            # Should never happen: agents don't announce with role="router",
-            # and the only router is the locally-built singleton. Log and
-            # refuse.
-            logger.warning(
-                "refusing to upsert agent_id=%r from state event: matches "
-                "existing router definition; state events for router agent_id "
-                "must not be published",
-                incoming_id,
-            )
-            return False
         if existing is None:
             self._index(definition)
             self._all.append(definition)
@@ -251,20 +182,11 @@ class AgentRegistry:
         existing = self._by_id.get(agent_id)
         if existing is None:
             return False
-        if existing.role == "router":
-            logger.warning(
-                "refusing to remove router agent_id=%r from registry: routers "
-                "are locally built and not subject to departure events",
-                agent_id,
-            )
-            return False
         self._unindex(existing)
         self._all.remove(existing)
         return True
 
-    def apply_local_thinking_effort_override(
-        self, agent_id: str, value: ThinkingEffort
-    ) -> AgentDefinition | None:
+    def apply_local_thinking_effort_override(self, agent_id: str, value: ThinkingEffort) -> AgentDefinition | None:
         """Optimistically update an agent's in-memory ``thinking_effort``.
 
         Returns the new (replaced) :class:`AgentDefinition`, or ``None``

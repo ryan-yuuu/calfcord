@@ -24,7 +24,6 @@ dependencies = [
 calfkit-bridge = "calfcord.bridge.gateway:main"
 calfkit-agent = "calfcord.agents.runner:main"
 calfkit-tools = "calfcord.tools.runner:main"
-calfkit-router = "calfcord.router.runner:main"
 calfkit-mcp = "calfcord.mcp.runner:main"
 calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-cli = "calfcord.cli.main:main"

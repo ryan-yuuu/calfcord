@@ -137,56 +137,6 @@ class MessageNormalizer:
             created_at=message.created_at,
         )
 
-    def normalize_task(self, message: Any, *, thread_id: int) -> WireMessage:
-        """Build an ambient :class:`WireMessage` for a plaintext ``/task`` command.
-
-        Mirrors :meth:`normalize` but is purpose-built for the ``/task``
-        command (a ``/task <text>`` message the gateway has just opened a
-        thread off of). Differences from :meth:`normalize`:
-
-        - **Always ambient** (``kind="message"``, ``slash_target=None``): a
-          ``/task`` is routed through the router regardless of any ``@<name>``
-          in the text, so it does NOT scan for mentions via :meth:`_classify`.
-        - ``source_channel_id`` is the freshly-created task ``thread_id``, so
-          agent replies and live-step progress post *into* the thread (see
-          :attr:`WireMessage.thread_id`), while ``channel_id`` stays the
-          flattened parent text channel that hosts the persona webhook and is
-          the Kafka topic key -- so the task inherits the parent channel's
-          reachable agents.
-
-        ``message_id`` is the user's own message -- the genuine, user-authored
-        thread anchor (the thread shares this id) used as the inline-reply
-        target. ``content`` is the full message text, prefix included.
-
-        Raises:
-            ValueError: If the message has no guild (DM). The gateway filters
-                DMs before this is reached, but the contract is enforced here
-                defensively.
-        """
-        if message.guild is None:
-            raise ValueError("MessageNormalizer.normalize_task received a DM (message.guild is None)")
-
-        # ``message.channel`` is the parent text channel (the gateway rejects
-        # ``/task`` inside threads/forums), so ``_resolve_channel_id`` returns
-        # its own id. ``source_channel_id`` is the new thread, which is what
-        # makes ``WireMessage.thread_id`` resolve and replies/steps land
-        # in-thread.
-        channel_id = _resolve_channel_id(message.channel)
-        author = self._build_author(message)
-
-        return WireMessage(
-            event_id=uuid_utils.uuid7().hex,
-            kind="message",
-            slash_target=None,
-            message_id=message.id,
-            channel_id=channel_id,
-            source_channel_id=thread_id,
-            guild_id=message.guild.id,
-            content=message.content,
-            author=author,
-            created_at=message.created_at,
-        )
-
     def _classify(self, content: str) -> tuple[Literal["message", "slash"], str | None]:
         """Return ``(kind, slash_target)`` based on @<agent_id> mention scanning.
 
@@ -230,11 +180,7 @@ class MessageNormalizer:
         webhook_id = getattr(message, "webhook_id", None)
         is_webhook = webhook_id is not None
         is_bot = bool(getattr(author, "bot", False))
-        is_human_owner = (
-            not is_bot
-            and self._human_owner_id is not None
-            and author.id == self._human_owner_id
-        )
+        is_human_owner = not is_bot and self._human_owner_id is not None and author.id == self._human_owner_id
 
         display_name = getattr(author, "display_name", None) or author.name
 
@@ -296,11 +242,7 @@ class SlashNormalizer:
         user = interaction.user
 
         is_bot = bool(getattr(user, "bot", False))
-        is_human_owner = (
-            not is_bot
-            and self._human_owner_id is not None
-            and user.id == self._human_owner_id
-        )
+        is_human_owner = not is_bot and self._human_owner_id is not None and user.id == self._human_owner_id
         display_name = getattr(user, "display_name", None) or user.name
 
         author = WireAuthor(

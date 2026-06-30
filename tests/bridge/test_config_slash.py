@@ -125,9 +125,7 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(
-        self, payload: str, *, topic: str, key: bytes | None = None
-    ) -> None:
+    async def publish(self, payload: str, *, topic: str, key: bytes | None = None) -> None:
         self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
@@ -209,9 +207,7 @@ class TestAuthorization:
 
 
 class TestOptimisticUpdate:
-    async def test_swaps_in_memory_definition(
-        self, manager: SlashCommandManager
-    ) -> None:
+    async def test_swaps_in_memory_definition(self, manager: SlashCommandManager) -> None:
         assert manager._registry.by_id("scribe").thinking_effort is None
 
         interaction = _interaction()
@@ -233,14 +229,10 @@ class TestOptimisticUpdate:
 
         assert (agents_dir / "scribe.md").read_text(encoding="utf-8") == original
 
-    async def test_overwrites_existing_value(
-        self, agents_dir: Path
-    ) -> None:
+    async def test_overwrites_existing_value(self, agents_dir: Path) -> None:
         # Pre-existing tier on the in-memory definition (loaded from
         # the pre-written .md).
-        _write_agent_md(
-            agents_dir, agent_id="scribe", provider="openai", thinking_effort="low"
-        )
+        _write_agent_md(agents_dir, agent_id="scribe", provider="openai", thinking_effort="low")
         manager, _ = _make_manager(agents_dir)
 
         interaction = _interaction()
@@ -338,39 +330,18 @@ class TestReplyText:
         assert "high" in msg
         assert "fire-and-forget" in msg.lower()
         # The reply echoes the same request_id the envelope carries.
-        envelope = AgentControlEnvelope.model_validate(
-            calfkit_client._connection.calls[0]["payload"]
-        )
+        envelope = AgentControlEnvelope.model_validate(calfkit_client._connection.calls[0]["payload"])
         assert isinstance(envelope.command, SetThinkingEffortOp)
         assert envelope.command.request_id in msg
 
 
 class TestRegister:
-    def test_register_adds_thinking_effort_command_to_tree(
-        self, manager: SlashCommandManager
-    ) -> None:
+    def test_register_adds_thinking_effort_command_to_tree(self, manager: SlashCommandManager) -> None:
         """The happy path: registration adds a single ``thinking-effort`` command."""
         manager.register_thinking_effort()
         cmd = manager._tree.get_command(_THINKING_EFFORT_COMMAND_NAME)
         assert cmd is not None
         assert cmd.name == _THINKING_EFFORT_COMMAND_NAME
-
-    def test_thinking_effort_choices_exclude_router(
-        self, manager: SlashCommandManager
-    ) -> None:
-        """The built-in router is project infrastructure, not a
-        user-invocable agent; it must not appear in the slash UI's
-        choice list."""
-        agent_ids = {spec.agent_id for spec in manager._registry.all()}
-        assert "_router" in agent_ids  # registry has it
-        command = manager._build_thinking_effort_command()
-        # The 'agent' parameter's choices come from the `agent_choices`
-        # local. discord.py stores them on the param descriptor.
-        agent_param = command._params["agent"]
-        choice_ids = {c.value for c in agent_param.choices}
-        assert "_router" not in choice_ids
-        assert "scribe" in choice_ids
-        assert "echo" in choice_ids
 
 
 class TestScheduleResync:
@@ -508,9 +479,7 @@ class TestScheduleResync:
 class TestClear:
     """The /clear operator slash: owner-gated, posts the per-channel marker."""
 
-    async def test_non_owner_rejected_no_marker(
-        self, manager: SlashCommandManager
-    ) -> None:
+    async def test_non_owner_rejected_no_marker(self, manager: SlashCommandManager) -> None:
         channel = SimpleNamespace(id=12345, send=AsyncMock())
         interaction = _clear_interaction(user_id=_OWNER_USER_ID + 1, channel=channel)
         await manager._on_clear(interaction)
@@ -521,9 +490,7 @@ class TestClear:
         assert kwargs.get("ephemeral") is True
         channel.send.assert_not_awaited()
 
-    async def test_owner_posts_marker_and_silently_acks(
-        self, manager: SlashCommandManager
-    ) -> None:
+    async def test_owner_posts_marker_and_silently_acks(self, manager: SlashCommandManager) -> None:
         channel = SimpleNamespace(id=12345, send=AsyncMock())
         interaction = _clear_interaction(channel=channel)
         await manager._on_clear(interaction)
@@ -545,12 +512,8 @@ class TestClear:
 
         channel.send.assert_awaited_once_with(CLEAR_MARKER_TEXT)
 
-    async def test_marker_send_failure_reports_not_cleared(
-        self, manager: SlashCommandManager
-    ) -> None:
-        channel = SimpleNamespace(
-            id=12345, send=AsyncMock(side_effect=_httpexception())
-        )
+    async def test_marker_send_failure_reports_not_cleared(self, manager: SlashCommandManager) -> None:
+        channel = SimpleNamespace(id=12345, send=AsyncMock(side_effect=_httpexception()))
         interaction = _clear_interaction(channel=channel)
         await manager._on_clear(interaction)
 
@@ -560,15 +523,11 @@ class TestClear:
         assert "not cleared" in msg[0].lower()
         assert kwargs.get("ephemeral") is True
 
-    async def test_marker_send_unexpected_error_reports_not_cleared(
-        self, manager: SlashCommandManager
-    ) -> None:
+    async def test_marker_send_unexpected_error_reports_not_cleared(self, manager: SlashCommandManager) -> None:
         """A non-HTTPException from channel.send (e.g. a connector error)
         must still surface 'not cleared' rather than escape into the
         command dispatcher as a generic 'did not respond'."""
-        channel = SimpleNamespace(
-            id=12345, send=AsyncMock(side_effect=RuntimeError("connector died"))
-        )
+        channel = SimpleNamespace(id=12345, send=AsyncMock(side_effect=RuntimeError("connector died")))
         interaction = _clear_interaction(channel=channel)
         await manager._on_clear(interaction)
 
@@ -578,9 +537,7 @@ class TestClear:
         assert "not cleared" in msg[0].lower()
         assert kwargs.get("ephemeral") is True
 
-    async def test_no_channel_replies_ephemeral_no_send(
-        self, manager: SlashCommandManager
-    ) -> None:
+    async def test_no_channel_replies_ephemeral_no_send(self, manager: SlashCommandManager) -> None:
         interaction = _clear_interaction(channel=None)
         await manager._on_clear(interaction)
 
@@ -589,9 +546,7 @@ class TestClear:
         assert "channel" in _msg[0].lower()
         assert kwargs.get("ephemeral") is True
 
-    def test_register_adds_clear_command_to_tree(
-        self, manager: SlashCommandManager
-    ) -> None:
+    def test_register_adds_clear_command_to_tree(self, manager: SlashCommandManager) -> None:
         manager.register_clear()
         cmd = manager._tree.get_command(_CLEAR_COMMAND_NAME)
         assert cmd is not None

@@ -35,7 +35,6 @@ from calfcord.bridge.ingress import BridgeIngress
 from calfcord.bridge.pending_wires import PendingWires
 from calfcord.bridge.registry import AgentRegistry
 from calfcord.bridge.wire import WireAuthor, WireMessage
-from calfcord.router.definition import build_router_definition
 
 
 def _slash_wire(
@@ -55,34 +54,6 @@ def _slash_wire(
         source_channel_id=source_channel_id,
         guild_id=4242,
         content="how do I X?",
-        author=WireAuthor(
-            discord_user_id=111,
-            display_name="ryan",
-            is_bot=False,
-            is_webhook=False,
-            avatar_url="https://cdn.discordapp.com/avatars/111/abc.png",
-            is_human_owner=True,
-        ),
-        created_at=datetime.now(UTC),
-    )
-
-
-def _ambient_wire(
-    *,
-    event_id: str = "evt-amb",
-    channel_id: int = 6789,
-    source_channel_id: int | None = None,
-    message_id: int = 99999,
-) -> WireMessage:
-    return WireMessage(
-        event_id=event_id,
-        kind="message",
-        slash_target=None,
-        message_id=message_id,
-        channel_id=channel_id,
-        source_channel_id=source_channel_id,
-        guild_id=4242,
-        content="just chatting",
         author=WireAuthor(
             discord_user_id=111,
             display_name="ryan",
@@ -119,7 +90,6 @@ def _registry_with_router(
                 history_turns=scribe_history_turns,
                 system_prompt="OpenAI scribe.",
             ),
-            build_router_definition(),
         ]
     )
 
@@ -339,9 +309,7 @@ class TestSlashHistoryProjection:
         """Fetcher returns 30 records but scribe has history_turns=5."""
         registry = _registry_with_router(scribe_history_turns=5)
         ingress = BridgeIngress(client, registry, pending_wires)
-        records = [
-            _record(content=f"msg-{i}", message_id=i) for i in range(30)
-        ]
+        records = [_record(content=f"msg-{i}", message_id=i) for i in range(30)]
         fetcher = _make_fake_fetcher(records)
         ingress.set_fetcher(fetcher)
 
@@ -386,9 +354,7 @@ class TestSlashPrefetchedHistory:
         """An empty tuple from the envelope is "no history", NOT "go fetch"."""
         registry = _registry_with_router()
         ingress = BridgeIngress(client, registry, pending_wires)
-        fetcher = _make_fake_fetcher(
-            [_record(content="should not be used because prefetched=()")]
-        )
+        fetcher = _make_fake_fetcher([_record(content="should not be used because prefetched=()")])
         ingress.set_fetcher(fetcher)
 
         await ingress.handle(_slash_wire(slash_target="scribe"), prefetched_history=())
@@ -396,177 +362,6 @@ class TestSlashPrefetchedHistory:
         fetcher.fetch.assert_not_called()
         kw = client.send.call_args.kwargs
         assert kw["message_history"] == []
-
-
-# ---------------------------------------------------------------------------
-# Ambient branch — envelope.history
-# ---------------------------------------------------------------------------
-
-
-class TestAmbientHistory:
-    async def test_ambient_packs_history_into_envelope(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Raw, unprojected records ride on ``deps["history"]``."""
-        registry = _registry_with_router()
-        ingress = BridgeIngress(client, registry, pending_wires)
-        records = [
-            _record(content="hi", author_display_name="ryan"),
-            _record(content="hey", author_display_name="bob"),
-        ]
-        fetcher = _make_fake_fetcher(records)
-        ingress.set_fetcher(fetcher)
-
-        await ingress.handle(_ambient_wire())
-
-        kw = client.send.call_args.kwargs
-        # Ambient sends are true fire-and-forget: no point-to-point
-        # reply address — the router's decision flows forward on its
-        # publish_topic, never back to the bridge.
-        assert kw["reply_to"] is None
-        assert "output_type" not in kw
-        deps = kw["deps"]
-        assert "history" in deps
-        history = deps["history"]
-        assert len(history) == 2
-        assert history[0]["content"] == "hi"
-        assert history[1]["content"] == "hey"
-
-    async def test_ambient_router_history_projects_as_observer(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Router POV: every record becomes ModelRequest (no self)."""
-        registry = _registry_with_router()
-        ingress = BridgeIngress(client, registry, pending_wires)
-        records = [
-            _record(content="hi", author_display_name="ryan"),
-            _record(
-                content="prior",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-        ]
-        fetcher = _make_fake_fetcher(records)
-        ingress.set_fetcher(fetcher)
-
-        await ingress.handle(_ambient_wire())
-
-        kw = client.send.call_args.kwargs
-        # message_history is passed straight through to send.
-        for m in kw["message_history"]:
-            assert isinstance(m, ModelRequest)
-
-    async def test_ambient_fetches_at_max_history_turns(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """The ambient fetch limit is max(all_agents' history_turns)."""
-        registry = _registry_with_router(
-            scribe_history_turns=20,
-            scheduler_history_turns=40,
-        )
-        ingress = BridgeIngress(client, registry, pending_wires)
-        fetcher = _make_fake_fetcher([])
-        ingress.set_fetcher(fetcher)
-
-        await ingress.handle(_ambient_wire())
-
-        kw = fetcher.fetch.call_args.kwargs
-        # max(20, 40, router=10) == 40
-        assert kw["limit"] == 40
-
-    async def test_ambient_skips_fetch_when_all_history_turns_zero(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Edge case: every agent opted out of history → no Discord call."""
-        registry = AgentRegistry(
-            [
-                AgentDefinition(
-                    agent_id="scribe",
-                    display_name="Scribe",
-                    description="Notes.",
-                    provider="openai",
-                    history_turns=0,
-                    system_prompt="OpenAI scribe.",
-                ),
-                # Build a router with history_turns=0 (override via direct construction).
-                AgentDefinition(
-                    agent_id="_router",
-                    display_name="Router",
-                    description="Internal routing agent (not user-invocable)",
-                    avatar_url=None,
-                    provider="openai",
-                    model="gpt-5-nano",
-                    tools=(),
-                    thinking_effort="none",
-                    role="router",
-                    publish_topic="routing.decisions",
-                    history_turns=0,
-                    system_prompt="router prompt",
-                ),
-            ]
-        )
-        ingress = BridgeIngress(client, registry, pending_wires)
-        fetcher = _make_fake_fetcher([])
-        ingress.set_fetcher(fetcher)
-
-        await ingress.handle(_ambient_wire())
-
-        fetcher.fetch.assert_not_called()
-
-    async def test_ambient_with_no_fetcher_packs_empty_history(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """Pre-ready window for ambient: envelope.history is empty tuple."""
-        registry = _registry_with_router()
-        ingress = BridgeIngress(client, registry, pending_wires)
-        # No set_fetcher call.
-
-        await ingress.handle(_ambient_wire())
-
-        kw = client.send.call_args.kwargs
-        assert kw["deps"]["history"] == []
-
-    async def test_ambient_router_history_trim_keeps_newest(
-        self,
-        client: MagicMock,
-        pending_wires: PendingWires,
-    ) -> None:
-        """The router's message_history is trimmed to its history_turns
-        AFTER projection — and must keep the NEWEST entries (slice
-        ``[-N:]``), not the oldest. A regression to ``[:N]`` would pass
-        every previous test but produce a stale router context.
-        """
-        registry = _registry_with_router()
-        # Build 30 records; router default history_turns is 10.
-        records = [
-            _record(content=f"msg-{i}", author_display_name="ryan", message_id=i)
-            for i in range(30)
-        ]
-        fetcher = _make_fake_fetcher(records)
-        ingress = BridgeIngress(client, registry, pending_wires)
-        ingress.set_fetcher(fetcher)
-
-        await ingress.handle(_ambient_wire())
-
-        kw = client.send.call_args.kwargs
-        router_msgs = kw["message_history"]
-        assert len(router_msgs) == 10
-        # Newest 10 are msg-20 .. msg-29; oldest in the kept slice is msg-20,
-        # newest is msg-29. The full envelope still ships all 30 raw records.
-        first = router_msgs[0].parts[0].content
-        last = router_msgs[-1].parts[0].content
-        assert "msg-20" in first
-        assert "msg-29" in last
 
 
 # ---------------------------------------------------------------------------

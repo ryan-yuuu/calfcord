@@ -245,9 +245,7 @@ class TestBuild:
 
 
 class TestProviderResolution:
-    def test_default_provider_is_anthropic(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_provider_is_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -262,9 +260,7 @@ class TestProviderResolution:
         )
         assert calls[0][0] == "anthropic"
 
-    def test_definition_provider_wins(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_definition_provider_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "anthropic")
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -280,9 +276,7 @@ class TestProviderResolution:
         )
         assert calls[0][0] == "openai"
 
-    def test_env_provider_used_when_definition_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_provider_used_when_definition_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai")
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -298,9 +292,7 @@ class TestProviderResolution:
         )
         assert calls[0][0] == "openai"
 
-    def test_ctor_default_used_when_neither_set(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_ctor_default_used_when_neither_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -316,9 +308,7 @@ class TestProviderResolution:
         )
         assert calls[0][0] == "openai"
 
-    def test_unknown_env_provider_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unknown_env_provider_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Env var can carry a typo; surface it at build time."""
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "cohere")
         _, model_factory = _model_factory_spy()
@@ -353,9 +343,7 @@ class TestModelResolution:
         )
         assert calls[0][1] == "claude-from-defn"
 
-    def test_env_var_used_when_definition_model_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_var_used_when_definition_model_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_MODEL", "claude-from-env")
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -371,9 +359,7 @@ class TestModelResolution:
         )
         assert calls[0][1] == "claude-from-env"
 
-    def test_ctor_default_used_when_env_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_ctor_default_used_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
         factory = AgentFactory(
@@ -389,9 +375,7 @@ class TestModelResolution:
         )
         assert calls[0][1] == "claude-from-ctor"
 
-    def test_provider_default_used_as_final_fallback_anthropic(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_provider_default_used_as_final_fallback_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without any model hint, anthropic agents fall back to the project's
         default Claude model."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
@@ -408,9 +392,7 @@ class TestModelResolution:
         )
         assert calls[0] == ("anthropic", "claude-sonnet-4-5")
 
-    def test_provider_default_used_as_final_fallback_openai(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_provider_default_used_as_final_fallback_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without any model hint, openai agents fall back to the OpenAI default."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
         calls, model_factory = _model_factory_spy()
@@ -426,9 +408,7 @@ class TestModelResolution:
         )
         assert calls[0] == ("openai", "gpt-5-mini")
 
-    def test_openai_codex_resolves_to_none_when_no_model_hint(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_openai_codex_resolves_to_none_when_no_model_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """openai-codex has no static default: with no model hint, ``None`` is
         passed through so the Codex client resolves a live-catalog default."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_MODEL", raising=False)
@@ -475,9 +455,7 @@ class TestThinkingEffortBaking:
             MagicMock(),
         )
         agent_loop = worker._nodes[0]._agent_loop  # internal access acceptable in tests
-        assert agent_loop.model_settings == {
-            "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
-        }
+        assert agent_loop.model_settings == {"anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}}
 
     def test_openai_medium_passes_reasoning_effort(self) -> None:
         _, model_factory = _model_factory_spy()
@@ -537,28 +515,15 @@ class TestResolveProviderModuleFunction:
 
     def test_definition_provider_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "anthropic")
-        assert (
-            resolve_provider(_definition(provider="openai"), default_provider="anthropic")
-            == "openai"
-        )
+        assert resolve_provider(_definition(provider="openai"), default_provider="anthropic") == "openai"
 
-    def test_env_var_used_when_definition_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_var_used_when_definition_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai")
-        assert (
-            resolve_provider(_definition(provider=None), default_provider="anthropic")
-            == "openai"
-        )
+        assert resolve_provider(_definition(provider=None), default_provider="anthropic") == "openai"
 
-    def test_default_used_when_neither_set(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_used_when_neither_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
-        assert (
-            resolve_provider(_definition(provider=None), default_provider="openai")
-            == "openai"
-        )
+        assert resolve_provider(_definition(provider=None), default_provider="openai") == "openai"
 
     def test_unknown_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "cohere")
@@ -731,9 +696,7 @@ class TestToolsWiring:
                 AgentRuntimeState(channels=[100]),
                 MagicMock(),
             )
-        message = next(
-            r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent")
-        )
+        message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
         assert "mcp:docs" in message
         assert "mcp:gmail" in message
 
@@ -830,157 +793,6 @@ class TestToolsWiring:
         resolved = worker._nodes[0].tools
         assert resolved is not None and len(resolved) == 1
         assert resolved[0].name == tool_name
-
-
-def _router_definition(
-    *,
-    agent_id: str = "_router",
-    provider: Provider | None = "openai",
-    model: str | None = "gpt-5-nano",
-    thinking_effort: str | None = "none",
-    publish_topic: str = "routing.decisions",
-) -> AgentDefinition:
-    return AgentDefinition(
-        agent_id=agent_id,
-        display_name="Router",
-        description="Internal routing agent",
-        provider=provider,
-        model=model,
-        thinking_effort=thinking_effort,  # type: ignore[arg-type]
-        role="router",
-        publish_topic=publish_topic,
-        system_prompt="You are the routing agent. Pick the right respondents.",
-    )
-
-
-class TestRouterRole:
-    """Router-role build path: single fixed topic, no gates, ToolOutput.
-
-    Verifies the factory branches correctly on ``role="router"`` and
-    wires the agent with the special-case configuration the routing
-    component needs.
-    """
-
-    def test_router_builds_without_channels(self) -> None:
-        """Routers subscribe to a fixed ambient topic, not per-channel
-        topics — so an empty channels list is acceptable."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _router_definition(),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        assert len(worker._nodes) == 1
-        assert isinstance(worker._nodes[0], Agent)
-
-    def test_router_subscribes_to_ambient_topic_only(self) -> None:
-        """Single subscribe topic: the bridge's ambient ingress.
-        No private return topic at [0], no per-agent inbox."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _router_definition(),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].subscribe_topics == ["discord.ambient.in"]
-
-    def test_router_has_no_standard_gates(self) -> None:
-        """The router is the only consumer of its ingress topic; no
-        self-recognition or addressed-to-me checks are needed."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _router_definition(),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        # The assistant path attaches two gates (addressable +
-        # addressed_to_me); the router path attaches none.
-        assert worker._nodes[0].gates == []
-
-    def test_router_publish_topic_is_set(self) -> None:
-        """The router declares its own output topic; the fan-out
-        consumer subscribes there. Without publish_topic, the agent's
-        ReturnCall would only land on frame.callback_topic — the
-        bridge's throwaway topic, which has no consumer."""
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _router_definition(publish_topic="routing.decisions"),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        assert worker._nodes[0].publish_topic == "routing.decisions"
-
-    def test_router_final_output_type_is_tooloutput_routing_decision(self) -> None:
-        """The router's terminal output is a structured RoutingDecision
-        emitted via pydantic-ai's ToolOutput pattern, which terminates
-        the agent loop in one LLM turn (no second-pass narration).
-
-        The tool ``name`` MUST come from the
-        :data:`ROUTER_OUTPUT_TOOL_NAME` constant — the same constant
-        the router's system prompt (``router/prompt.py``) interpolates
-        into rule 5. A hardcoded ``"dispatch"`` here would still pass
-        the prompt-coupling tests today (the literal value is
-        unchanged) but the symbolic coupling would silently break: a
-        future rename of the constant would skip this site."""
-        from calfkit._vendor.pydantic_ai import ToolOutput
-
-        from calfcord.agents.routing import (
-            ROUTER_OUTPUT_TOOL_NAME,
-            RoutingDecision,
-        )
-
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        worker = factory.build(
-            _router_definition(),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        final_output_type = worker._nodes[0].final_output_type
-        assert isinstance(final_output_type, ToolOutput)
-        assert final_output_type.output is RoutingDecision
-        # Pin against the constant, not the literal — see docstring above.
-        assert final_output_type.name == ROUTER_OUTPUT_TOOL_NAME
-
-    def test_router_model_resolution_uses_definition_fields(self) -> None:
-        """Router still uses the provider/model fallback chain. The
-        definition's explicit values win."""
-        calls, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        factory.build(
-            _router_definition(provider="openai", model="gpt-5-nano"),
-            AgentRuntimeState(channels=[]),
-            MagicMock(),
-        )
-        assert calls == [("openai", "gpt-5-nano")]
 
 
 class TestRouterDefinitionValidation:

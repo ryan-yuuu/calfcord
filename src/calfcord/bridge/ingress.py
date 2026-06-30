@@ -60,7 +60,6 @@ import logging
 from collections.abc import Sequence
 from typing import Any, Final
 
-import uuid_utils
 from calfkit._vendor.pydantic_ai.messages import (
     BaseToolReturnPart,
     ModelMessage,
@@ -87,10 +86,6 @@ from calfcord.bridge.pending_wires import PendingEntry, PendingWires
 from calfcord.bridge.registry import AgentRegistry
 from calfcord.bridge.transcripts import TranscriptStoreLike
 from calfcord.bridge.wire import WireMessage
-from calfcord.router.roster import build_router_temp_instructions
-from calfcord.topics import (
-    AMBIENT_INGRESS_TOPIC as _AMBIENT_INGRESS_TOPIC,
-)
 from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 logger = logging.getLogger(__name__)
@@ -164,32 +159,6 @@ def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMes
         else:
             out.append(dataclasses.replace(msg, parts=new_parts))
     return out
-
-
-class AmbientRosterEmptyError(ValueError):
-    """Raised when an ambient publish is aborted because the registry
-    has no eligible assistant agents.
-
-    The router LLM run would be useless (it would receive no roster,
-    likely hallucinate, and the fan-out's phonebook validation would
-    reject every chosen id anyway), and the user would see no reply.
-    The gateway catches this specific exception and sends an
-    operator-actionable inline reply to the Discord message — making
-    the misconfiguration visible to the user instead of silently
-    dropping the message.
-
-    Carries the original Discord ``event_id`` and ``channel_id`` for
-    the gateway's reply text and any structured-logging downstream.
-    """
-
-    def __init__(self, *, event_id: str, channel_id: int) -> None:
-        self.event_id = event_id
-        self.channel_id = channel_id
-        super().__init__(
-            f"ambient publish aborted: registry has no eligible "
-            f"assistant agents (event_id={event_id!r}, "
-            f"channel_id={channel_id})"
-        )
 
 
 class BridgeIngress:
@@ -267,8 +236,7 @@ class BridgeIngress:
             known = sorted(TOOL_REGISTRY)
             entries = ", ".join(f"{aid!r} declares {tname!r}" for aid, tname in unknown)
             raise ValueError(
-                f"bridge boot found unknown tool references: {entries}; "
-                f"known tools: {known or '<none registered>'}"
+                f"bridge boot found unknown tool references: {entries}; known tools: {known or '<none registered>'}"
             )
 
     def set_fetcher(self, fetcher: ChannelHistoryFetcher) -> None:
@@ -361,71 +329,18 @@ class BridgeIngress:
         phonebook = phonebook_from_registry(self._registry)
 
         if wire.kind == "message":
-            # Ambient path. Filter non-human authors before publish:
-            # peer-agent webhook chatter without an @-mention must not
-            # trigger the router (would risk agent-on-agent reply
-            # storms). Agent @-mentions still route normally because
-            # the normalizer classifies on content, producing
-            # kind="slash" and entering the branch below.
-            if wire.author.is_bot or wire.author.is_webhook:
-                # Webhook traffic is the documented motivation
-                # (recognized agent personas chatting without an
-                # @-mention); keep that path at DEBUG since it can
-                # be high-volume. An unexpected bot author — flagged
-                # as is_bot but NOT a recognized agent webhook —
-                # might be a third-party Discord bot or a regression
-                # mis-classifying a real human; INFO so it shows up
-                # at production baseline log levels.
-                is_unrecognized_bot = (
-                    wire.author.is_bot
-                    and not wire.author.is_webhook
-                    and wire.author.agent_id is None
-                )
-                level = logging.INFO if is_unrecognized_bot else logging.DEBUG
-                logger.log(
-                    level,
-                    "skipping ambient publish for non-human author "
-                    "event_id=%s author=%s is_bot=%s is_webhook=%s "
-                    "(un-addressed agent chatter does not route)",
-                    wire.event_id,
-                    wire.author.display_name,
-                    wire.author.is_bot,
-                    wire.author.is_webhook,
-                )
-                return
-            # NOTE: we do NOT populate pending_wires on the ambient
-            # branch. The router's terminal reply is suppressed
-            # (ambient uses ``reply_to=None``) and is never looked up
-            # by event_id; the synthesized wires fan-out generates each
-            # get their own fresh event_id (and that's what the outbox
-            # correlates on). Inserting here would waste an LRU slot per
-            # ambient message and could evict legitimate slash entries
-            # under load.
-            try:
-                await self._publish_ambient(wire, phonebook)
-            except AmbientRosterEmptyError:
-                # ``_publish_ambient`` already logged the
-                # operator-actionable ERROR identifying the empty
-                # roster as the cause. Re-raise without the
-                # ``logger.exception`` stack trace — the empty-roster
-                # case is a deployment-config rejection, not a
-                # broker/runtime failure, so the trace would only
-                # add noise. The gateway catches this specific type
-                # and surfaces the misconfiguration to the user.
-                raise
-            except Exception:
-                logger.exception(
-                    "ingress ambient publish failed event_id=%s channel=%s",
-                    wire.event_id,
-                    wire.channel_id,
-                )
-                raise
+            # Ambient (non-@mention) messages go unanswered: the ambient
+            # router that used to choose an addressee has been removed (C2).
+            # Accept the wire and drop it — there is no agent to route it to.
+            logger.debug(
+                "dropping ambient message event_id=%s channel=%s (ambient routing removed)",
+                wire.event_id,
+                wire.channel_id,
+            )
         else:  # wire.kind == "slash"
             model_settings = self._resolve_model_settings(wire)
             temp_instructions = self._resolve_temp_instructions(wire, phonebook)
-            message_history = await self._build_slash_message_history(
-                wire, prefetched_history
-            )
+            message_history = await self._build_slash_message_history(wire, prefetched_history)
             # Load-bearing ordering: ``put`` MUST precede the
             # ``send`` publish. The outbox consumer reads
             # ``PendingWires`` keyed on ``correlation_id`` (= wire
@@ -486,177 +401,6 @@ class BridgeIngress:
                 )
                 raise
 
-    async def _publish_ambient(
-        self,
-        wire: WireMessage,
-        phonebook: list[PhonebookEntry],
-    ) -> None:
-        """Publish an ambient wire to the router's ingress topic.
-
-        The original wire, the publisher's phonebook snapshot, and the
-        channel-history slice all ride on a single ``deps`` dict. The
-        router run carries those deps forward, so the fan-out consumer
-        reads them back from ``result.deps`` (calfkit's ``ConsumerContext``
-        carries the inbound producer deps — the same dict a tool reads as
-        ``ctx.deps``). The wire under
-        ``deps["discord"]`` also mirrors how every other publish path
-        carries the wire — the synthesized-assistant chain that follows
-        re-enters :meth:`handle` with ``kind="slash"`` and reads the
-        wire from deps in the usual place.
-
-        Operator-side health signal: we log INFO at every ambient
-        publish. The synthesized-in consumer (in
-        :mod:`bridge.synthesized`) logs INFO on every arrival, so
-        correlating those streams reveals a silent router. Per-reply
-        WARN tracking is deferred for v1 (see module docstring).
-        """
-        wire_dict = wire.model_dump(mode="json")
-        phonebook_dict = phonebook_to_deps(phonebook)
-        temp_instructions = build_router_temp_instructions(phonebook)
-        # Fetch channel history ONCE here for the entire fan-out.
-        #
-        # Eager-fetch-at-ambient-publish-time is intentional even though
-        # most ambient messages route to zero or one agent (in which
-        # case we burn ~200ms on a fetch that produces a single
-        # consumer). The tradeoff buys us:
-        #   1. Router context — the router LLM sees the recent
-        #      conversation when making its routing decision, which
-        #      improves quality on context-dependent messages
-        #      ("and now do that for next week").
-        #   2. Snapshot consistency — every fan-out target sees the
-        #      same history, not slightly-different snapshots that
-        #      each refetch would produce.
-        #   3. Single REST call regardless of fan-out width — the
-        #      synthesized-in consumer hands the same deps["history"]
-        #      records to each chosen agent, so a fan-out to N agents
-        #      costs one fetch, not N.
-        # The alternative (lazy fetch at synth-in re-entry) loses all
-        # three, and the wasted-fetch cost on silent-route decisions is
-        # small enough that the consistency wins.
-        records = await self._fetch_ambient_history(wire)
-        if temp_instructions is None:
-            # An empty roster is a deployment misconfiguration (no
-            # assistants registered). Publishing anyway would burn
-            # LLM tokens on a router run with no roster to draw from,
-            # the LLM would either return an empty list (silent
-            # drop, indistinguishable from a normal "ignore" decision)
-            # or hallucinate ids that the fan-out then rejects via
-            # phonebook validation — either way no user reply. ERROR
-            # log here names the symptom (this specific ambient
-            # message will go unanswered);
-            # :func:`build_router_temp_instructions` already WARNs on
-            # the registry-shape side. Raising
-            # :class:`AmbientRosterEmptyError` lets the gateway
-            # surface the misconfiguration to the user with an
-            # inline reply rather than silently dropping the message.
-            logger.error(
-                "ambient publish aborted: empty router roster "
-                "event_id=%s channel=%s — registry has no eligible "
-                "respondents; check that at least one non-router agent "
-                "is registered.",
-                wire.event_id,
-                wire.channel_id,
-            )
-            raise AmbientRosterEmptyError(
-                event_id=wire.event_id, channel_id=wire.channel_id
-            )
-        logger.info(
-            "ingress ambient publish event_id=%s channel=%s topic=%s",
-            wire.event_id,
-            wire.channel_id,
-            _AMBIENT_INGRESS_TOPIC,
-        )
-        # Router POV is "outside observer" (no self-classification);
-        # everything in the projected list is a ``ModelRequest``.
-        router_history = project_history(records, self_agent_id=None)
-        router_history_turns = self._router_history_turns()
-        if router_history_turns < len(router_history):
-            router_history = router_history[-router_history_turns:]
-        # The raw (unprojected) history rides on deps so each fan-out
-        # target can build its OWN POV projection at invocation time —
-        # the same records the router's ``message_history`` above is
-        # projected from, but shipped unprojected so a fan-out to N
-        # agents keeps N separable perspectives off one fetch.
-        history_dump = [r.model_dump(mode="json") for r in records]
-        # ``reply_to=None``: true fire-and-forget. The router's terminal
-        # decision flows FORWARD on its ``publish_topic``
-        # (``routing.decisions``, where the fan-out consumer subscribes),
-        # never back to us — so we suppress the point-to-point callback
-        # entirely rather than directing it at a throwaway topic.
-        #
-        # Use a FRESH correlation_id (not ``wire.event_id``) for the
-        # ambient publish. ``send`` registers no future, so this no
-        # longer guards a dispatcher collision; it simply keeps the
-        # router invocation's trace identity separate from the wire.
-        # Nothing downstream correlates to the original: the fan-out
-        # mints its own fresh event_id per synthesized wire.
-        await self._client.send(
-            user_prompt=wire.content,
-            topic=_AMBIENT_INGRESS_TOPIC,
-            reply_to=None,
-            deps={
-                "discord": wire_dict,
-                "phonebook": phonebook_dict,
-                "history": history_dump,
-            },
-            temp_instructions=temp_instructions,
-            message_history=router_history,
-            correlation_id=uuid_utils.uuid7().hex,
-        )
-
-    async def _fetch_ambient_history(
-        self, wire: WireMessage
-    ) -> list[HistoryRecord]:
-        """Fetch the channel-history slice for one ambient publish.
-
-        The fetch limit is the maximum ``history_turns`` across every
-        agent in the registry (assistants + the router). The fan-out
-        consumer ships the same record list to every chosen agent via
-        the envelope; each agent's POV projection trims to its OWN
-        ``history_turns`` locally. Fetching the per-agent max upfront
-        means a single Discord call serves any fan-out width.
-
-        Returns ``[]`` when:
-            - the fetcher has not yet been injected (gateway not ready);
-            - the registry is empty (no agents → no max);
-            - the computed max is 0 (every agent has ``history_turns=0``);
-            - the fetcher fails (any ``discord.HTTPException`` family —
-              the fetcher logs at WARN internally and returns ``[]``).
-
-        Each silent-return branch logs at DEBUG so operators investigating
-        "why does the router not see history?" can correlate the cause.
-        The branches that fail with operator-actionable signal (Forbidden,
-        NotFound, channel-cache miss) log at WARN/INFO inside the
-        fetcher itself.
-        """
-        if self._fetcher is None:
-            logger.debug(
-                "ambient history skipped event_id=%s: fetcher not yet "
-                "injected (pre-_on_ready window)",
-                wire.event_id,
-            )
-            return []
-        all_agents = list(self._registry.all())
-        if not all_agents:
-            logger.debug(
-                "ambient history skipped event_id=%s: registry is empty",
-                wire.event_id,
-            )
-            return []
-        fetch_limit = max(s.history_turns for s in all_agents)
-        if fetch_limit <= 0:
-            logger.debug(
-                "ambient history skipped event_id=%s: every agent has "
-                "history_turns=0 (history disabled fleet-wide)",
-                wire.event_id,
-            )
-            return []
-        return await self._fetcher.fetch(
-            source_channel_id=wire.source_channel_id or wire.channel_id,
-            before_message_id=wire.message_id,
-            limit=fetch_limit,
-        )
-
     async def _build_slash_message_history(
         self,
         wire: WireMessage,
@@ -709,8 +453,7 @@ class BridgeIngress:
             # Degrade gracefully — empty history is better than a
             # broken invocation.
             logger.debug(
-                "slash history skipped event_id=%s agent=%s: fetcher not "
-                "yet injected (pre-_on_ready window)",
+                "slash history skipped event_id=%s agent=%s: fetcher not yet injected (pre-_on_ready window)",
                 wire.event_id,
                 target,
             )
@@ -723,7 +466,7 @@ class BridgeIngress:
             )
 
         if spec.history_turns < len(records):
-            records = records[-spec.history_turns:]
+            records = records[-spec.history_turns :]
         hydration = await self._build_replay_hydration(records, target)
         return project_history(records, self_agent_id=target, hydration=hydration)
 
@@ -758,9 +501,7 @@ class BridgeIngress:
         store = self._transcript_store
         if store is None:
             return None
-        self_reply_ids = [
-            r.message_id for r in records if r.author_agent_id == target
-        ]
+        self_reply_ids = [r.message_id for r in records if r.author_agent_id == target]
         if not self_reply_ids:
             return None
         # The store keys ``final_message_id`` as TEXT (snowflake
@@ -789,39 +530,6 @@ class BridgeIngress:
                 continue
             hydration[int(final_message_id_str)] = msgs
         return hydration or None
-
-    def _router_history_turns(self) -> int:
-        """Return the router's configured ``history_turns``.
-
-        Reads from the router definition in the registry. Returns 0
-        when the registry has no router (test fixtures), which makes
-        the router-history slice empty without raising — matching
-        the rest of the ambient path's "no router → AmbientRosterEmptyError
-        before this point" assumption.
-
-        The ``ValueError`` from :meth:`AgentRegistry.router` is logged
-        at WARNING with the original message attached: a test fixture
-        without a router is harmless noise (one line per test that
-        triggers this path), but a *production* registry without a
-        router is a deployment-config regression that operators must
-        be able to see. The exception message from
-        :class:`AgentRegistry.router` distinguishes the two ("zero
-        router agents" / etc.) so operators can grep for the actual
-        production-bug shape.
-        """
-        try:
-            return self._registry.router().history_turns
-        except ValueError as exc:
-            logger.warning(
-                "registry.router() raised ValueError=%r; defaulting "
-                "router_history_turns=0. In production this indicates "
-                "the registry was built without the built-in router "
-                "(a deployment-config regression). In tests this is "
-                "expected for fixtures constructed without "
-                "build_router_definition().",
-                exc,
-            )
-            return 0
 
     def _memory_prompt_deps(self) -> dict[str, str]:
         """Return the memory-prompt ``deps`` entry, or ``{}`` when not applicable.
@@ -914,8 +622,7 @@ class BridgeIngress:
         spec = self._registry.by_id(target)
         if spec is None:
             logger.error(
-                "slash_target=%r missing from registry event_id=%s; "
-                "operator effort tier will not apply",
+                "slash_target=%r missing from registry event_id=%s; operator effort tier will not apply",
                 target,
                 wire.event_id,
             )

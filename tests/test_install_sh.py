@@ -49,9 +49,7 @@ def _source_and_run(
     if extra_env:
         env.update(extra_env)
     script = f'source "{INSTALL_SH}"\n{snippet}'
-    return subprocess.run(
-        ["bash", "-c", script], env=env, capture_output=True, text=True, check=False
-    )
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
 
 
 def _make_source_dest(tmp: Path, *, with_assistant: bool = True) -> Path:
@@ -69,9 +67,7 @@ def _install_shims(home: Path) -> None:
     assert (home / "shims" / "calfcord").exists()
 
 
-def _run_shim(
-    home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str, str] | None = None
-) -> dict[str, str]:
+def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str, str] | None = None) -> dict[str, str]:
     """Invoke the generated ``calfcord`` shim and capture the env the fake uv saw."""
     (home / "bin").mkdir(parents=True, exist_ok=True)
     uv = home / "bin" / "uv"
@@ -86,7 +82,11 @@ def _run_shim(
         env.update(extra_env)
     result = subprocess.run(
         [str(home / "shims" / "calfcord"), "calfkit-agent"],
-        cwd=str(cwd), env=env, capture_output=True, text=True, check=False,
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, f"shim failed: {result.stderr}"
     parsed: dict[str, str] = {}
@@ -97,6 +97,7 @@ def _run_shim(
 
 
 # --------------------------------------------------------------- seed_agents ---
+
 
 def test_seed_agents_seeds_starter_and_state_dir(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -133,6 +134,7 @@ def test_seed_agents_is_noop_when_source_lacks_starter(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------- shim _default_env ---
+
 
 def test_shim_defaults_to_home_dirs_and_launch_cwd(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -242,13 +244,6 @@ def test_shim_dispatches_init_to_calfcord_cli(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["init"]) == "calfcord-cli init"
 
 
-def test_shim_dispatches_router_setup_to_calfcord_cli(tmp_path: Path) -> None:
-    """``calfcord router setup`` must exec ``calfcord-cli router setup`` unchanged."""
-    home = tmp_path / "home"
-    _install_shims(home)
-    assert _run_shim_argv(home, ["router", "setup"]) == "calfcord-cli router setup"
-
-
 def test_shim_dispatches_agent_to_calfcord_cli(tmp_path: Path) -> None:
     """``calfcord agent tools`` must exec ``calfcord-cli agent tools`` unchanged."""
     home = tmp_path / "home"
@@ -269,7 +264,6 @@ def test_shim_run_maps_services_to_runner_scripts(tmp_path: Path) -> None:
     _install_shims(home)
     assert _run_shim_argv(home, ["run", "bridge"]) == "calfkit-bridge"
     assert _run_shim_argv(home, ["run", "agent", "scribe"]) == "calfkit-agent scribe"
-    assert _run_shim_argv(home, ["run", "router"]) == "calfkit-router"
     assert _run_shim_argv(home, ["run", "tools"]) == "calfkit-tools"
 
 
@@ -300,9 +294,7 @@ def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
         (["deploy", "systemd"], "calfcord-cli deploy systemd"),
     ],
 )
-def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
-    tmp_path: Path, argv: list[str], expected: str
-) -> None:
+def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(tmp_path: Path, argv: list[str], expected: str) -> None:
     """The new lifecycle verbs (logs/explain/deploy) route to calfcord-cli, args intact."""
     home = tmp_path / "home"
     _install_shims(home)
@@ -321,9 +313,7 @@ def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
         (["doctor"], "calfcord-cli doctor"),
     ],
 )
-def test_shim_existing_verbs_still_route_after_lifecycle_verbs(
-    tmp_path: Path, argv: list[str], expected: str
-) -> None:
+def test_shim_existing_verbs_still_route_after_lifecycle_verbs(tmp_path: Path, argv: list[str], expected: str) -> None:
     """Existing verbs keep their routing once the lifecycle verbs are in the dispatch."""
     home = tmp_path / "home"
     _install_shims(home)
@@ -342,7 +332,10 @@ def _run_shim_proc(home: Path, argv: list[str]) -> subprocess.CompletedProcess[s
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
         [str(home / "shims" / "calfcord"), *argv],
-        env=env, capture_output=True, text=True, check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -443,9 +436,7 @@ def test_activate_version_records_outgoing_as_previous(tmp_path: Path) -> None:
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
 
-    result = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    result = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert result.returncode == 0, result.stderr
 
     assert (home / "current").resolve() == bbb.resolve()
@@ -504,7 +495,7 @@ def test_gc_versions_keeps_current_and_previous_prunes_a_third(tmp_path: Path) -
     bbb = _make_version(home, "bbb")
     ccc = _make_version(home, "ccc")
 
-    result = _source_and_run('gc_versions ccc bbb', home=home)
+    result = _source_and_run("gc_versions ccc bbb", home=home)
     assert result.returncode == 0, result.stderr
 
     # Current + previous kept; the unrelated third is pruned.
@@ -518,7 +509,7 @@ def test_gc_versions_prunes_nothing_with_only_cur_and_prev(tmp_path: Path) -> No
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
 
-    result = _source_and_run('gc_versions bbb aaa', home=home)
+    result = _source_and_run("gc_versions bbb aaa", home=home)
     assert result.returncode == 0, result.stderr
 
     assert aaa.is_dir()
@@ -534,7 +525,10 @@ def _run_self(home: Path, argv: list[str]) -> subprocess.CompletedProcess:
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
         [str(home / "shims" / "calfcord-self"), *argv],
-        env=env, capture_output=True, text=True, check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -544,9 +538,7 @@ def test_self_rollback_flips_current_and_swaps_version_fields(tmp_path: Path) ->
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
     # Reach the post-update state (current=B, prev=A) via the real activate path.
-    prep = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    prep = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert prep.returncode == 0, prep.stderr
 
     result = _run_self(home, ["rollback"])
@@ -563,9 +555,7 @@ def test_self_rollback_refuses_when_previous_lacks_ok_marker(tmp_path: Path) -> 
     home = tmp_path / "home"
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
-    prep = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    prep = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert prep.returncode == 0, prep.stderr
     # Remove the predecessor's build marker so it's no longer a valid target.
     (aaa / ".calfcord-ok").unlink()
@@ -688,9 +678,7 @@ def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
     pwned = home / "PWNED"
     # A repo/ref value an attacker might try to smuggle into a sourced file.
     (home / "version").write_text(
-        "CALFCORD_COMMIT=aaa\n"
-        f'CALFCORD_REPO=$(touch {pwned})`touch {pwned}`\n'
-        "CALFCORD_REF=main\n"
+        f"CALFCORD_COMMIT=aaa\nCALFCORD_REPO=$(touch {pwned})`touch {pwned}`\nCALFCORD_REF=main\n"
     )
 
     result = _run_self(home, ["version"])

@@ -5,6 +5,7 @@ home. These tests pin the *content contract* (it must name the substrate, the
 roster, the four process types, and the distributed graduation) through an
 injected output sink.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -29,17 +30,17 @@ def test_topology_names_the_substrate() -> None:
 
 
 def test_topology_names_the_roster() -> None:
-    # Teammates that clock in/out on demand: agents, tools, router.
+    # Teammates that clock in/out on demand: agents, tools, mcp.
     text = explain.render_topology().lower()
     assert "roster" in text
-    for member in ("agent", "tools", "router"):
+    for member in ("agent", "tools", "mcp"):
         assert member in text, f"topology omits roster member {member!r}"
 
 
 def test_topology_names_the_four_process_types() -> None:
     # The four calfkit-* process types onboarding maps the layers onto.
     text = explain.render_topology()
-    for proc in ("calfkit-bridge", "calfkit-agent", "calfkit-router", "calfkit-tools"):
+    for proc in ("calfkit-bridge", "calfkit-agent", "calfkit-tools", "calfkit-mcp"):
         assert proc in text, f"topology omits process type {proc!r}"
 
 

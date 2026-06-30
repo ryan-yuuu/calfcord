@@ -10,7 +10,6 @@ import pytest
 
 from calfcord.agents.definition import AgentDefinition
 from calfcord.bridge.registry import AgentRegistry
-from calfcord.router.definition import build_router_definition
 
 
 def _make_definition(**overrides) -> AgentDefinition:
@@ -93,16 +92,6 @@ class TestFromAgentsDir:
         with pytest.raises(FileNotFoundError):
             AgentRegistry.from_agents_dir(tmp_path / "nonexistent")
 
-    def test_empty_directory_returns_router_only_registry(self, tmp_path: Path) -> None:
-        """An empty agents dir still produces a registry containing the
-        built-in router (appended unconditionally by
-        :meth:`from_agents_dir`). The router-count invariant requires
-        it, and the loader's "no agents" case maps to "router only"."""
-        registry = AgentRegistry.from_agents_dir(tmp_path)
-        all_defs = registry.all()
-        assert len(all_defs) == 1
-        assert all_defs[0].role == "router"
-
     def test_duplicate_display_name_in_dir_rejected(self, tmp_path: Path) -> None:
         # Two agents both claim display_name "Shared" — registry catches this.
         self._write_agent(tmp_path, "alice", display_name="Shared")
@@ -132,28 +121,6 @@ class TestUpsertFromStateEvent:
         assert registry.by_id("scheduler").thinking_effort == "high"
         # Both indexes point at the same updated instance.
         assert registry.by_display_name("Aksel (Scheduler)").thinking_effort == "high"
-
-    def test_router_agent_id_is_protected(self) -> None:
-        """An incoming state event matching the router's agent_id is
-        refused (router is locally built; agents must not announce
-        with role='router' or with the router's id)."""
-        router = build_router_definition()
-        registry = AgentRegistry([router])
-        # Build an "assistant" definition that happens to use the router's
-        # agent_id. Uses a different display_name to avoid display_name
-        # collisions on the assistant fields — but the router-protection
-        # check should short-circuit before any indexing happens.
-        impostor = AgentDefinition(
-            agent_id=router.agent_id,
-            display_name="Imposter",
-            description="Spoofed.",
-            system_prompt="Spoof.",
-        )
-        result = registry.upsert_from_state_event(impostor)
-        assert result is False
-        # Registry unchanged: still exactly the router.
-        assert len(registry.all()) == 1
-        assert registry.by_id(router.agent_id) is router
 
     def test_key_field_change_handles_rename(self) -> None:
         """An agent re-announcing with a changed display_name updates all
@@ -207,15 +174,6 @@ class TestRemove:
     def test_remove_unknown_returns_false(self) -> None:
         registry = AgentRegistry([])
         assert registry.remove("ghost") is False
-
-    def test_remove_router_returns_false(self) -> None:
-        """Routers are locally built; departure events must not unseat
-        them."""
-        router = build_router_definition()
-        registry = AgentRegistry([router])
-        removed = registry.remove(router.agent_id)
-        assert removed is False
-        assert registry.by_id(router.agent_id) is router
 
     def test_remove_idempotent(self) -> None:
         registry = AgentRegistry([])

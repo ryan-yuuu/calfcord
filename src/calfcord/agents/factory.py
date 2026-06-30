@@ -80,7 +80,6 @@ import logging
 import os
 from collections.abc import Callable
 
-from calfkit._vendor.pydantic_ai import ToolOutput
 from calfkit.client import Client
 from calfkit.mcp import MCPToolboxRef
 from calfkit.nodes import Agent
@@ -92,13 +91,12 @@ from calfkit.worker import Worker
 from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.gates import make_addressable_gate, make_addressed_to_me_gate
 from calfcord.agents.memory import memory_instructions
-from calfcord.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 from calfcord.agents.thinking import build_model_settings
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.mcp.agent_select import selectors_from_entries
 from calfcord.mcp.selector import is_mcp_selector
-from calfcord.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
+from calfcord.topics import AGENT_STEPS_TOPIC
 
 # NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
 # Tool modules transitively import bridge code, and bridge imports agents.factory
@@ -360,8 +358,6 @@ class AgentFactory:
                 or if a router definition violates router-specific
                 invariants.
         """
-        if definition.role == "router":
-            return self._build_router_node(definition)
 
         if state is None or not state.channels:
             raise ValueError(
@@ -397,8 +393,7 @@ class AgentFactory:
             model_name if model_name is not None else "<codex catalog default>",
             subscribe_topics,
             definition.thinking_effort,
-            [t.tool_schema.name for t in tools]
-            + [f"mcp:{s.toolbox_id}" for s in mcp_selectors],
+            [t.tool_schema.name for t in tools] + [f"mcp:{s.toolbox_id}" for s in mcp_selectors],
         )
 
         # ``publish_topic=AGENT_STEPS_TOPIC`` makes FastStream mirror every
@@ -441,83 +436,6 @@ class AgentFactory:
 
         return agent
 
-    def _build_router_node(
-        self,
-        definition: AgentDefinition,
-    ) -> Agent:
-        """Build the router :class:`Agent` node.
-
-        Router invariants enforced by :class:`AgentDefinition`:
-            - ``tools`` is empty (the router uses :class:`ToolOutput`,
-              not function tools)
-            - ``publish_topic`` is non-None (declares the router's own
-              output topic; the fan-out consumer subscribes there)
-
-        Differences from the assistant build path:
-            - No state channels required (router subscribes to a single
-              fixed ambient ingress topic, not per-channel topics).
-            - No standard gates (no self-recognition, no
-              addressed-to-me check — the router is the only consumer
-              of its ingress topic, so every envelope is for it).
-            - ``final_output_type=ToolOutput(RoutingDecision,
-              name=ROUTER_OUTPUT_TOOL_NAME)`` so the LLM's structured
-              output terminates the agent loop in one turn (pydantic-ai
-              recognizes the tool call as the agent's terminal output
-              under ``end_strategy="early"``).
-            - ``publish_topic`` is set, so FastStream's ``@publisher``
-              wrapping mirrors the agent's ``ReturnCall`` to that topic.
-              The duplicate publish to ``frame.callback_topic`` lands
-              on a throwaway topic with no consumer (see
-              ``bridge/ingress.py``).
-
-        Router builds need no per-channel state (single fixed ambient
-        topic) and no on-disk state store. Callers should reach this
-        method via :meth:`build_node` with ``state=None``/``store=None``
-        rather than building a never-used :class:`AgentStateStore`.
-
-        Note on provider precedence: the router definition's
-        ``provider``/``model`` are populated by
-        :func:`build_router_definition` from the bundled ``router.md``
-        front matter (with in-code defaults). Those values are always
-        non-None, so the assistant-targeted ``CALFKIT_AGENT_DEFAULT_*``
-        env vars never apply on this path. A future refactor that lets
-        the router definition leave ``provider`` or ``model`` as
-        ``None`` would silently start picking up the assistant
-        defaults — keep them non-None.
-        """
-        provider = self._resolve_provider(definition)
-        model_name = self._resolve_model(definition, provider)
-        model_settings = build_model_settings(provider, definition.thinking_effort)
-
-        subscribe_topics = [AMBIENT_INGRESS_TOPIC]
-
-        logger.info(
-            "building router agent=%s provider=%s model=%s topic=%s publish_topic=%s",
-            definition.agent_id,
-            provider,
-            model_name,
-            subscribe_topics[0],
-            definition.publish_topic,
-        )
-
-        agent = Agent(
-            node_id=definition.agent_id,
-            system_prompt=definition.system_prompt,
-            subscribe_topics=subscribe_topics,
-            publish_topic=definition.publish_topic,
-            model_client=self._model_client_factory(provider, model_name),
-            model_settings=model_settings,
-            final_output_type=ToolOutput(RoutingDecision, name=ROUTER_OUTPUT_TOOL_NAME),
-        )
-        # No standard gates: the router is the only consumer of its
-        # ingress topic, so every envelope is for it.
-        # :meth:`BridgeIngress.handle`'s ambient branch already drops
-        # ``is_bot`` / ``is_webhook`` authors before publishing
-        # (preventing agent-on-agent reply storms), and a
-        # "self-author" loop is impossible because the router never
-        # publishes back to its own subscribe topic.
-        return agent
-
     def _resolve_provider(self, definition: AgentDefinition) -> Provider:
         return resolve_provider(definition, default_provider=self._default_provider)
 
@@ -537,9 +455,7 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _resolve_tools(
-        self, definition: AgentDefinition
-    ) -> tuple[list[ToolNodeDef], list[MCPToolboxRef]]:
+    def _resolve_tools(self, definition: AgentDefinition) -> tuple[list[ToolNodeDef], list[MCPToolboxRef]]:
         """Resolve ``definition.tools`` into builtin nodes + deferred MCP selectors.
 
         The flat ``tools:`` list mixes two kinds of entry, partitioned here:

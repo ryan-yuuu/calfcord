@@ -81,17 +81,6 @@ services:
         - action: rebuild
           path: ./uv.lock
 
-  router:
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./src
-          target: /app/src
-        - action: rebuild
-          path: ./pyproject.toml
-        - action: rebuild
-          path: ./uv.lock
-
   tools:
     develop:
       watch:

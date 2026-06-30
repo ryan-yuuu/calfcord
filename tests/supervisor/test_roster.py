@@ -177,9 +177,7 @@ async def test_agent_start_local_running_restarts_not_duplicate_refusal(tmp_path
     it is running elsewhere), but a *local* running instance is ours to restart, so
     we never reach the probe and never print the refusal.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "assistant", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "assistant", "status": "Running"}])
     # The probe would also report it live; the local-running branch must win BEFORE
     # the guard, so the probe is never consulted.
     probe = _StubProbe([_defn("assistant")])
@@ -311,39 +309,32 @@ class _RaisingProbe:
 
 async def test_agent_ps_physical_excludes_all_non_agent_processes(tmp_path, capsys):
     """The physical half of `ps` lists only AGENTS — not the substrate
-    (broker/bridge) and not the other non-agent processes (tools/router)."""
+    (broker/bridge) and not the other non-agent processes (tools)."""
     client = _StubClient(
         list_processes_result=[
             {"name": "broker", "status": "Running"},
             {"name": "bridge", "status": "Running"},
             {"name": "tools", "status": "Running"},
-            {"name": "router", "status": "Running"},
             {"name": "assistant", "status": "Running"},
         ]
     )
     probe = _StubProbe([])  # nothing logical → the board shows only physical agents
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
     assert "assistant" in out
-    for non_agent in ("broker", "bridge", "tools", "router"):
+    for non_agent in ("broker", "bridge", "tools"):
         assert non_agent not in out
 
 
 async def test_agent_ps_tolerates_probe_failure(tmp_path, capsys):
     """A broker hiccup must not crash read-only `ps`: degrade to physical-only."""
-    client = _StubClient(
-        list_processes_result=[{"name": "assistant", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "assistant", "status": "Running"}])
     probe = _RaisingProbe()
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     assert probe.calls == [_SERVERS]
@@ -375,9 +366,7 @@ async def test_agent_start_tolerates_probe_failure_and_proceeds(tmp_path, capsys
 # --- agent_start: not declared in the running project (§13.1) ----------------
 
 
-async def test_agent_start_not_declared_asks_for_reload_no_update_project(
-    tmp_path, capsys
-):
+async def test_agent_start_not_declared_asks_for_reload_no_update_project(tmp_path, capsys):
     """start_process raises (brand-new agent) → reload message, exit 1, no update.
 
     A new agent authored after ``calfcord start`` is not a declared slot, so the
@@ -421,8 +410,7 @@ async def test_agent_start_server_error_raises_loudly_not_reload_hint(tmp_path):
     raise with caller/target/correlation context, carrying the PC body.
     """
     pc_error = ProcessComposeError(
-        "start_process: process-compose POST /process/start/assistant "
-        "failed with HTTP 500: internal supervisor error",
+        "start_process: process-compose POST /process/start/assistant failed with HTTP 500: internal supervisor error",
         status_code=500,
     )
     client = _StubClient(start_raises=pc_error)
@@ -533,9 +521,7 @@ async def test_agent_start_all_mixes_running_stopped_and_remote(tmp_path, capsys
     answering on another host hits the duplicate-refusal. All three are honored in
     one sweep; every id gets a per-item line; an all-success sweep returns 0.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "local_up", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "local_up", "status": "Running"}])
     probe = _StubProbe([_defn("remote")])  # answering elsewhere, not here
 
     rc = await roster.agent_start_all(
@@ -572,9 +558,7 @@ async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys)
     locally-Running set — so an unfiltered sweep would fall through to
     ``start_process('tools')``. The assertions below pin BOTH paths regardless.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "tools", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "tools", "status": "Running"}])
     probe = _StubProbe([])  # nobody live → a leaked agent id would reach start
 
     rc = await roster.agent_start_all(
@@ -605,7 +589,7 @@ async def test_agent_start_all_all_reserved_is_clean_no_op(tmp_path, capsys):
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
-        agent_ids=["tools", "router", "broker", "bridge"],
+        agent_ids=["tools", "broker", "bridge"],
         server_urls=_SERVERS,
         client=client,
         probe=probe,
@@ -692,9 +676,7 @@ async def test_agent_start_all_continues_past_a_hard_failure_returns_1(tmp_path,
     assert "start --all: 3 agent(s) processed, 1 failed." in capsys.readouterr().out
 
 
-async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(
-    tmp_path, capsys
-):
+async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(tmp_path, capsys):
     """A NON-raising per-id failure (agent_start returns 1) still fails the sweep.
 
     ``agent_start_all`` has two failure paths: ``except Exception`` (a raised 5xx)
@@ -816,14 +798,13 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
     """`stop --all` stops every Running local AGENT — never the substrate/singletons.
 
     The target set is the same physical filter `ps` uses: Running processes whose
-    name is not a reserved (substrate/tools/router) process. A Stopped agent is
+    name is not a reserved (substrate/tools) process. A Stopped agent is
     not a target. An all-success sweep returns 0.
     """
     client = _StubClient(
         list_processes_result=[
             {"name": "broker", "status": "Running"},  # substrate — never
             {"name": "tools", "status": "Running"},  # singleton — never
-            {"name": "router", "status": "Running"},  # singleton — never
             {"name": "assistant", "status": "Running"},  # agent → stop
             {"name": "scheduler", "status": "Running"},  # agent → stop
             # PC v1.110.0 reports an operator-stopped slot as "Completed" (never
@@ -836,7 +817,7 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
 
     assert rc == 0
     assert sorted(client.stop_calls) == ["assistant", "scheduler"]
-    for never in ("broker", "tools", "router", "dormant"):
+    for never in ("broker", "tools", "dormant"):
         assert never not in client.stop_calls
     # The summary pins the count math (2 targets, 0 failed) + wording.
     assert "stop --all: 2 agent(s) processed, 0 failed." in capsys.readouterr().out
@@ -969,9 +950,7 @@ async def test_agent_ps_workspace_down(tmp_path, capsys):
     client = _StubClient(workspace_up=False)
     probe = _StubProbe([])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     assert probe.calls == []
@@ -1004,9 +983,7 @@ async def test_agent_ps_union_three_cases(tmp_path, capsys):
     )
     probe = _StubProbe([_defn("assistant"), _defn("remote")])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -1037,9 +1014,7 @@ async def test_agent_ps_empty(tmp_path, capsys):
     client = _StubClient(list_processes_result=[_pc_proc("broker", "Running")])
     probe = _StubProbe([])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -1063,9 +1038,7 @@ async def test_agent_ps_tolerates_data_wrapped_and_nondict_rows(tmp_path, capsys
     )
     probe = _StubProbe([_defn("assistant")])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out

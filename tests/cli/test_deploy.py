@@ -131,11 +131,7 @@ def _k8s_docs(agent_ids: list[str] | None = None) -> list[dict]:
 
 
 def _by_name(docs: list[dict], kind: str) -> dict[str, dict]:
-    return {
-        doc["metadata"]["name"]: doc
-        for doc in docs
-        if doc.get("kind") == kind
-    }
+    return {doc["metadata"]["name"]: doc for doc in docs if doc.get("kind") == kind}
 
 
 def test_k8s_renders_a_broker_workload() -> None:
@@ -143,9 +139,7 @@ def test_k8s_renders_a_broker_workload() -> None:
     # The broker is a stateful single instance; a Deployment or StatefulSet named
     # for it must exist (the substrate root every process dials).
     broker_workloads = [
-        d for d in docs
-        if d.get("kind") in ("Deployment", "StatefulSet")
-        and d["metadata"]["name"] == "broker"
+        d for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and d["metadata"]["name"] == "broker"
     ]
     assert len(broker_workloads) == 1
 
@@ -163,9 +157,7 @@ def test_k8s_configmap_carries_the_configured_broker_url() -> None:
 def _k8s_configmap_host_url(server_urls: str) -> str:
     """Render with the given ``server_urls`` and return the ConfigMap CALF_HOST_URL."""
     rendered = deploy.render_k8s(agent_ids=_AGENTS, server_urls=server_urls, image="calfcord:latest")
-    configmaps = _by_name(
-        [doc for doc in yaml.safe_load_all(rendered) if doc is not None], "ConfigMap"
-    )
+    configmaps = _by_name([doc for doc in yaml.safe_load_all(rendered) if doc is not None], "ConfigMap")
     return configmaps["calfcord-config"]["data"]["CALF_HOST_URL"]
 
 
@@ -222,7 +214,7 @@ def test_k8s_unparseable_broker_port_passes_through_verbatim(server_urls: str) -
 
 def test_k8s_renders_one_deployment_per_process_type() -> None:
     deployments = _by_name(_k8s_docs(), "Deployment")
-    for name in ("bridge", "router", "tools"):
+    for name in ("bridge", "tools"):
         assert name in deployments, f"missing a {name} Deployment"
 
 
@@ -248,7 +240,6 @@ def test_k8s_process_deployments_use_the_calfkit_console_scripts() -> None:
     deployments = _by_name(_k8s_docs(), "Deployment")
     expected = {
         "bridge": "calfkit-bridge",
-        "router": "calfkit-router",
         "tools": "calfkit-tools",
     }
     for name, script in expected.items():
@@ -283,9 +274,7 @@ def test_k8s_workloads_pull_env_so_alias_reaches_every_role() -> None:
     workload pulls the SAME ``.env``-derived Secret via ``envFrom`` — so an
     alias reaches both sides of the route (the two-sided requirement, ADR-0007).
     """
-    rendered = deploy.render_k8s(
-        agent_ids=["scribe"], server_urls=_BROKER, image="calfcord:latest"
-    )
+    rendered = deploy.render_k8s(agent_ids=["scribe"], server_urls=_BROKER, image="calfcord:latest")
     # The Secret operators create is sourced from .env, so a CALFCORD_TOOLS_ALIAS
     # key in .env rides it to the pods (deploy never inlines or special-cases it).
     assert "--from-env-file=.env" in rendered
@@ -303,7 +292,7 @@ def test_k8s_workloads_pull_env_so_alias_reaches_every_role() -> None:
 
 def test_k8s_no_agents_still_renders_the_substrate() -> None:
     deployments = _by_name(_k8s_docs([]), "Deployment")
-    for name in ("bridge", "router", "tools"):
+    for name in ("bridge", "tools"):
         assert name in deployments
     # ...and no orphan agent Deployment slipped in.
     assert not any(n.startswith("agent-") for n in deployments)
@@ -424,17 +413,14 @@ def _install_home(tmp_path: Path, agents: list[str]) -> Path:
     agents_dir.mkdir(parents=True)
     for name in agents:
         (agents_dir / f"{name}.md").write_text(
-            f"---\nname: {name}\ndisplay_name: {name.title()}\n"
-            f"provider: anthropic\nmodel: claude-x\n---\nbody\n",
+            f"---\nname: {name}\ndisplay_name: {name.title()}\nprovider: anthropic\nmodel: claude-x\n---\nbody\n",
             encoding="utf-8",
         )
     return home
 
 
 @pytest.mark.parametrize("target", ["systemd", "k8s", "docker"])
-def test_run_dispatches_each_target_to_stdout(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str
-) -> None:
+def test_run_dispatches_each_target_to_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str) -> None:
     home = _install_home(tmp_path, ["assistant"])
     env_path, agents_dir = (home / "config" / ".env", home / "agents")
     rc = deploy.run(
@@ -449,9 +435,7 @@ def test_run_dispatches_each_target_to_stdout(
     assert out.strip(), f"{target} rendered nothing to stdout"
 
 
-def test_run_k8s_renders_one_deployment_per_defined_agent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_run_k8s_renders_one_deployment_per_defined_agent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # The veneer enumerates the roster via detect_agents (the same seam `start`
     # uses), so a 2-agent install yields 2 agent Deployments end to end.
     home = _install_home(tmp_path, ["assistant", "scribe"])
@@ -488,9 +472,7 @@ def test_run_writes_to_an_output_path_when_given(tmp_path: Path) -> None:
     assert "[Service]" in out_file.read_text(encoding="utf-8")
 
 
-def test_run_unknown_target_returns_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_run_unknown_target_returns_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # argparse `choices=` guards the CLI, but the module must also fail cleanly if
     # called directly with a bad target rather than rendering garbage.
     home = _install_home(tmp_path, ["assistant"])
@@ -505,8 +487,6 @@ def test_run_unknown_target_returns_error(
     assert "error" in capsys.readouterr().out.lower()
 
 
-
-
 def test_k8s_renders_one_deployment_per_mcp_server() -> None:
     """Each mcp.json server gets its own Deployment running
     ``calfkit-mcp <server>`` — the same per-server isolation the local
@@ -518,10 +498,7 @@ def test_k8s_renders_one_deployment_per_mcp_server() -> None:
         mcp_servers=["github"],
     )
     docs = list(yaml.safe_load_all(rendered))
-    mcp = [
-        d for d in docs
-        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "mcp-github"
-    ]
+    mcp = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"] == "mcp-github"]
     assert len(mcp) == 1
     container = mcp[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["command"] == ["calfkit-mcp", "github"]
@@ -530,7 +507,4 @@ def test_k8s_renders_one_deployment_per_mcp_server() -> None:
 def test_k8s_no_mcp_servers_renders_no_mcp_deployments() -> None:
     rendered = deploy.render_k8s(agent_ids=_AGENTS, server_urls=_BROKER, image="calfcord:latest")
     docs = list(yaml.safe_load_all(rendered))
-    assert not [
-        d for d in docs
-        if d.get("kind") == "Deployment" and d["metadata"]["name"].startswith("mcp-")
-    ]
+    assert not [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].startswith("mcp-")]

@@ -66,7 +66,6 @@ from calfcord.discord.persona import Persona
 from calfcord.discord.retry_feedback import (
     MAX_REPLY_RETRY_ATTEMPTS,
 )
-from calfcord.router.definition import build_router_definition
 
 _CORRELATION_ID = "evt-1"
 
@@ -101,7 +100,6 @@ def _registry() -> AgentRegistry:
                 avatar_url="https://example.com/scribe.png",
                 system_prompt="You are Scribe.",
             ),
-            build_router_definition(),
         ]
     )
 
@@ -523,7 +521,6 @@ class TestPublishRetry:
                     memory=True,
                     system_prompt="You are Scribe.",
                 ),
-                build_router_definition(),
             ]
         )
         entry = _entry()
@@ -537,9 +534,7 @@ class TestPublishRetry:
         # localizes ``{{MEMORY_DIR}}``, so the placeholder must survive on the wire.
         assert "{{MEMORY_DIR}}" in deps[MEMORY_PROMPT_DEPS_KEY]
 
-    async def test_envelope_omits_memory_prompt_when_no_memory_agent(
-        self, calfkit_client: MagicMock
-    ) -> None:
+    async def test_envelope_omits_memory_prompt_when_no_memory_agent(self, calfkit_client: MagicMock) -> None:
         """No memory-enabled agent in the registry → no template shipped, so the
         retry deps stay byte-identical to the pre-feature shape (no wire cost).
         The default ``_registry()`` fixture's scribe has memory off."""

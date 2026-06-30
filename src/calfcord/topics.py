@@ -42,37 +42,6 @@ Consumers:
   (:func:`calfcord.control_plane.first_reply.wait_for_first_reply`), a transient
   CLI-side consumer in its own group that confirms the org is live."""
 
-AMBIENT_INGRESS_TOPIC = "discord.ambient.in"
-"""Topic the router agent subscribes to. The bridge publishes ambient
-(``kind="message"``) wires here for the router to classify.
-
-Producer: :mod:`calfcord.bridge.ingress` (ambient branch).
-Consumer: the built-in router agent
-(:mod:`calfcord.router.runner`, via the ``subscribe_topics``
-list built in :func:`calfcord.agents.factory.AgentFactory._build_router_node`).
-
-Hardcoded rather than env-driven because the project's topology contract
-is fixed — operators changing this topic would also need to retune the
-router's subscribe_topics, which is also constant."""
-
-SYNTHESIZED_INGRESS_TOPIC = "bridge.synthesized.in"
-"""Topic the bridge's synthesized-in consumer subscribes to. The router's
-fan-out @consumer publishes one envelope per chosen agent here; the
-bridge picks each synthesized wire off the topic, validates it, and
-feeds it through :meth:`BridgeIngress.handle` so the assistant chain
-looks identical to a real Discord slash.
-
-Producer: :mod:`calfcord.router.fanout`.
-Consumer: :mod:`calfcord.bridge.synthesized`."""
-
-ROUTING_DECISIONS_TOPIC = "routing.decisions"
-"""Topic the router agent's ``ReturnCall`` publishes to (via the agent's
-``publish_topic``); the fan-out @consumer subscribes here.
-
-Producer: built-in router agent (see
-:func:`calfcord.router.definition.build_router_definition`).
-Consumer: :mod:`calfcord.router.fanout`."""
-
 AGENT_STEPS_TOPIC = "agent.steps"
 """Shared topic that every assistant agent mirrors its handler hops to.
 

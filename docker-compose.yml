@@ -5,14 +5,14 @@
 #   1. Full stack (recommended for first run):
 #        cp .env.example .env       # fill in Discord + LLM creds
 #        docker compose up --build
-#      Brings up Tansu (the broker) plus the four calfcord services
-#      (bridge, agent, router, tools). The ``--build`` flag rebuilds the
+#      Brings up Tansu (the broker) plus the three calfcord services
+#      (bridge, agent, tools). The ``--build`` flag rebuilds the
 #      image after any Dockerfile change; omit it for plain restarts.
 #
 #   2. Native development (no Docker for the app):
 #        Run the broker natively with ``calfcord broker`` (or point
 #        ``CALF_HOST_URL`` at your own Kafka), then in separate terminals:
-#        CALF_HOST_URL=localhost:9092 uv run calfkit-bridge   (agent / router / tools)
+#        CALF_HOST_URL=localhost:9092 uv run calfkit-bridge   (agent / tools)
 #      To run only the broker in Docker but the processes natively, advertise
 #      the host address so host clients can reach it:
 #        TANSU_ADVERTISE=localhost docker compose up tansu
@@ -33,10 +33,10 @@
 # owned by the caller. macOS Docker Desktop handles UID translation
 # automatically — no flags needed.
 
-# Shared build + image config for the four calfcord services. YAML
+# Shared build + image config for the three calfcord services. YAML
 # anchor (``&calfcord-base``) defined once and merged into each service
 # below via ``<<: *calfcord-base`` so we don't re-declare the build
-# context, image tag, env_file, and restart policy four times.
+# context, image tag, env_file, and restart policy three times.
 #
 # The build args expand from shell env, defaulting to 1000 when unset.
 # Linux users with a non-1000 UID set them once on the command line
@@ -89,10 +89,9 @@ services:
   # agent replies back as persona webhooks.
   #
   # No ``agents/*.md`` mount: after the control-plane split the bridge
-  # bootstraps its registry with only the locally-built router and
-  # projects the rest from ``agent.state`` events. Mounting the
-  # definitions here would be a misleading signal that the bridge
-  # consults disk — it does not.
+  # bootstraps its registry by projecting from ``agent.state`` events.
+  # Mounting the definitions here would be a misleading signal that the
+  # bridge consults disk — it does not.
   bridge:
     <<: *calfcord-base
     container_name: calfcord-bridge
@@ -135,7 +134,7 @@ services:
       # Read-write: the agent's control-plane sink rewrites its own
       # frontmatter via md_writer.update_thinking_effort when the
       # bridge publishes a SetThinkingEffortOp. The agent process is
-      # the sole writer of agents/<id>.md; the bridge and router have
+      # the sole writer of agents/<id>.md; the bridge has
       # no mount here for that reason.
       - ./agents:/app/agents
       # Per-agent runtime state (channel subscriptions, .json files
@@ -150,34 +149,6 @@ services:
       # Codex CLI system-prompt cache. Sharing with every other
       # container means a single ``calfkit-auth codex refresh-prompts``
       # primes all services' caches at once.
-      - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
-
-  # The ambient-channel router. Subscribes to discord.ambient.in,
-  # selects which agent (if any) should handle a non-@-mentioned
-  # message, and publishes the routing decision back to Kafka. See
-  # docs/ambient-routing.md for the design. Single instance — the
-  # router holds no per-channel state and a second instance would
-  # only contend for partitions.
-  #
-  # No ``agents/*.md`` mount: the router definition is constructed in
-  # code via build_router_definition(), and the per-invocation peer
-  # roster arrives in ``deps`` from the bridge (which projects from
-  # ``agent.state``). The router never touches the agent definitions
-  # directory.
-  router:
-    <<: *calfcord-base
-    container_name: calfcord-router
-    command: calfkit-router
-    environment:
-      CALF_HOST_URL: tansu:9092
-    volumes:
-      # Codex subscription auth — required when the router's ``provider``
-      # (set in the bundled ``router.md``) is ``openai-codex`` (the shipped
-      # default). Without these mounts the router boots and immediately
-      # fails with ``CodexNotLoggedInError``. Mirrors the agent service's
-      # Codex mounts; see that block for the rationale and the host-login
-      # prerequisite (docs/codex-auth.md).
-      - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
       - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
 
   # The A2A + builtin-tool runner. This is the service that runs the
