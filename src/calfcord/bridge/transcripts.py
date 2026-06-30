@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS transcripts (
   created_at        INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_transcripts_final ON transcripts(final_message_id);
+CREATE TABLE IF NOT EXISTS agent_overrides (
+  agent_id  TEXT PRIMARY KEY,
+  effort    TEXT NOT NULL
+);
 """
 
 
@@ -283,6 +287,60 @@ class TranscriptStore:
         await conn.commit()
         return deleted
 
+    async def set_agent_override(self, agent_id: str, effort: str) -> None:
+        """Upsert the persisted thinking-effort override for an agent.
+
+        Keyed on the ``agent_id`` PK via ``INSERT ... ON
+        CONFLICT(agent_id) DO UPDATE`` so re-running the operator's
+        ``/thinking-effort`` for the same agent overwrites the prior tier
+        in place rather than erroring or duplicating. ``effort`` is stored
+        as an opaque tier string — the slash command validates it as a
+        :class:`~calfcord.agents.definition.ThinkingEffort` before calling.
+        """
+        conn = self._require_conn()
+        await conn.execute(
+            "INSERT INTO agent_overrides (agent_id, effort) VALUES (?, ?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET effort=excluded.effort",
+            (agent_id, effort),
+        )
+        await conn.commit()
+
+    async def clear_agent_override(self, agent_id: str) -> None:
+        """Delete an agent's persisted override; idempotent if absent.
+
+        Clearing an agent that has no stored override is a harmless no-op
+        (``DELETE`` simply affects zero rows) — it never raises.
+        """
+        conn = self._require_conn()
+        await conn.execute(
+            "DELETE FROM agent_overrides WHERE agent_id = ?",
+            (agent_id,),
+        )
+        await conn.commit()
+
+    async def get_agent_override(self, agent_id: str) -> str | None:
+        """Return the stored effort tier for an agent, or ``None`` if unset."""
+        conn = self._require_conn()
+        async with conn.execute(
+            "SELECT effort FROM agent_overrides WHERE agent_id = ?",
+            (agent_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
+    async def all_agent_overrides(self) -> dict[str, str]:
+        """Return every persisted override as ``{agent_id: effort}``.
+
+        The bridge loads this into an in-memory map at startup so the
+        operator's overrides take effect across a restart (D-8).
+        """
+        conn = self._require_conn()
+        async with conn.execute("SELECT agent_id, effort FROM agent_overrides") as cursor:
+            rows = await cursor.fetchall()
+        return {str(agent_id): str(effort) for agent_id, effort in rows}
+
     async def __aenter__(self) -> TranscriptStore:
         await self.connect()
         return self
@@ -333,6 +391,26 @@ class NullTranscriptStore:
     async def prune_older_than(self, cutoff_created_at: int) -> int:
         """Nothing to prune; reports zero rows deleted."""
         return 0
+
+    async def set_agent_override(self, agent_id: str, effort: str) -> None:
+        """No-op: the failed-open store can't persist the override.
+
+        The operator's ``/thinking-effort`` silently does not survive on a
+        degraded run, matching the dropped-write transcript behaviour.
+        """
+        return None
+
+    async def clear_agent_override(self, agent_id: str) -> None:
+        """No-op: there is nothing persisted to clear."""
+        return None
+
+    async def get_agent_override(self, agent_id: str) -> str | None:
+        """Always misses — no override is persisted."""
+        return None
+
+    async def all_agent_overrides(self) -> dict[str, str]:
+        """Always empty — no overrides persisted (bridge starts with none)."""
+        return {}
 
     async def close(self) -> None:
         """No-op: there is no connection to release."""

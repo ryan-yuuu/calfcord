@@ -303,6 +303,89 @@ async def test_async_context_manager_opens_and_closes(tmp_path: pathlib.Path) ->
         await store.get_by_final_message_id("msg-9001")
 
 
+# --- agent thinking-effort overrides -------------------------------------
+# The operator's ``/thinking-effort <agent> <effort>`` is persisted in the
+# additive ``agent_overrides`` table so it survives a bridge restart; the
+# bridge loads ``all_agent_overrides`` into an in-memory map at startup and
+# applies each tier as a provider-blind model_settings override. The store
+# treats ``effort`` as an opaque str (the slash command validates the tier).
+
+
+async def test_set_then_get_agent_override_round_trips(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        # Absent before any set.
+        assert await store.get_agent_override("scheduler") is None
+        await store.set_agent_override("scheduler", "high")
+        assert await store.get_agent_override("scheduler") == "high"
+
+
+async def test_set_agent_override_upsert_overwrites(tmp_path: pathlib.Path) -> None:
+    # agent_id is the PK; a second set for the same agent overwrites in place
+    # (ON CONFLICT(agent_id) DO UPDATE) rather than erroring or duplicating.
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        await store.set_agent_override("finance", "low")
+        await store.set_agent_override("finance", "xhigh")
+        assert await store.get_agent_override("finance") == "xhigh"
+        # Exactly one row for that agent — not two.
+        assert await store.all_agent_overrides() == {"finance": "xhigh"}
+
+
+async def test_clear_agent_override_removes_existing(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        await store.set_agent_override("scheduler", "high")
+        await store.clear_agent_override("scheduler")
+        assert await store.get_agent_override("scheduler") is None
+
+
+async def test_clear_agent_override_absent_is_noop(tmp_path: pathlib.Path) -> None:
+    # Clearing an agent that was never set is idempotent — no error, no row.
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        await store.clear_agent_override("never-set")
+        assert await store.get_agent_override("never-set") is None
+        assert await store.all_agent_overrides() == {}
+
+
+async def test_all_agent_overrides_returns_full_map(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        # Empty store reports an empty map.
+        assert await store.all_agent_overrides() == {}
+        await store.set_agent_override("scheduler", "high")
+        await store.set_agent_override("finance", "low")
+        await store.set_agent_override("research", "xhigh")
+        assert await store.all_agent_overrides() == {
+            "scheduler": "high",
+            "finance": "low",
+            "research": "xhigh",
+        }
+
+
+async def test_agent_overrides_persist_across_reopen(tmp_path: pathlib.Path) -> None:
+    # D-8: the override MUST survive a bridge restart. Write, close, then
+    # reopen the SAME db path and read the values back.
+    db_path = _db_path(tmp_path)
+    store1 = TranscriptStore(db_path)
+    await store1.connect()
+    await store1.set_agent_override("scheduler", "high")
+    await store1.set_agent_override("finance", "low")
+    await store1.close()
+
+    store2 = TranscriptStore(db_path)
+    await store2.connect()
+    try:
+        assert await store2.get_agent_override("scheduler") == "high"
+        assert await store2.all_agent_overrides() == {
+            "scheduler": "high",
+            "finance": "low",
+        }
+    finally:
+        await store2.close()
+
+
 def test_real_store_reports_enabled_true(tmp_path: pathlib.Path) -> None:
     # The real store is always enabled — transcripts, replay, and the toggle
     # are active for it. (No connection needed; ``enabled`` is a class-level
@@ -337,6 +420,17 @@ async def test_null_store_close_is_noop() -> None:
     store = NullTranscriptStore()
     assert await store.close() is None
     assert await store.close() is None
+
+
+async def test_null_store_agent_overrides_degrade() -> None:
+    # On a failed-open run the override silently does not persist, mirroring
+    # the degraded transcript behaviour: set/clear are silent no-ops and the
+    # reads always miss (get ⇒ None, all ⇒ {}).
+    store = NullTranscriptStore()
+    assert await store.set_agent_override("scheduler", "high") is None
+    assert await store.clear_agent_override("scheduler") is None
+    assert await store.get_agent_override("scheduler") is None
+    assert await store.all_agent_overrides() == {}
 
 
 def test_null_store_mirrors_real_store_surface() -> None:
