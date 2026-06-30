@@ -6,6 +6,7 @@ Drives :class:`MentionHandler` through a ``FakeHandle`` (scripted ``stream()`` +
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,7 +17,13 @@ from calfkit.models.payload import TextPart
 from calfkit.models.state import State
 
 from calfcord.agents.thinking import build_model_settings_union
-from calfcord.bridge.mention_handler import MentionHandler, MentionRequest
+from calfcord.bridge.mention_handler import MentionHandler, MentionRequest, ReplyOutcome
+
+
+def _fixable_error() -> Any:
+    """A stand-in for a Discord 4xx the agent can fix (build_retry_reminder reads
+    only ``.status``/``.code``/``.text``)."""
+    return SimpleNamespace(status=400, code=0, text="Must be 2000 or fewer in length.")
 
 
 # --- fakes -----------------------------------------------------------------
@@ -45,18 +52,25 @@ class _FakeHandle:
 
 
 class _FakeGateway:
-    def __init__(self, handle: _FakeHandle) -> None:
-        self._handle = handle
-        self.started: dict[str, Any] | None = None
+    def __init__(self, handles: list[_FakeHandle]) -> None:
+        self._handles = handles
+        self.starts: list[dict[str, Any]] = []
+
+    @property
+    def started(self) -> dict[str, Any] | None:
+        """The first ``start()`` call's kwargs (the original invocation)."""
+        return self.starts[0] if self.starts else None
 
     async def start(self, prompt: str, **kwargs: Any) -> _FakeHandle:
-        self.started = {"prompt": prompt, **kwargs}
-        return self._handle
+        self.starts.append({"prompt": prompt, **kwargs})
+        # Successive start()s (retries) consume successive handles; the last
+        # handle is reused if start() is called more times than handles given.
+        return self._handles[min(len(self.starts) - 1, len(self._handles) - 1)]
 
 
 class _FakeClient:
-    def __init__(self, handle: _FakeHandle) -> None:
-        self.gw = _FakeGateway(handle)
+    def __init__(self, handles: list[_FakeHandle]) -> None:
+        self.gw = _FakeGateway(handles)
         self.requested_agent: str | None = None
 
     def agent(self, name: str) -> _FakeGateway:
@@ -114,12 +128,23 @@ class _FakeProgress:
 
 
 class _FakeReply:
-    def __init__(self) -> None:
+    def __init__(self, outcomes: list[ReplyOutcome] | None = None) -> None:
         self.replies: list[tuple[Any, str]] = []
+        self.chunked: list[tuple[Any, str]] = []
         self.notices: list[str] = []
+        # Scripted per-post_reply outcomes; defaults to "ok" once exhausted.
+        self._outcomes = list(outcomes or [])
 
-    async def post_reply(self, req: MentionRequest, persona: Any, text: str) -> None:
-        self.replies.append((persona, text))
+    async def post_reply(
+        self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
+    ) -> ReplyOutcome:
+        self.replies.append((persona, result.output))
+        return self._outcomes.pop(0) if self._outcomes else ReplyOutcome("ok")
+
+    async def post_chunked(
+        self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
+    ) -> None:
+        self.chunked.append((persona, result.output))
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
         self.notices.append(text)
@@ -177,11 +202,19 @@ def _make(
     *,
     online: frozenset[str] | None = frozenset({"scribe"}),
     handle: _FakeHandle | None = None,
+    handles: list[_FakeHandle] | None = None,
     overrides: dict[str, str] | None = None,
+    reply_outcomes: list[ReplyOutcome] | None = None,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
-    h = handle if handle is not None else _FakeHandle(result=_result("done", "scribe"))
-    client = _FakeClient(h)
-    fakes = {"a2a": _FakeA2A(), "progress": _FakeProgress(), "reply": _FakeReply(), "history": _FakeHistory()}
+    if handles is None:
+        handles = [handle if handle is not None else _FakeHandle(result=_result("done", "scribe"))]
+    client = _FakeClient(handles)
+    fakes = {
+        "a2a": _FakeA2A(),
+        "progress": _FakeProgress(),
+        "reply": _FakeReply(reply_outcomes),
+        "history": _FakeHistory(),
+    }
     handler = MentionHandler(
         client=client,
         roster=_FakeRoster(online),
@@ -290,3 +323,56 @@ async def test_output_text_round_trips(output: str) -> None:
     handler, _client, fakes = _make(handle=_FakeHandle(result=_result(output, "scribe")))
     await handler.handle(_req())
     assert fakes["reply"].replies[0][1] == output
+
+
+class TestRetryWithFeedback:
+    async def test_agent_fixable_failure_retries_then_succeeds(self) -> None:
+        # First post is rejected (agent-fixable); a second start() (the retry) yields
+        # a corrected reply that posts OK.
+        h1 = _FakeHandle(result=_result("too long", "scribe"))
+        h2 = _FakeHandle(result=_result("concise", "scribe"))
+        handler, client, fakes = _make(
+            handles=[h1, h2],
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long"), ReplyOutcome("ok")],
+        )
+        await handler.handle(_req())
+        # original invocation + exactly one retry start()
+        assert len(client.gw.starts) == 2
+        # the retry carried the corrective reminder as its prompt
+        assert "<system-reminder>" in client.gw.starts[1]["prompt"]
+        # the retry preserved deps/author/model_settings
+        assert client.gw.starts[1]["author"] == "alice"
+        assert client.gw.starts[1]["deps"]["memory_prompt"] == "tmpl"
+        # two post attempts; the second posted the corrected text; no chunk fallback
+        assert [t for _, t in fakes["reply"].replies] == ["too long", "concise"]
+        assert fakes["reply"].chunked == []
+
+    async def test_exhausted_retries_fall_back_to_chunked(self) -> None:
+        # Every post is agent-fixable → 1 original + MAX_REPLY_RETRY_ATTEMPTS (2)
+        # retries = 3 posts, then a chunk-split fallback of the last attempt.
+        handler, client, fakes = _make(
+            handles=[_FakeHandle(result=_result("x", "scribe"))],
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
+        )
+        await handler.handle(_req())
+        assert len(fakes["reply"].replies) == 3
+        assert len(fakes["reply"].chunked) == 1
+        assert len(client.gw.starts) == 3  # original + 2 retries
+
+    async def test_dropped_outcome_does_not_retry(self) -> None:
+        handler, client, fakes = _make(reply_outcomes=[ReplyOutcome("dropped")])
+        await handler.handle(_req())
+        assert len(client.gw.starts) == 1  # infra failure → no retry
+        assert fakes["reply"].chunked == []
+
+    async def test_retry_reinvocation_fault_posts_notice(self) -> None:
+        # The retry re-invocation itself faults → user-facing notice, no crash.
+        h1 = _FakeHandle(result=_result("x", "scribe"))
+        h2 = _FakeHandle(fault=NodeFaultError("peer_fault", message="boom"))
+        handler, _client, fakes = _make(
+            handles=[h1, h2],
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")],
+        )
+        await handler.handle(_req())
+        assert len(fakes["reply"].notices) == 1
+        assert fakes["reply"].chunked == []

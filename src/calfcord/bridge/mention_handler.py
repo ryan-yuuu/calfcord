@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import NodeFaultError
@@ -29,6 +29,11 @@ from calfcord.bridge.a2a_dispatch import A2ACall, A2ADispatcher, A2AProjection
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event
 from calfcord.discord.persona import Persona
+from calfcord.discord.retry_feedback import (
+    MAX_REPLY_RETRY_ATTEMPTS,
+    build_retry_history,
+    build_retry_reminder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +93,29 @@ class ProgressRenderer(Protocol):
     async def finish(self, correlation_id: str) -> None: ...
 
 
+@dataclass(frozen=True)
+class ReplyOutcome:
+    """The result of a reply-post attempt — drives the retry-with-feedback loop.
+
+    ``"ok"`` posted (or the reply was empty and dropped — nothing to retry);
+    ``"dropped"`` an infra failure the agent can't fix (auth/permission/rate-limit
+    or a persistent 5xx — logged + abandoned, no retry); ``"retry"`` a Discord
+    rejection the agent can plausibly fix (e.g. too long), carrying the rejecting
+    ``error`` and the ``failed_text`` for the corrective retry envelope.
+    """
+
+    status: Literal["ok", "dropped", "retry"]
+    error: Any = None
+    failed_text: str = ""
+
+
 class ReplyPoster(Protocol):
-    async def post_reply(self, req: MentionRequest, persona: Persona, text: str) -> None: ...
+    async def post_reply(
+        self, req: MentionRequest, persona: Persona, result: Any, *, initial_len: int, correlation_id: str
+    ) -> ReplyOutcome: ...
+    async def post_chunked(
+        self, req: MentionRequest, persona: Persona, result: Any, *, initial_len: int, correlation_id: str
+    ) -> None: ...
     async def post_notice(self, req: MentionRequest, text: str) -> None: ...
 
 
@@ -135,12 +161,14 @@ class MentionHandler:
 
         history = await self._history.message_history(req)
         deps = {"discord": req.wire, **self._memory_deps()}
+        # Compute the C11 effort override once and reuse it on every retry.
+        model_settings = build_model_settings_union(self._overrides.effort_for(target))
         handle = await self._client.agent(target).start(
             req.content,
             message_history=history,
             deps=deps,
             author=req.author_label,
-            model_settings=build_model_settings_union(self._overrides.effort_for(target)),
+            model_settings=model_settings,
         )
 
         dispatcher = A2ADispatcher()
@@ -157,27 +185,91 @@ class MentionHandler:
         finally:
             await self._progress.finish(handle.correlation_id)
 
-        await self._post_terminal(req, handle, dispatcher, target)
+        await self._deliver(req, handle, dispatcher, target, history, deps, model_settings)
 
-    async def _post_terminal(self, req: MentionRequest, handle: Any, dispatcher: A2ADispatcher, target: str) -> None:
-        # No timeout: per spec §5.2 the bridge awaits the terminal unbounded (C5
-        # drops app-side timeout policing; a durable run may legitimately pause).
-        # A fault still surfaces — calfkit maps RunFailed → NodeFaultError here.
+    async def _deliver(
+        self,
+        req: MentionRequest,
+        handle: Any,
+        dispatcher: A2ADispatcher,
+        target: str,
+        history: list[ModelMessage],
+        deps: dict[str, Any],
+        model_settings: dict[str, Any] | None,
+    ) -> None:
+        """Post the agent's reply, with retry-with-feedback (spec §9).
+
+        Re-homes the old outbox re-publish as an in-process loop: when Discord
+        rejects a reply for a reason the agent can fix (e.g. too long), re-invoke
+        the agent with a corrective ``<system-reminder>`` + the failed attempt in
+        ``message_history`` (same ``deps``/``author``/``model_settings``), bounded
+        by ``MAX_REPLY_RETRY_ATTEMPTS``; on exhaustion fall back to chunk-splitting
+        the last attempt. The retry re-invocation is "quiet" — it awaits
+        ``result()`` only (no second progress/A2A drain), matching the old
+        blocking-RPC retry. The original run's ``correlation_id`` keys the
+        transcript across attempts so retries upsert one row.
+        """
+        result = await self._await_terminal(req, handle, dispatcher, target)
+        if result is None:
+            return  # faulted — notice already posted
+
+        attempt_history = history
+        attempts = 0
+        while True:
+            persona = persona_for(result.emitter_node_id or target)
+            outcome = await self._reply.post_reply(
+                req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
+            )
+            if outcome.status != "retry":
+                return  # "ok" or "dropped" — nothing more to do
+            if attempts >= MAX_REPLY_RETRY_ATTEMPTS:
+                # Budget exhausted: post the last attempt chunk-split rather than
+                # losing the reply entirely.
+                await self._reply.post_chunked(
+                    req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
+                )
+                return
+            attempts += 1
+            retry_history = build_retry_history(
+                original_history=attempt_history,
+                original_user_prompt=req.content,
+                failed_text=outcome.failed_text,
+            )
+            reminder = build_retry_reminder(outcome.error, outcome.failed_text)
+            try:
+                retry_handle = await self._client.agent(target).start(
+                    reminder,
+                    message_history=retry_history,
+                    deps=deps,
+                    author=req.author_label,
+                    model_settings=model_settings,
+                )
+                result = await retry_handle.result()
+            except NodeFaultError as exc:
+                origin = getattr(getattr(exc, "report", None), "origin_node_id", None)
+                logger.warning("agent retry faulted target=%s origin=%s", target, origin)
+                await self._reply.post_notice(req, _agent_error_text(origin))
+                return
+            attempt_history = retry_history
+
+    async def _await_terminal(
+        self, req: MentionRequest, handle: Any, dispatcher: A2ADispatcher, target: str
+    ) -> Any | None:
+        """Await the run's terminal, or ``None`` after handling a fault.
+
+        No timeout: per spec §5.2 the bridge awaits the terminal unbounded (C5
+        drops app-side timeout policing; a durable run may legitimately pause). A
+        genuine peer/agent fault faults the whole run (D-2) — calfkit maps
+        ``RunFailed`` → :class:`NodeFaultError`; any consult still open never got a
+        reply, so synthesize an A2A failure note for each, then post a user-facing
+        error (best-effort persona from the faulting node when the report names it).
+        """
         try:
-            result = await handle.result()
+            return await handle.result()
         except NodeFaultError as exc:
-            # A genuine peer/agent fault faults the whole run (D-2): any consult
-            # still open never got a reply, so synthesize an A2A failure note for
-            # each, then post a user-facing error (best-effort persona from the
-            # faulting node when the report names it).
             for call in dispatcher.dangling():
                 await self._a2a.project_fault(call)
             origin = getattr(getattr(exc, "report", None), "origin_node_id", None)
             logger.warning("agent run faulted target=%s origin=%s", target, origin)
             await self._reply.post_notice(req, _agent_error_text(origin))
-            return
-        # Emitter-driven persona: the node that actually replied (after a handoff,
-        # the peer) stamped the terminal, so this is handoff-correct with no
-        # special casing.
-        persona = persona_for(result.emitter_node_id or target)
-        await self._reply.post_reply(req, persona, result.output)
+            return None
