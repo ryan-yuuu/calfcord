@@ -472,8 +472,8 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", specifier = "~=0.10.0" },
-    { name = "calfkit-tools", specifier = ">=0.1.1" },
+    { name = "calfkit", specifier = "~=0.12.2" },
+    { name = "calfkit-tools", specifier = ">=0.1.3" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirerpy", specifier = ">=0.3.4" },
@@ -494,7 +494,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.10.0"
+version = "0.12.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -510,18 +510,20 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-graph" },
     { name = "python-dotenv" },
+    { name = "typer" },
     { name = "typing-extensions" },
     { name = "typing-inspection" },
     { name = "uuid-utils" },
+    { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/00/a4579fb5ba48523749b6bf36181586c733a535dceddcf12357f89fc887c5/calfkit-0.10.0.tar.gz", hash = "sha256:143483a92ac6ac5a0169a9d631545009136c6c9cd0c78aaa4458d402600dcf9c", size = 864474, upload-time = "2026-06-13T04:27:40.673Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/d0/5a018e97dec82c37e46b863323c8fb33b664cbbe872a1984fbef2150b48d/calfkit-0.12.3.tar.gz", hash = "sha256:697404b516673c2e572e89b9920433bfe323711628cf0c7a33e317e406718978", size = 1595421, upload-time = "2026-06-30T07:11:52.938Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/7f/efccf48ac35861567265a2eebc73e0d485c200284b9a1b608054433086d5/calfkit-0.10.0-py3-none-any.whl", hash = "sha256:60c1acb548371e062d1a41ebd0d377c7658fc982c7b637314908eed5e769e23c", size = 651628, upload-time = "2026-06-13T04:27:38.654Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/72/6424d497d969bf90c71d9ee73d37b2f87d62a86df35ad9f3aaeb01ac7a2c/calfkit-0.12.3-py3-none-any.whl", hash = "sha256:bdeb78bc56699e0c658410e4c2a90409869f8922c7d086e778c3dc47b75c55cc", size = 780624, upload-time = "2026-06-30T07:11:51.369Z" },
 ]
 
 [[package]]
 name = "calfkit-tools"
-version = "0.1.1"
+version = "0.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "calfkit" },
@@ -535,9 +537,9 @@ dependencies = [
     { name = "requests" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/35/59/5bcc7f3ed2ecb83b530e451ed83e638a244bda146c5fc554f9baf7f5583a/calfkit_tools-0.1.1.tar.gz", hash = "sha256:40aa408acda5cd4b8fbd37d9c70d3ec393d2b87e5a2ca835ddb8573d9a2425bf", size = 765999, upload-time = "2026-06-15T09:28:10.153Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/75/98/485eb3bd14f00e30fe14a9506d4bd3850dafce47dab0ba6e5751b2839d07/calfkit_tools-0.1.3.tar.gz", hash = "sha256:9a80b2ef713ebf3cc7d6b4e49d65d433999ba900dace1ea5ef1a42092e9fe770", size = 770534, upload-time = "2026-06-29T22:09:47.735Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/5c/6f101e2b94333d14128ebd9950fba30b16f56732d1edb29690e15674df96/calfkit_tools-0.1.1-py3-none-any.whl", hash = "sha256:b13cedd37daded0d1db044e73c0399e6cc36121b311620ed62bd4109a4ae4488", size = 528658, upload-time = "2026-06-15T09:28:08.595Z" },
+    { url = "https://files.pythonhosted.org/packages/63/cd/e5ec935978b72e2d0f361bce5a3c8439adc7ee708775b6debce5998cd890/calfkit_tools-0.1.3-py3-none-any.whl", hash = "sha256:39176052b12da04bd0ace5e840cd9fc82a7869d49814f33c704bf11fc3b64cba", size = 530961, upload-time = "2026-06-29T22:09:46.12Z" },
 ]
 
 [[package]]
@@ -1058,16 +1060,16 @@ server = [
 
 [[package]]
 name = "faststream"
-version = "0.6.7"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "fast-depends", extra = ["pydantic"] },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/7b/d02c069be0bc671b2eb8f805a1f824d2bfbe1852c9c3f4ad719a7ad3710b/faststream-0.6.7.tar.gz", hash = "sha256:c732eaf861c4cbddd9c7f9098608486a9f05dff67a72335686c3044039045346", size = 306185, upload-time = "2026-03-01T08:20:27.71Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/92/7f5edc7e1945968331c185ee197b690b413da861649d5859e3f377348acd/faststream-0.7.1.tar.gz", hash = "sha256:11816dd4ca678f6b173159c456619993b09684b684abe4010366d6a0c8059c58", size = 329453, upload-time = "2026-06-04T05:18:10.145Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ba/23/9d51f352fbb656f5345030f57e20737b1c88167f0eac354ac548d577808b/faststream-0.6.7-py3-none-any.whl", hash = "sha256:a904a4b1e3babeaa244a9460821f5b05dd71b00c959c816360b2acbbe267cd5c", size = 513454, upload-time = "2026-03-01T08:20:26.423Z" },
+    { url = "https://files.pythonhosted.org/packages/12/2e/73d58856a305a73ac31d3d950f9b96a2ef4c1a6071e38b339d1b0b466418/faststream-0.7.1-py3-none-any.whl", hash = "sha256:d4f971f6ba7621a05a67a8fcb4436fdcf89b5f21b33eb107f193b1c9553738a0", size = 556454, upload-time = "2026-06-04T05:18:08.897Z" },
 ]
 
 [package.optional-dependencies]
@@ -1716,14 +1718,14 @@ wheels = [
 
 [[package]]
 name = "ktables"
-version = "0.1.2"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiokafka" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/b0/fb814958ab6d97d319e6a2a6cac8817058dab06a22fa10b50c4e40273a76/ktables-0.1.2.tar.gz", hash = "sha256:a62bc10523ff419dee3a2b9e21d06cb965a687ea40ac35cdc76710549742d4e4", size = 40406, upload-time = "2026-06-10T08:56:13.085Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/6a/b03e928d0dd93ef8f59b3f336848176c9cda7133986ef5bfbdf101ba1661/ktables-1.0.0.tar.gz", hash = "sha256:0fbe474820cce7ef501decbb47da42fa152473fe49d7fec8ef42096d12999adf", size = 153752, upload-time = "2026-06-23T23:36:27.847Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/ad/9bc3ebf3e5e14da0ca5367aadaae746e98337ce79802999496a4643b8595/ktables-0.1.2-py3-none-any.whl", hash = "sha256:aaccc3361cebe17bfb1dfd4b04b7bd1f5525c9cd9c6f70236fa3283fcd48ac2d", size = 13444, upload-time = "2026-06-10T08:56:11.827Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/b8/ace4ff179e0ee8e05dcc7d5c71fc44c135c646d2772f16dca625a249e8ab/ktables-1.0.0-py3-none-any.whl", hash = "sha256:a6dfd18e2eda29efa5274a337a36a517fb71fb584af3ef02da77babac0c614ba", size = 27661, upload-time = "2026-06-23T23:36:26.787Z" },
 ]
 
 [[package]]

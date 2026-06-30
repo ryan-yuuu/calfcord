@@ -81,7 +81,7 @@ import os
 from collections.abc import Callable
 
 from calfkit.client import Client
-from calfkit.mcp import MCPToolboxRef
+from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
@@ -455,7 +455,7 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _resolve_tools(self, definition: AgentDefinition) -> tuple[list[ToolNodeDef], list[MCPToolboxRef]]:
+    def _resolve_tools(self, definition: AgentDefinition) -> tuple[list[ToolNodeDef], list[MCPToolbox]]:
         """Resolve ``definition.tools`` into builtin nodes + deferred MCP selectors.
 
         The flat ``tools:`` list mixes two kinds of entry, partitioned here:
@@ -464,7 +464,7 @@ class AgentFactory:
           in-memory tool registry, with an aggregate unknown-name
           :class:`ValueError` (every unknown name in one message);
         * ``mcp/...`` selectors collapse into one
-          :class:`~calfkit.mcp.MCPToolboxRef` per server
+          :class:`~calfkit.mcp.MCPToolbox` per server
           (:func:`~calfcord.mcp.agent_select.selectors_from_entries`),
           resolved per turn against the capability view — never against any
           local registry, so there is nothing further to validate here.
