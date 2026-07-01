@@ -32,7 +32,6 @@ def _seed_agent(
     lines = [
         "---",
         f"name: {name}",
-        f"display_name: {name.capitalize()}",
         f"description: {description}",
     ]
     if provider is not None:
@@ -55,11 +54,11 @@ def _seed_two_plus_noise(tmp_path: Path) -> Path:
     _seed_agent(agents_dir, "penny", description="Pairs on code.", tools_line="[]")
     # A reference template and a hidden file: neither is a live agent.
     (agents_dir / "agent.template.md").write_text(
-        "---\nname: agent\ndisplay_name: Tmpl\ndescription: Template.\n---\nbody\n",
+        "---\nname: agent\ndescription: Template.\n---\nbody\n",
         encoding="utf-8",
     )
     (agents_dir / ".hidden.md").write_text(
-        "---\nname: hidden\ndisplay_name: Hidden\ndescription: Nope.\n---\nbody\n",
+        "---\nname: hidden\ndescription: Nope.\n---\nbody\n",
         encoding="utf-8",
     )
     return agents_dir
@@ -132,7 +131,7 @@ def test_list_skips_unparseable_but_lists_the_rest(tmp_path: Path, capsys) -> No
     _seed_agent(agents_dir, "scribe")
     # name != stem makes parse_agent_md raise; the listing must survive it.
     (agents_dir / "broken.md").write_text(
-        "---\nname: mismatch\ndisplay_name: B\ndescription: Bad.\n---\nbody\n",
+        "---\nname: mismatch\ndescription: Bad.\n---\nbody\n",
         encoding="utf-8",
     )
     assert agent_inspect.run_list(agents_dir) == 0
@@ -150,7 +149,7 @@ def test_show_human_prints_fields(tmp_path: Path, capsys) -> None:
         agents_dir,
         "scribe",
         description="Takes notes.",
-        extra=["thinking_effort: high", "history_turns: 12"],
+        extra=["thinking_effort: high"],
     )
     rc = agent_inspect.run_show(agents_dir, "scribe")
     assert rc == 0
@@ -161,7 +160,6 @@ def test_show_human_prints_fields(tmp_path: Path, capsys) -> None:
     assert "Description" in out and "Takes notes." in out
     assert "Provider / model" in out and "anthropic" in out
     assert "Thinking effort" in out and "high" in out
-    assert "History turns" in out and "12" in out
     # The file path and a system-prompt preview are shown.
     assert str(agents_dir / "scribe.md") in out
     assert "System prompt" in out
@@ -174,7 +172,7 @@ def test_show_json_round_trips(tmp_path: Path, capsys) -> None:
         "scribe",
         description="Takes notes.",
         tools_line="[read_file, shell]",
-        extra=["thinking_effort: high", "history_turns: 12"],
+        extra=["thinking_effort: high"],
     )
     rc = agent_inspect.run_show(agents_dir, "scribe", as_json=True)
     assert rc == 0
@@ -186,7 +184,6 @@ def test_show_json_round_trips(tmp_path: Path, capsys) -> None:
     assert obj["model"] == "claude-sonnet-4-5"
     assert obj["tools"] == ["read_file", "shell"]
     assert obj["thinking_effort"] == "high"
-    assert obj["history_turns"] == 12
     assert obj["memory"] is False
     # The full body is present (not a truncated preview).
     assert "You are scribe" in obj["system_prompt"]

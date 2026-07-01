@@ -15,7 +15,7 @@ Three design rules shape the loop:
   validates against current on-disk state, never a stale snapshot.
 
 * **A bad value must not crash the menu.** Every field edit is wrapped so a
-  validation/OS error (an out-of-range ``history_turns``, a read-only file)
+  validation/OS error (a bad ``thinking_effort`` choice, a read-only file)
   prints one ``error:`` line and *continues* the loop. The writes go through the
   validate-before-write seams (:func:`calfcord.cli._fields.write_simple_field`,
   :func:`calfcord.agents.md_writer`), so a rejected value leaves the on-disk file
@@ -327,12 +327,12 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
             ):
                 changed = True
         except (ValueError, OSError) as e:
-            # A rejected value (an out-of-range history_turns, a bad
-            # thinking_effort choice, an unknown tool) or a filesystem error — the
-            # validated-write path left the file untouched, so just report and keep
-            # looping. (The memory→fs-tools requirement is NOT enforced here; it is
-            # a build-time check in AgentFactory, so enabling memory writes fine and
-            # surfaces at the next calfkit-agent boot.)
+            # A rejected value (a bad thinking_effort choice, an unknown tool) or
+            # a filesystem error — the validated-write path left the file
+            # untouched, so just report and keep looping. (The memory→fs-tools
+            # requirement is NOT enforced here; it is a build-time check in
+            # AgentFactory, so enabling memory writes fine and surfaces at the
+            # next calfkit-agent boot.)
             print(f"error: {e}")
 
     if changed:

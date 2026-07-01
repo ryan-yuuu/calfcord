@@ -1,6 +1,5 @@
 ---
 name: assistant
-display_name: Assistant
 description: General-purpose AI teammate — answers questions and helps with tasks.
 tools: []
 ---

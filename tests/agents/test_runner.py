@@ -26,7 +26,7 @@ from calfcord.agents.runner import (
 
 def _write_agent_md(dir_: Path, name: str) -> None:
     """Write a minimal valid agents/<name>.md fixture in ``dir_``."""
-    body = f"---\nname: {name}\ndisplay_name: {name.title()}\ndescription: Test agent {name}.\n---\n\nYou are {name}.\n"
+    body = f"---\nname: {name}\ndescription: Test agent {name}.\n---\n\nYou are {name}.\n"
     (dir_ / f"{name}.md").write_text(body)
 
 
@@ -177,7 +177,6 @@ class TestBuildNodeOrExit:
     def _definition() -> AgentDefinition:
         return AgentDefinition(
             agent_id="echo",
-            display_name="Echo",
             description="Test.",
             system_prompt="Test echo.",
         )
@@ -216,7 +215,6 @@ class TestPrewarmCodexIfNeeded:
     def _definition(provider: str | None) -> AgentDefinition:
         return AgentDefinition(
             agent_id="test-agent",
-            display_name="Test",
             description="Test agent.",
             provider=provider,  # type: ignore[arg-type]
             system_prompt="You are a test agent.",

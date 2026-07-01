@@ -1,6 +1,5 @@
 ---
 description: Demonstration agent backed by ChatGPT subscription (Codex models)
-display_name: Codex
 name: codex_demo
 provider: openai-codex
 thinking_effort: high

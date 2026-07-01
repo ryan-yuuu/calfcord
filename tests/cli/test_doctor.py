@@ -46,7 +46,7 @@ def test_parse_broker_invalid(url):
 def _seed_agent(agents_dir: Path, name: str, *, valid: bool = True) -> None:
     body = f"You are {name}." if valid else ""  # empty body -> parse fails
     (agents_dir / f"{name}.md").write_text(
-        f"---\nname: {name}\ndisplay_name: {name.title()}\ndescription: a test agent\n---\n{body}\n",
+        f"---\nname: {name}\ndescription: a test agent\n---\n{body}\n",
         encoding="utf-8",
     )
 
@@ -309,7 +309,6 @@ def _probe_err(exc: Exception):
 def _agent(agent_id: str) -> AgentDefinition:
     return AgentDefinition(
         name=agent_id,
-        display_name=agent_id.title(),
         description="a live agent",
         system_prompt=f"You are {agent_id}.",
     )

@@ -413,7 +413,7 @@ def _install_home(tmp_path: Path, agents: list[str]) -> Path:
     agents_dir.mkdir(parents=True)
     for name in agents:
         (agents_dir / f"{name}.md").write_text(
-            f"---\nname: {name}\ndisplay_name: {name.title()}\nprovider: anthropic\nmodel: claude-x\n---\nbody\n",
+            f"---\nname: {name}\nprovider: anthropic\nmodel: claude-x\n---\nbody\n",
             encoding="utf-8",
         )
     return home

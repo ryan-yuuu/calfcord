@@ -15,9 +15,8 @@ Two kinds of field live here:
   value written through the one validated-atomic seam,
   :func:`calfcord.agents.md_writer._update_fields`, via :func:`write_simple_field`.
   Validation is delegated to :class:`~calfcord.agents.definition.AgentDefinition`
-  (a bad ``thinking_effort`` or an out-of-range ``history_turns`` raises there),
-  so this module never re-encodes a constraint pydantic already owns — keeping
-  the two from drifting.
+  (e.g. a bad ``thinking_effort`` raises there), so this module never re-encodes
+  a constraint pydantic already owns — keeping the two from drifting.
 * **Compound** (``provider_model`` / ``tools`` / ``prompt``) — fields with
   dedicated editors (the provider+model pair shares the validated
   provider flow; ``tools`` reuses the checkbox editor; ``prompt`` rewrites the
@@ -120,10 +119,9 @@ class Field:
 # provider editor writes both together through the validated provider flow);
 # ``tools`` and ``system_prompt`` have dedicated editors. The ordering puts the
 # fields an operator most often tweaks (identity, then provider, then tools and
-# prompt) before the runtime-tuning knobs (effort, history, memory, avatar).
+# prompt) before the runtime-tuning knobs (effort, memory).
 FIELDS: list[Field] = [
     Field("description", "Description", "text", "--description"),
-    Field("display_name", "Display name", "text", "--display-name"),
     Field("provider_model", "Provider / model", "provider_model", "--model"),
     Field("tools", "Tools", "tools", "--tools"),
     Field("system_prompt", "System prompt", "prompt", "--system-prompt"),
@@ -134,9 +132,7 @@ FIELDS: list[Field] = [
         "--thinking-effort",
         choices=THINKING_EFFORTS,
     ),
-    Field("history_turns", "History turns", "int", "--history-turns", int_min=0, int_max=100),
     Field("memory", "Memory", "bool", "--memory"),
-    Field("avatar_url", "Avatar URL", "text", "--avatar-url"),
 ]
 
 # Fast lookup by key for the ``set`` command (resolve a ``--flag`` to its field)
@@ -172,9 +168,8 @@ def render_value(defn: AgentDefinition, field: Field) -> str:
         return "on" if value else "off"
 
     if value is None or value == "":
-        # ``thinking_effort`` unset means the provider default applies; an unset
-        # avatar_url means the webhook default. Both read better as "(default)"
-        # than an empty cell.
+        # ``thinking_effort`` unset means the provider default applies; it reads
+        # better as "(default)" than an empty cell.
         return "(default)"
 
     return str(value)
@@ -225,11 +220,11 @@ def write_simple_field(md_path: Path, field: Field, raw: str) -> AgentDefinition
     fields, so the coercion and the validate-before-write path are defined once.
     The value is coerced to the frontmatter type the field expects and handed to
     :func:`calfcord.agents.md_writer._update_fields`, which builds and validates a
-    synthetic :class:`AgentDefinition` before any disk write — so an out-of-range
-    ``history_turns`` or a bad ``thinking_effort`` raises there, with the on-disk
-    file untouched. Coercion is intentionally thin: only the int parse lives here
-    (pydantic can't turn ``"abc"`` into the ``ValueError`` the caller wants);
-    every domain constraint (range, allowed choices) stays owned by
+    synthetic :class:`AgentDefinition` before any disk write — so a bad
+    ``thinking_effort`` (or any other rejected value) raises there, with the
+    on-disk file untouched. Coercion is intentionally thin: only the int parse
+    lives here (pydantic can't turn ``"abc"`` into the ``ValueError`` the caller
+    wants); every domain constraint (range, allowed choices) stays owned by
     :class:`AgentDefinition` so this helper can't drift from it.
 
     Compound fields (``provider_model`` / ``tools`` / ``prompt``) have dedicated

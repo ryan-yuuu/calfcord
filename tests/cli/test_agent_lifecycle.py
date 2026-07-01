@@ -4,8 +4,8 @@ These commands mutate an agent's two on-disk artifacts — its ``agents/<name>.m
 and its per-agent ``state/agents/<name>.json`` — so the tests seed real files and
 re-parse / re-stat to assert the on-disk effect. The contracts that matter:
 
-* ``set`` writes through the validated paths, so a bad value (out-of-range
-  ``history_turns``) fails with the file untouched.
+* ``set`` writes through the validated paths, so a bad value (a rejected
+  ``thinking_effort``) fails with the file untouched.
 * ``rename`` moves BOTH artifacts and never loses the agent: the ``.md`` lands
   under the new name, the old ``.md`` is gone, and the state JSON follows so the
   agent keeps its channel subscriptions. Renaming onto an existing agent is a
@@ -65,7 +65,6 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_
     lines = [
         "---",
         f"name: {name}",
-        f"display_name: {name.capitalize()}",
         f"description: Test {name}.",
         "provider: anthropic",
     ]
@@ -178,15 +177,15 @@ def test_set_system_prompt_rewrites_body(tmp_path: Path) -> None:
     assert parse_agent_md(md_path).system_prompt == "Brand new prompt body."
 
 
-def test_set_out_of_range_int_errors_and_leaves_file(tmp_path: Path, capsys) -> None:
+def test_set_invalid_value_errors_and_leaves_file(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe")
     original = md_path.read_text(encoding="utf-8")
 
-    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"history_turns": "999"})
+    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"thinking_effort": "ludicrous"})
     assert rc == 1
     out = capsys.readouterr().out
-    assert "error:" in out and "history_turns" in out
+    assert "error:" in out and "thinking_effort" in out
     # Validate-before-write: the on-disk file is untouched and no tmp leaked.
     assert md_path.read_text(encoding="utf-8") == original
     assert list(agents_dir.glob(".*.tmp")) == []
@@ -248,24 +247,24 @@ def test_set_reports_partial_apply_before_mid_loop_failure(tmp_path: Path, capsy
     operator is told which fields already landed before the offending one."""
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe")
-    # Seed an in-range history_turns so the later (out-of-range) write is the only
+    # Seed a valid thinking_effort so the later (invalid) write is the only
     # failure and the field's prior on-disk value is checkable.
-    agent_lifecycle.run_set(agents_dir, "scribe", {"history_turns": "5"})
-    assert parse_agent_md(md_path).history_turns == 5
+    agent_lifecycle.run_set(agents_dir, "scribe", {"thinking_effort": "high"})
+    assert parse_agent_md(md_path).thinking_effort == "high"
 
-    # Dict order matters: description (applies), then the out-of-range int (fails).
+    # Dict order matters: description (applies), then the invalid effort (fails).
     rc = agent_lifecycle.run_set(
-        agents_dir, "scribe", {"description": "New desc", "history_turns": "999"}
+        agents_dir, "scribe", {"description": "New desc", "thinking_effort": "ludicrous"}
     )
     assert rc == 1
     out = capsys.readouterr().out
     assert "note: already applied description before this error." in out
-    assert "error: history_turns:" in out
+    assert "error: thinking_effort:" in out
 
     # The earlier field's write stuck; the failing field's value is untouched.
     reparsed = parse_agent_md(md_path)
     assert reparsed.description == "New desc"
-    assert reparsed.history_turns == 5
+    assert reparsed.thinking_effort == "high"
 
 
 # --- rename -----------------------------------------------------------------

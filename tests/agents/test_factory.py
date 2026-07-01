@@ -41,7 +41,6 @@ def _definition(
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
-        display_name=f"Test ({agent_id})",
         description=description,
         provider=provider,
         model=model,
@@ -61,7 +60,6 @@ def _memory_definition(
     """A ``memory: true`` definition (built against the real TOOL_REGISTRY)."""
     return AgentDefinition(
         agent_id=agent_id,
-        display_name=f"Test ({agent_id})",
         description="A test agent.",
         tools=tools,
         memory=True,
@@ -470,64 +468,33 @@ class TestToolsWiring:
         assert resolved[0].name == tool_name
 
 
-class TestRouterDefinitionValidation:
-    """Schema-level invariants on the (still-present) ``role`` field validator.
+class TestPublishTopicValidation:
+    """The surviving model_validator forbids a ``publish_topic`` on any agent.
 
-    These exercise :class:`AgentDefinition` validation directly — no factory
-    build, no name-addressing — so they are unaffected by the 0.12 migration.
-    The model_validator catches:
-        - role=router + tools=... (forbidden)
-        - role=router + publish_topic=None (required)
+    This exercises :class:`AgentDefinition` validation directly — no factory
+    build, no name-addressing. ``publish_topic`` was reserved for the built-in
+    router (removed in the 0.12 migration); with no router, every agent emits its
+    reply to the inbound frame's ``callback_topic``, so a ``publish_topic`` would
+    be a silent no-op and is rejected.
     """
 
-    def test_router_with_tools_raises(self) -> None:
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError, match="must declare no tools"):
-            AgentDefinition(
-                agent_id="_router",
-                display_name="Router",
-                description="x",
-                role="router",
-                publish_topic="routing.decisions",
-                tools=("calendar",),
-                system_prompt="x",
-            )
-
-    def test_router_without_publish_topic_raises(self) -> None:
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError, match="must declare a publish_topic"):
-            AgentDefinition(
-                agent_id="_router",
-                display_name="Router",
-                description="x",
-                role="router",
-                publish_topic=None,
-                system_prompt="x",
-            )
-
-    def test_assistant_role_has_no_router_constraints(self) -> None:
-        """Default role='assistant' allows tools and no publish_topic."""
+    def test_default_no_publish_topic_builds(self) -> None:
+        """A normal agent (no ``publish_topic``) validates and may carry tools."""
         AgentDefinition(
             agent_id="scribe",
-            display_name="Scribe",
             description="x",
             tools=("calendar",),
             system_prompt="x",
         )
 
-    def test_assistant_with_publish_topic_raises(self) -> None:
-        """Assistants emit ReturnCall to the inbound frame's
-        callback_topic; setting ``publish_topic`` on them would be a
-        silent no-op. Reject at validation so the misconfiguration is
-        visible."""
+    def test_publish_topic_raises(self) -> None:
+        """Setting ``publish_topic`` would be a silent no-op; reject at validation
+        so the misconfiguration is visible."""
         from pydantic import ValidationError
 
-        with pytest.raises(ValidationError, match="publish_topic is reserved for routers"):
+        with pytest.raises(ValidationError, match="publish_topic"):
             AgentDefinition(
                 agent_id="scribe",
-                display_name="Scribe",
                 description="x",
                 publish_topic="some.topic",
                 system_prompt="x",

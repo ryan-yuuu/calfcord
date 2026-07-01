@@ -8,7 +8,6 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
 
     ---
     name: scheduler
-    display_name: "Aksel (Scheduler)"
     description: "Calendar mechanics; book and prep meetings"
     provider: anthropic
     model: claude-sonnet-4-5
@@ -17,11 +16,6 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
     ---
 
     You are Aksel, the Scheduler. ...
-
-When ``avatar_url`` is omitted, :func:`parse_agent_md` fills it with a
-DiceBear "glass" URL seeded by the agent's name so every assistant gets
-a stable, recognizable persona avatar without operators having to host
-images. Set ``avatar_url`` explicitly in the frontmatter to override.
 
 The YAML key is ``name`` (Claude Code parity). Internally the field is
 ``agent_id`` via a Pydantic alias so existing ``spec.agent_id`` access
@@ -46,7 +40,6 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
-from calfcord.discord.avatar import dicebear_avatar_url
 from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
@@ -71,18 +64,6 @@ non-zero step (a hair above ``none``); ``xhigh`` is a calfkit-specific
 step between ``high`` and ``max``.
 """
 
-AgentRole = Literal["assistant", "router"]
-"""Agent role — distinguishes ordinary assistant agents from the built-in
-routing agent.
-
-``"assistant"`` (default) is what every user-defined ``agents/*.md`` file
-produces. ``"router"`` is reserved for the singleton built-in router
-agent constructed by :func:`calfcord.router.definition.build_router_definition`;
-the factory wires routers differently (single-topic subscription, no
-standard gates, ``ToolOutput`` final-output type, explicit
-``publish_topic``).
-"""
-
 
 class AgentDefinition(BaseModel):
     """One agent's declarative definition: identity, runtime hints, and system prompt.
@@ -102,14 +83,7 @@ class AgentDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, populate_by_name=True, extra="forbid")
 
     agent_id: str = Field(..., alias="name")
-    display_name: str
     description: str
-    avatar_url: str | None = None
-    """Webhook persona avatar URL. ``None`` here means "use the Discord
-    webhook's default avatar"; for .md-loaded agents,
-    :func:`parse_agent_md` substitutes the per-agent DiceBear default
-    when the frontmatter omits or nulls the field, so live assistant
-    definitions read from disk always carry a concrete URL."""
     provider: Provider | None = None
     model: str | None = None
     tools: tuple[str, ...] | None = None
@@ -130,52 +104,15 @@ class AgentDefinition(BaseModel):
     the ``calfkit-tools`` container unless the operator narrows the list
     explicitly. If you need a restricted-tools agent, add the
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
-    model.
-
-    Router agents must omit ``tools:`` entirely (or set ``tools: []``);
-    the validator rejects routers that declare non-empty tools."""
+    model."""
     thinking_effort: ThinkingEffort | None = None
-    role: AgentRole = "assistant"
-    """Agent role. Defaults to ``"assistant"`` — ordinary user-defined
-    agent. ``"router"`` is reserved for the singleton built-in routing
-    agent; the factory uses a different wiring path for routers (no
-    standard gates, single-topic subscription, ``ToolOutput`` final
-    output type). User-authored ``agents/*.md`` should not set this
-    field; the validator does not forbid it but operators wiring a
-    second router will hit a registry boot error in :class:`AgentRegistry`."""
     publish_topic: str | None = Field(default=None, min_length=1)
-    """Optional explicit Kafka publish topic for the agent's
-    ``ReturnCall``. Used by routers to declare their structured-output
-    destination (where the fan-out consumer subscribes). ``None`` for
-    assistant agents — they emit ``ReturnCall`` to the inbound frame's
-    ``callback_topic`` (i.e., the bridge's ``discord.outbox``), which
-    is the standard calfkit dispatch pattern."""
-    history_turns: int = Field(default=30, ge=0, le=100)
-    """Number of recent channel messages the bridge fetches and projects
-    into ``message_history`` on every invocation of this agent.
-
-    - ``0`` disables history fetching for this agent entirely (no
-      Discord REST call; agent runs with the system prompt + user
-      prompt only).
-    - The upper bound (100) is Discord's per-call REST cap for
-      ``channel.history(limit=...)``; raising it would force
-      pagination, which is out of scope for v1.
-    - The default (30) is a reasonable balance between context quality
-      and token cost: ~30 messages of ~100 tokens average is ~3K
-      input tokens per invocation, which is trivial on small models
-      and acceptable on larger ones.
-
-    Set in ``.md`` frontmatter::
-
-        ---
-        name: scribe
-        ...
-        history_turns: 30
-        ---
-
-    The router's analogous knob is ``history_turns`` in the bundled
-    ``router.md`` front matter (see
-    :mod:`calfcord.router.prompt`)."""
+    """Reserved and unused: it must be left ``None``. Every agent emits its
+    ``ReturnCall`` to the inbound frame's ``callback_topic`` (the caller's reply
+    topic, e.g. the bridge's ``discord.outbox``) -- the standard calfkit dispatch
+    pattern -- so there is no fixed published-output topic. A non-``None`` value
+    is rejected by :meth:`_forbid_publish_topic` so a stale setting fails loudly
+    rather than silently doing nothing."""
     memory: bool = False
     """Opt in to a persistent per-agent notepad. When ``True``, the factory
     registers a runtime instructions hook
@@ -225,15 +162,6 @@ class AgentDefinition(BaseModel):
     def _validate_agent_id(cls, v: str) -> str:
         if not AGENT_ID_PATTERN.fullmatch(v):
             raise ValueError(f"name must match [a-z0-9_-]{{1,32}}, got {v!r}")
-        return v
-
-    @field_validator("display_name")
-    @classmethod
-    def _validate_display_name(cls, v: str) -> str:
-        if not (1 <= len(v) <= 80):
-            raise ValueError(f"display_name must be 1-80 chars, got {len(v)}")
-        if v.lower() == "clyde":
-            raise ValueError("display_name 'Clyde' is rejected by Discord webhooks")
         return v
 
     @field_validator("description")
@@ -289,47 +217,23 @@ class AgentDefinition(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_router_constraints(self) -> AgentDefinition:
-        """Enforce role-specific invariants on ``tools`` and ``publish_topic``.
+    def _forbid_publish_topic(self) -> AgentDefinition:
+        """Reject a non-``None`` ``publish_topic`` -- it must be left unset.
 
-        Routers:
-            - must declare no ``tools`` (the router uses pydantic-ai's
-              ``ToolOutput`` pattern, where the "tool" is a
-              schema-providing pseudo-tool whose args ARE the output —
-              the body never runs; declaring real function tools
-              alongside would muddy the LLM's tool list and the
-              factory's wiring)
-            - must declare a ``publish_topic`` (the fan-out consumer
-              subscribes there; without it the router has no
-              downstream consumer pathway)
-
-        Assistants:
-            - must NOT declare a ``publish_topic`` (assistants emit
-              ``ReturnCall`` to the inbound frame's ``callback_topic``,
-              not to a fixed published topic; setting one would be a
-              silent no-op that an operator might mistake for working
-              custom-output wiring).
+        ``publish_topic`` was reserved for the built-in router, removed in the
+        0.12 migration. With no router, every agent emits its ``ReturnCall`` to
+        the inbound frame's ``callback_topic`` (the caller's reply topic), so a
+        ``publish_topic`` would be a silent no-op an operator might mistake for
+        working custom-output wiring. Reject it at validation so a stale setting
+        fails loudly rather than doing nothing.
         """
-        if self.role == "router":
-            if self.tools:
-                raise ValueError(
-                    f"router agent {self.agent_id!r} must declare no tools; "
-                    f"got tools={list(self.tools)!r}"
-                )
-            if not self.publish_topic:
-                raise ValueError(
-                    f"router agent {self.agent_id!r} must declare a "
-                    f"publish_topic; the fan-out consumer subscribes there"
-                )
-        else:  # role == "assistant"
-            if self.publish_topic is not None:
-                raise ValueError(
-                    f"agent {self.agent_id!r} has role='assistant' but "
-                    f"declares publish_topic={self.publish_topic!r}; "
-                    f"publish_topic is reserved for routers — "
-                    f"assistants emit ReturnCall to the inbound "
-                    f"frame's callback_topic (set by the caller)"
-                )
+        if self.publish_topic is not None:
+            raise ValueError(
+                f"agent {self.agent_id!r} declares publish_topic="
+                f"{self.publish_topic!r}, which is not supported; agents emit "
+                f"ReturnCall to the inbound frame's callback_topic (set by the "
+                f"caller). Remove the publish_topic field."
+            )
         return self
 
 
@@ -372,11 +276,4 @@ def parse_agent_md(path: Path) -> AgentDefinition:
     # ``os.chdir``s — the bridge daemon doesn't today, but a future
     # plugin or signal handler could.
     metadata["source_path"] = path.resolve()
-    # Fill the per-agent DiceBear default when the .md omits avatar_url
-    # (or sets it to ``null``). Done here at the load boundary rather
-    # than as an AgentDefinition validator so code-built definitions —
-    # the router, test fixtures, state-event projections — keep their
-    # explicit ``None`` semantics.
-    if metadata.get("avatar_url") is None:
-        metadata["avatar_url"] = dicebear_avatar_url(declared_name)
     return AgentDefinition(**metadata)

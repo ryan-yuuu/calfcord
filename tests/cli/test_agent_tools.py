@@ -79,7 +79,6 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None) -> Path:
     lines = [
         "---",
         f"name: {name}",
-        f"display_name: {name.capitalize()}",
         f"description: Test {name}.",
     ]
     if tools_line is not None:

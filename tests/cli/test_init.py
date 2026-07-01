@@ -155,7 +155,6 @@ def test_fresh_run_creates_agent_md_and_writes_default_provider(tmp_path: Path) 
     assert md.is_file()
     agent = parse_agent_md(md)
     assert agent.agent_id == "scribe"
-    assert agent.display_name == "Scribe"
     assert agent.description == "Takes notes"
     assert agent.provider == "anthropic"
     assert agent.model == "claude-haiku-4-5"
@@ -381,7 +380,6 @@ def test_write_agent_create_prunes_pristine_seed(tmp_path: Path) -> None:
     seed.write_text(
         "---\n"
         "name: assistant\n"
-        "display_name: Assistant\n"
         f"description: {_agents.DEFAULT_DESCRIPTION}\n"
         "tools: []\n"
         "---\n\n"
@@ -402,7 +400,6 @@ def test_write_agent_create_keeps_seed_without_prune_opt_in(tmp_path: Path) -> N
     seed.write_text(
         "---\n"
         "name: assistant\n"
-        "display_name: Assistant\n"
         f"description: {_agents.DEFAULT_DESCRIPTION}\n"
         "tools: []\n"
         "---\n\n"
@@ -423,7 +420,6 @@ def test_write_agent_create_keeps_customized_seed(tmp_path: Path) -> None:
     seed.write_text(
         "---\n"
         "name: assistant\n"
-        "display_name: Assistant\n"
         "description: My custom assistant for our team workflow.\n"
         "tools: []\n"
         "---\n\n"
@@ -450,8 +446,8 @@ def test_write_agent_create_keeps_malformed_seed(tmp_path: Path) -> None:
     assert seed.exists()  # malformed → never deleted on a guess
 
 
-def test_write_agent_update_in_place_preserves_body_and_display_name(tmp_path: Path) -> None:
-    """Updating an existing agent rewrites fields but preserves body + display_name."""
+def test_write_agent_update_in_place_preserves_body(tmp_path: Path) -> None:
+    """Updating an existing agent rewrites fields but preserves its body."""
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     target = agents_dir / "scribe.md"
@@ -459,7 +455,6 @@ def test_write_agent_update_in_place_preserves_body_and_display_name(tmp_path: P
     target.write_text(
         "---\n"
         "name: scribe\n"
-        "display_name: Aksel (Scribe)\n"
         "description: old description\n"
         "provider: openai\n"
         "model: gpt-5\n"
@@ -480,9 +475,8 @@ def test_write_agent_update_in_place_preserves_body_and_display_name(tmp_path: P
     assert agent.provider == "anthropic"
     assert agent.model == "claude-haiku-4-5"
     assert set(agent.tools) == {"read_file", "write_file"}
-    # Body and display_name are preserved across the in-place update.
+    # The body is preserved across the in-place update.
     assert body in agent.system_prompt
-    assert agent.display_name == "Aksel (Scribe)"
 
 
 def test_run_updates_existing_agent_in_place(tmp_path: Path) -> None:
@@ -494,7 +488,6 @@ def test_run_updates_existing_agent_in_place(tmp_path: Path) -> None:
     target.write_text(
         "---\n"
         "name: scribe\n"
-        "display_name: Scribe\n"
         "description: old\n"
         "provider: openai\n"
         "model: gpt-5\n"
@@ -527,7 +520,6 @@ def test_blank_name_with_one_non_assistant_agent_edits_it_in_place(tmp_path: Pat
     target.write_text(
         "---\n"
         "name: scribe\n"
-        "display_name: Scribe\n"
         "description: old\n"
         "provider: openai\n"
         "model: gpt-5\n"

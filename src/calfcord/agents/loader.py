@@ -13,9 +13,8 @@ time so downstream consumers (the agent factory) see a concrete tuple of
 tool names rather than the ``None`` sentinel. See
 :attr:`AgentDefinition.tools` for the explicit / implicit semantics.
 
-Cross-agent uniqueness of ``display_name`` is a bridge-side concern, not the
-loader's. The filesystem itself prevents duplicate ``agent_id`` (one ``.md``
-file per name); the slash command is always ``/<agent_id>``.
+The filesystem itself prevents duplicate ``agent_id`` (one ``.md`` file per
+name); the slash command is always ``/<agent_id>``.
 """
 
 from __future__ import annotations
@@ -31,16 +30,10 @@ logger = logging.getLogger(__name__)
 def _resolve_default_tools(definition: AgentDefinition) -> AgentDefinition:
     """Expand ``tools=None`` (frontmatter omitted) to every registered tool.
 
-    Only applies to assistant agents. Routers keep ``tools=None``; their
-    validator forbids declaring tools at all and the router-build path
-    in :class:`AgentFactory` skips tool resolution.
-
     The TOOL_REGISTRY import is lazy so this module stays importable
     without dragging in the tools subpackage at agent-definition parse
     time (which loader.py used to be free of).
     """
-    if definition.role == "router":
-        return definition
     if definition.tools is not None:
         return definition  # explicit list (including explicit empty)
     from calfcord.tools import TOOL_REGISTRY

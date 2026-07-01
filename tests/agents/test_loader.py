@@ -12,7 +12,6 @@ from calfcord.agents.loader import _load_one, load_agent_targets, load_agents_di
 def _write_agent(dir_: Path, name: str, **frontmatter_extra) -> None:
     fields = {
         "name": name,
-        "display_name": name.title(),
         "description": f"Test agent {name}.",
     }
     fields.update(frontmatter_extra)
@@ -50,7 +49,7 @@ class TestLoadAgentsDir:
         _write_agent(tmp_path, "scheduler")
         # A draft file starting with a dot should be ignored.
         (tmp_path / ".draft.md").write_text(
-            "---\nname: draft\ndisplay_name: Draft\ndescription: Draft.\n---\nBody.\n"
+            "---\nname: draft\ndescription: Draft.\n---\nBody.\n"
         )
         defs = load_agents_dir(tmp_path)
         assert [d.agent_id for d in defs] == ["scheduler"]
@@ -62,7 +61,7 @@ class TestLoadAgentsDir:
         # the filename stem, so the loader must skip them *before* parsing —
         # otherwise the stem/name mismatch would abort the whole load.
         (tmp_path / "agent.template.md").write_text(
-            "---\nname: example\ndisplay_name: Example\ndescription: Template.\n---\nBody.\n"
+            "---\nname: example\ndescription: Template.\n---\nBody.\n"
         )
         defs = load_agents_dir(tmp_path)
         assert [d.agent_id for d in defs] == ["scheduler"]
@@ -146,8 +145,7 @@ def _write_template_named_agent(dir_: Path, stem: str) -> Path:
     path = dir_ / f"{stem}.template.md"
     expected = f"{stem}.template"  # Path(...).stem of a *.template.md file
     path.write_text(
-        f"---\nname: {expected}\ndisplay_name: Template\n"
-        f"description: Template agent.\n---\n\nYou are a template.\n"
+        f"---\nname: {expected}\ndescription: Template agent.\n---\n\nYou are a template.\n"
     )
     return path
 
@@ -184,8 +182,7 @@ class TestLoadAgentTargets:
         named explicitly — confirming explicit files are loaded literally."""
         path = tmp_path / "template.md"
         path.write_text(
-            "---\nname: template\ndisplay_name: Template\n"
-            "description: A valid template-named agent.\n---\n\nYou are template.\n"
+            "---\nname: template\ndescription: A valid template-named agent.\n---\n\nYou are template.\n"
         )
         defs = load_agent_targets([path])
         assert [d.agent_id for d in defs] == ["template"]
