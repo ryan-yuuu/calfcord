@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # ``Field(...)`` literal — e.g. ``"boool"`` — is a type error a checker can flag,
 # rather than a field with no matching dispatch branch that fails only when an
 # operator happens to select it.
-FieldKind = Literal["text", "select", "int", "bool", "provider_model", "tools", "prompt"]
+FieldKind = Literal["text", "select", "bool", "provider_model", "tools", "prompt"]
 
 THINKING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 """The :data:`~calfcord.agents.definition.ThinkingEffort` tiers, as a tuple for
@@ -80,9 +80,7 @@ class Field:
     ``kind`` drives both how the value is edited and how :func:`render_value`
     formats it. ``flag`` is the ``agent set`` long option that writes this field
     non-interactively. ``choices`` enumerates the allowed values for a
-    ``select`` field; ``int_min`` / ``int_max`` bound an ``int`` field (mirroring
-    the pydantic constraint so the menu can show the range without importing the
-    model's internals).
+    ``select`` field.
     """
 
     key: str
@@ -90,29 +88,18 @@ class Field:
     kind: FieldKind
     flag: str
     choices: tuple[str, ...] | None = None
-    int_min: int | None = None
-    int_max: int | None = None
 
     def __post_init__(self) -> None:
         """Assert the per-kind shape so a malformed registry fails loudly at import.
 
         ``FIELDS`` is hand-authored; a ``select`` row with no ``choices`` would
         otherwise degrade to a silently empty menu (``field.choices or ()`` in the
-        editor), and stray ``int_min``/``int_max`` on a non-``int`` field would be
-        dead state. Catch both here — at module import — rather than at edit time.
+        editor). Catch that here — at module import — rather than at edit time.
         """
         if self.kind == "select":
             assert self.choices, f"{self.key!r}: a select field needs choices"
         else:
             assert self.choices is None, f"{self.key!r}: only a select field takes choices"
-        if self.kind == "int":
-            assert self.int_min is not None and self.int_max is not None, (
-                f"{self.key!r}: an int field needs int_min and int_max"
-            )
-        else:
-            assert self.int_min is None and self.int_max is None, (
-                f"{self.key!r}: only an int field takes int_min/int_max"
-            )
 
 
 # Menu order. ``provider_model`` is ONE row spanning provider+model (the
@@ -216,25 +203,23 @@ def write_simple_field(md_path: Path, field: Field, raw: str) -> AgentDefinition
     """Validate and write a SIMPLE field's new value through the one shared seam.
 
     Both the ``edit`` menu (after prompting) and the ``set`` command (from a
-    ``--flag`` argument) call this for ``text`` / ``select`` / ``int`` / ``bool``
-    fields, so the coercion and the validate-before-write path are defined once.
+    ``--flag`` argument) call this for ``text`` / ``select`` / ``bool`` fields,
+    so the coercion and the validate-before-write path are defined once.
     The value is coerced to the frontmatter type the field expects and handed to
     :func:`calfcord.agents.md_writer._update_fields`, which builds and validates a
     synthetic :class:`AgentDefinition` before any disk write — so a bad
     ``thinking_effort`` (or any other rejected value) raises there, with the
-    on-disk file untouched. Coercion is intentionally thin: only the int parse
-    lives here (pydantic can't turn ``"abc"`` into the ``ValueError`` the caller
-    wants); every domain constraint (range, allowed choices) stays owned by
+    on-disk file untouched. Coercion is intentionally thin: every domain
+    constraint (allowed choices, length) stays owned by
     :class:`AgentDefinition` so this helper can't drift from it.
 
     Compound fields (``provider_model`` / ``tools`` / ``prompt``) have dedicated
     editors and must NOT be routed here.
 
     Raises:
-        ValueError: ``field`` is not a simple field, an ``int`` value isn't
-            numeric, or :func:`~calfcord.agents.md_writer._update_fields` rejects
-            the coerced value (bad choice, out-of-range int, …). The on-disk file
-            is unchanged.
+        ValueError: ``field`` is not a simple field, or
+            :func:`~calfcord.agents.md_writer._update_fields` rejects the coerced
+            value (bad choice, over-length, …). The on-disk file is unchanged.
         OSError: a filesystem error during the atomic write. The on-disk file is
             unchanged.
     """
@@ -246,18 +231,12 @@ def _coerce_simple(field: Field, raw: str) -> object:
     """Coerce a ``set``-flag / prompt string to the field's frontmatter type.
 
     ``bool`` accepts the usual truthy/falsey spellings so ``--memory on`` and
-    ``--memory false`` both work; ``int`` parses to ``int`` (a non-numeric value
-    raises a precise :class:`ValueError` here rather than a confusing pydantic
-    one); ``text`` / ``select`` pass through as the raw string and let
-    :class:`~calfcord.agents.definition.AgentDefinition` enforce length / choice.
+    ``--memory false`` both work; ``text`` / ``select`` pass through as the raw
+    string and let :class:`~calfcord.agents.definition.AgentDefinition` enforce
+    length / choice.
     """
     if field.kind == "bool":
         return _coerce_bool(field, raw)
-    if field.kind == "int":
-        try:
-            return int(raw)
-        except ValueError as e:
-            raise ValueError(f"{field.flag} expects an integer, got {raw!r}") from e
     if field.kind in ("text", "select"):
         return raw
     raise ValueError(f"{field.key!r} (kind={field.kind!r}) is not a simple field; it has a dedicated editor")

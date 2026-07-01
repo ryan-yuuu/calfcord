@@ -318,8 +318,7 @@ def _add_set_flags(set_p: argparse.ArgumentParser) -> None:
     for field in FIELDS:
         if field.kind == "provider_model":
             continue
-        suffix = f" ({field.int_min}-{field.int_max})" if field.kind == "int" else ""
-        set_p.add_argument(field.flag, dest=field.key, default=None, help=field.label + suffix)
+        set_p.add_argument(field.flag, dest=field.key, default=None, help=field.label)
     set_p.add_argument("--provider", dest="provider", default=None, help="Model provider")
     set_p.add_argument("--model", dest="model", default=None, help="Model id")
 

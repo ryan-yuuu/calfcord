@@ -88,10 +88,6 @@ def test_simple_kinds_carry_no_dedicated_editor_marker() -> None:
         {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": None},
         # A non-select field must NOT carry choices.
         {"key": "k", "label": "L", "kind": "text", "flag": "--k", "choices": ("a",)},
-        # An int field MUST carry both bounds.
-        {"key": "k", "label": "L", "kind": "int", "flag": "--k"},
-        # A non-int field must NOT carry int bounds.
-        {"key": "k", "label": "L", "kind": "text", "flag": "--k", "int_min": 0},
     ],
 )
 def test_field_post_init_rejects_malformed_entry(kwargs: dict[str, object]) -> None:
@@ -103,13 +99,11 @@ def test_field_post_init_rejects_malformed_entry(kwargs: dict[str, object]) -> N
 @pytest.mark.parametrize(
     "kwargs",
     [
-        # Well-formed select (choices present, no int bounds).
+        # Well-formed select (choices present).
         {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": ("a", "b")},
-        # Well-formed int (both bounds, no choices).
-        {"key": "k", "label": "L", "kind": "int", "flag": "--k", "int_min": 0, "int_max": 10},
-        # Well-formed simple text (neither choices nor bounds).
+        # Well-formed simple text (no choices).
         {"key": "k", "label": "L", "kind": "text", "flag": "--k"},
-        # Well-formed compound kind (neither choices nor bounds).
+        # Well-formed compound kind (no choices).
         {"key": "k", "label": "L", "kind": "bool", "flag": "--k"},
     ],
 )

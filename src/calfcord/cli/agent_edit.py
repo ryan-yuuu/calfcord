@@ -230,17 +230,6 @@ def _edit_field(
             return True
         return False
 
-    if field.kind == "int":
-        current = getattr(defn, field.key)
-        new = prompter.text(
-            f"{field.label} ({field.int_min}-{field.int_max}):",
-            default=str(current),
-        )
-        if new != str(current):
-            write_simple_field(md_path, field, new)
-            return True
-        return False
-
     if field.kind == "bool":
         current = bool(getattr(defn, field.key))
         new = prompter.confirm(f"{field.label}?", default=current)
