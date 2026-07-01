@@ -48,7 +48,7 @@
 | src/calfcord/cli/discord\_discovery.py        |      187 |       17 |       48 |        8 |     89% |204-205, 229-231, 250, 352, 356, 463-\>461, 488-489, 508, 515, 523-524, 532-534 |
 | src/calfcord/cli/doctor.py                    |      162 |        5 |       64 |        0 |     98% |    99-103 |
 | src/calfcord/cli/explain.py                   |       17 |        0 |        2 |        0 |    100% |           |
-| src/calfcord/cli/init.py                      |      265 |        0 |       56 |        2 |     99% |466-\>468, 578-\>exit |
+| src/calfcord/cli/init.py                      |      267 |        0 |       58 |        2 |     99% |469-\>471, 581-\>exit |
 | src/calfcord/cli/logs.py                      |       66 |        0 |       24 |        0 |    100% |           |
 | src/calfcord/cli/main.py                      |      335 |       12 |      138 |        6 |     96% |435, 455, 481, 596, 774-776, 818-819, 836-837, 850 |
 | src/calfcord/cli/mcp\_admin.py                |      182 |       16 |       74 |        4 |     91% |92, 98-\>100, 199, 277-279, 304-318 |
@@ -88,7 +88,7 @@
 | src/calfcord/supervisor/roster.py             |      195 |        0 |       56 |        0 |    100% |           |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **6786** |  **491** | **1788** |   **92** | **92%** |           |
+| **TOTAL**                                     | **6788** |  **491** | **1790** |   **92** | **92%** |           |
 
 
 ## Setup coverage badge
