@@ -1104,30 +1104,19 @@ def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, ca
 
 class _WaitFakeClient:
     """Scriptable Client for ``_wait_for_agent_online``: a sequence of get_agents()
-    results (each a dict to return or an Exception to raise), a controllable
-    events() start, and aclose() tracking so cleanup is asserted on every path."""
+    results (each a dict to return or an Exception to raise), or a fixed
+    ``get_agents_error`` that always raises, plus aclose() tracking so cleanup is
+    asserted on every path."""
 
-    def __init__(self, *, get_agents_seq=None, events_error=None) -> None:
+    def __init__(self, *, get_agents_seq=None, get_agents_error=None) -> None:
         self._seq = list(get_agents_seq or [])
-        self._events_error = events_error
+        self._get_agents_error = get_agents_error
         self.mesh = self  # client.mesh.get_agents() resolves back here
         self.aclosed = False
 
-    def events(self, *, terminal_only: bool = False):
-        outer = self
-
-        class _CM:
-            async def __aenter__(self):
-                if outer._events_error is not None:
-                    raise outer._events_error
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _CM()
-
     async def get_agents(self):
+        if self._get_agents_error is not None:
+            raise self._get_agents_error
         item = self._seq.pop(0) if self._seq else {}
         if isinstance(item, Exception):
             raise item
@@ -1180,11 +1169,12 @@ async def test_wait_times_out_returns_false(monkeypatch):
     assert fake.aclosed is True
 
 
-async def test_wait_closes_client_when_broker_down(monkeypatch):
-    # A down broker raises out of the events() start; it propagates, but the client
-    # is still closed (the finally).
-    fake = _WaitFakeClient(events_error=ConnectionError("broker down"))
+async def test_wait_broker_down_times_out_to_false(monkeypatch):
+    # No broker pre-flight: a down broker surfaces as get_agents() raising
+    # MeshUnavailableError, which the poll loop swallows and retries until the window
+    # elapses -> False. The client is still closed (the finally).
+    fake = _WaitFakeClient(get_agents_error=MeshUnavailableError("broker down", reason="open_failed"))
     _patch_wait_client(monkeypatch, fake)
-    with pytest.raises(ConnectionError):
-        await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=1.0)
+    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=0.0)
+    assert ok is False
     assert fake.aclosed is True

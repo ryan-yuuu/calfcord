@@ -43,12 +43,10 @@ CLI entry point.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from collections.abc import Awaitable, Callable
 
 from calfkit.client import Client
-from calfkit.exceptions import MeshUnavailableError
 
 from calfcord.supervisor._workspace import (
     WORKSPACE_NOT_RUNNING_HINT,
@@ -58,8 +56,6 @@ from calfcord.supervisor._workspace import (
 )
 from calfcord.supervisor.client import ProcessComposeClient, ProcessComposeError
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
-
-logger = logging.getLogger(__name__)
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
 # NAMES of every agent currently online across the org. Injected so tests script
@@ -100,33 +96,20 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
     """Read the online agent names from calfkit's native mesh (``calf.agents``).
 
     Replaces the deleted control-plane discovery probe. Opens a short-lived
-    observer :class:`~calfkit.client.Client`, forces the broker up — opening (and
-    immediately closing) an ``events()`` stream starts the broker and its
-    ``__aexit__`` leaves it running — then reads ``client.mesh.get_agents()``, the
-    same online-only, heartbeat-staleness-filtered view the bridge roster reads,
-    and returns the online agent names sorted.
+    observer :class:`~calfkit.client.Client` and reads ``client.mesh.get_agents()``
+    — the same online-only, heartbeat-staleness-filtered view the bridge roster
+    reads — returning the online agent names sorted. The mesh carries presence, not
+    full definitions, so this returns NAMES only. ``timeout_s`` bounds the read.
 
-    The mesh carries presence, not full definitions, so this returns NAMES only —
-    all the duplicate guard and the ps board consume. ``timeout_s`` bounds the
-    whole probe (connect + broker start + view catch-up + read).
-
-    A :class:`~calfkit.exceptions.MeshUnavailableError` is branched on ``reason``
-    (never silently swallowed — that masked ``reader_dead`` and made a dead reader
-    read as a confident "nobody online"). Because the ``events()`` start above
-    already confirmed the broker is up, the reasons split cleanly:
-
-    * ``establishing`` (view still catching up) / ``open_failed`` (the
-      ``calf.agents`` directory topic doesn't exist until the first agent ever
-      registers) — both mean "no online agents to report" here, not a fault, so
-      they map to an empty roster.
-    * ``reader_dead`` (the reader died on a non-retriable error) — we genuinely
-      cannot read the roster, so log at ERROR and PROPAGATE. The callers'
-      ``except Exception`` degradation then fires ("broker unreachable; local
-      agents only") and the duplicate guard stays conservative rather than
-      failing open on a confident-but-wrong empty roster.
-
-    A broker that is actually down raises out of the ``events()`` start (or trips
-    ``timeout_s``) and PROPAGATES too, so the callers' degradation stays accurate.
+    No broker pre-flight: the mesh read raises at call time if it can't reach the
+    broker, so there is nothing to check up front. A
+    :class:`~calfkit.exceptions.MeshUnavailableError` (broker down, the
+    ``calf.agents`` topic not yet created, the view still establishing, or a dead
+    reader) or a timeout PROPAGATES to the caller, whose ``except Exception``
+    degrades ("broker unreachable; …"). A successful read of an empty roster
+    returns ``[]`` ("nobody online") — distinct from the raise ("couldn't read
+    it"), so the duplicate guard never treats an unreadable roster as a confident
+    "nobody online".
 
     NOTE the behavior change from the deleted probe: liveness is now passive mesh
     heartbeat-staleness, not an active discovery ping/response round-trip.
@@ -134,20 +117,8 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
     client = Client.connect(server_urls)
     try:
         async with asyncio.timeout(timeout_s):
-            async with client.events(terminal_only=True):
-                pass
             agents = await client.mesh.get_agents()
             return sorted(info.name for info in agents.values())
-    except MeshUnavailableError as exc:
-        if exc.reason == "reader_dead":
-            logger.error(
-                "live-roster probe: mesh reader died (reason=%s); cannot read the online "
-                "roster — treating the mesh as unreachable so the duplicate guard stays safe",
-                exc.reason,
-            )
-            raise
-        logger.debug("live-roster probe: mesh unavailable (reason=%s); reporting no online agents", exc.reason)
-        return []
     finally:
         await client.aclose()
 

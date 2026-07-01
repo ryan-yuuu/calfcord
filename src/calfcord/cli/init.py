@@ -103,14 +103,17 @@ async def _wait_for_agent_online(
     mesh at startup — not an end-to-end message reply; the org is already live once
     the agent is online, so presence is the honest "it worked" signal.
 
-    Opens a short-lived observer :class:`~calfkit.client.Client`, forces the broker
-    up (the ``events()`` context leaves it running), signals ``ready`` once it is
-    watching, then reads ``client.mesh.get_agents()`` on a small interval until the
-    name appears (-> ``True``) or the window elapses (-> ``False``). A
-    :class:`~calfkit.exceptions.MeshUnavailableError` — most often the
-    ``calf.agents`` topic not existing until the first agent registers — is treated
-    as "not online yet" and retried, so this never raises for a transient mesh
-    state; the caller downgrades a ``False`` to the honest fallback.
+    Opens a short-lived observer :class:`~calfkit.client.Client`, signals ``ready``
+    once it is watching, then reads ``client.mesh.get_agents()`` on a small interval
+    until the name appears (-> ``True``) or the window elapses (-> ``False``). No
+    broker pre-flight — the read raises at call time if the mesh can't be reached; a
+    :class:`~calfkit.exceptions.MeshUnavailableError` (most often the ``calf.agents``
+    topic not existing until the first agent registers, or the broker being down) is
+    treated as "not online yet" and retried until ``timeout_s`` elapses, at which
+    point the caller downgrades a ``False`` to the honest fallback. The mesh view is
+    a compacted-topic (ktable) reader, so it catches up to the agent's registration
+    even if it opens slightly after the agent came online — ``ready`` can fire before
+    the first read without a lost-registration race.
     """
     from calfkit import MeshViewConfig
     from calfkit.client import Client
@@ -118,11 +121,6 @@ async def _wait_for_agent_online(
 
     client = Client.connect(server_urls, mesh_config=MeshViewConfig(catchup_timeout=_ONLINE_CATCHUP_TIMEOUT_S))
     try:
-        # Force the broker up so the mesh reader has a live connection; opening
-        # (and immediately closing) the events stream starts the broker and its
-        # __aexit__ leaves it running for the get_agents() reads below.
-        async with client.events(terminal_only=True):
-            pass
         if ready is not None:
             ready.set()
         loop = asyncio.get_running_loop()

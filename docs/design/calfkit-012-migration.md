@@ -760,3 +760,31 @@ gates, phonebook, peer_roster, routing), `tools/private_chat.py`, `router/`,
   liveness plus a pointer to `calfcord status`. A follow-up could rewire drift onto
   the native calfkit mesh view (`client.mesh.get_agents`) to compare the online mesh
   roster against the locally-running processes.
+
+- **D-11 revisited — bridge no longer pre-starts the broker.** D-11 added an eager
+  `async with client.events(terminal_only=True): pass` at bridge startup to force the
+  broker up (provisioning the durable inbox) before Discord traffic could trigger a
+  reply. On review this is redundant: calfkit's `AgentGateway.start()` awaits
+  `_ensure_started()` (→ `broker.start()`, which provisions the inbox and starts its
+  reply subscriber consuming under `provisioning=PROVISIONING`) **before**
+  `_publish_call`, so the first `client.agent(name).start(...)` self-provisions ahead
+  of the first request — a reply can't land on an unprovisioned/unconsumed inbox.
+  Nothing else publishes before the first mention, and the mesh roster read opens its
+  own independent reader. The bridge pre-start was removed.
+
+  The same reasoning retired the eager-start in the two CLI probes
+  (`_wait_for_agent_online`, `_probe_live_roster`). There is nothing to pre-flight: the
+  real operation — `client.mesh.get_agents()` — already **raises at call time** if the
+  broker/mesh can't be reached. So the probes just do the read and let it raise:
+  `_probe_live_roster` lets a `MeshUnavailableError` (or timeout) propagate to the
+  caller's `except Exception` degradation ("broker unreachable; …") — a *readable* but
+  empty roster still returns `[]`; `_wait_for_agent_online`'s poll loop swallows the
+  transient `MeshUnavailableError` and retries until the agent appears or the window
+  elapses. No pre-flight probe (neither the `events(terminal_only=True)` side-effect
+  trick nor a direct `broker.start()`) is used anywhere — all three eager-start hacks
+  are gone. Trade-off accepted: on a brand-new org the very first `agent start` / `ps`
+  (before any agent has created the `calf.agents` topic) degrades with "broker
+  unreachable" rather than showing an empty roster — a one-time cosmetic wart on a path
+  that proceeds correctly. Verified by source analysis against calfkit 0.12.3; a live
+  no-auto-create-broker (Tansu) cold-start smoke test is the recommended final
+  confirmation.

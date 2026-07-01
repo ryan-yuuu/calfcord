@@ -1089,31 +1089,15 @@ async def test_default_probe_delegates_to_probe_live_roster(monkeypatch):
 class _ProbeFakeClient:
     """Scriptable stand-in for the short-lived Client ``_probe_live_roster`` opens.
 
-    Controls the ``events()`` start (broker-up), ``mesh.get_agents()``, and records
-    ``aclose()`` so a test can assert the connection is always cleaned up — even on
-    the error paths.
+    Controls ``mesh.get_agents()`` (return a roster or raise) and records ``aclose()``
+    so a test can assert the connection is always cleaned up — even on the error paths.
     """
 
-    def __init__(self, *, agents=None, get_agents_error=None, events_error=None) -> None:
+    def __init__(self, *, agents=None, get_agents_error=None) -> None:
         self._agents = agents or {}
         self._get_agents_error = get_agents_error
-        self._events_error = events_error
         self.mesh = self  # client.mesh.get_agents() resolves back here
         self.aclosed = False
-
-    def events(self, *, terminal_only: bool = False):
-        outer = self
-
-        class _CM:
-            async def __aenter__(self):
-                if outer._events_error is not None:
-                    raise outer._events_error
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _CM()
 
     async def get_agents(self):
         if self._get_agents_error is not None:
@@ -1136,36 +1120,33 @@ async def test_probe_returns_sorted_online_names(monkeypatch):
     assert fake.aclosed is True
 
 
-@pytest.mark.parametrize("reason", ["establishing", "open_failed"])
-async def test_probe_benign_mesh_unavailable_returns_empty(monkeypatch, reason):
-    """`establishing` (view catching up) and `open_failed` (calf.agents topic not
-    created until the first agent registers — the fresh-install state) both mean
-    'no online agents to report' here, since events() already confirmed the broker
-    is up. Map to [] and still close the connection."""
-    fake = _ProbeFakeClient(get_agents_error=MeshUnavailableError("nope", reason=reason))
+async def test_probe_empty_readable_roster_returns_empty(monkeypatch):
+    """A *readable* roster with nobody online returns [] — distinct from an
+    unreadable roster (which raises). This is the only path that yields []."""
+    fake = _ProbeFakeClient(agents={})
     _patch_probe_client(monkeypatch, fake)
     assert await roster._probe_live_roster(_SERVERS) == []
     assert fake.aclosed is True
 
 
-async def test_probe_reader_dead_propagates(monkeypatch, caplog):
-    """`reader_dead` is terminal — we genuinely can't read the roster, so it must
-    PROPAGATE (not mask to []) so the caller degrades visibly and the duplicate
-    guard stays conservative. It is logged at ERROR, and the connection is still
-    closed."""
-    fake = _ProbeFakeClient(get_agents_error=MeshUnavailableError("dead", reason="reader_dead"))
+@pytest.mark.parametrize(
+    "error",
+    [
+        MeshUnavailableError("establishing", reason="establishing"),
+        MeshUnavailableError("no topic yet", reason="open_failed"),
+        MeshUnavailableError("reader died", reason="reader_dead"),
+        ConnectionError("broker down"),
+    ],
+    ids=["establishing", "open_failed", "reader_dead", "broker_down"],
+)
+async def test_probe_propagates_when_roster_unreadable(monkeypatch, error):
+    """No broker pre-flight: get_agents() raises at call time when the roster can't
+    be read — a down broker, a not-yet-created topic, a still-establishing view, or a
+    dead reader — and _probe_live_roster PROPAGATES it (never masks it as []) so the
+    caller's ``except Exception`` degrades ("broker unreachable"). The connection is
+    still closed on every raise."""
+    fake = _ProbeFakeClient(get_agents_error=error)
     _patch_probe_client(monkeypatch, fake)
-    with caplog.at_level("ERROR"), pytest.raises(MeshUnavailableError):
-        await roster._probe_live_roster(_SERVERS)
-    assert fake.aclosed is True
-    assert any("reader died" in r.message and r.levelname == "ERROR" for r in caplog.records)
-
-
-async def test_probe_broker_down_propagates(monkeypatch):
-    """A down broker raises out of the events() start (not a MeshUnavailableError),
-    so it propagates unmasked — and the connection is still closed."""
-    fake = _ProbeFakeClient(events_error=ConnectionError("broker down"))
-    _patch_probe_client(monkeypatch, fake)
-    with pytest.raises(ConnectionError):
+    with pytest.raises(type(error)):
         await roster._probe_live_roster(_SERVERS)
     assert fake.aclosed is True

@@ -428,15 +428,19 @@ def main() -> None:
                 provisioning=PROVISIONING,
                 mesh_config=MeshViewConfig(stale_after=_MESH_STALE_AFTER_SECONDS),
             ) as calfkit_client:
-                # D-11: force the lazy broker start now so the durable inbox is
-                # provisioned (and its consumer joined) BEFORE any Discord traffic
-                # can trigger an agent reply — on a no-auto-create broker a reply to
-                # an unprovisioned inbox would be lost. calfkit exposes no public
-                # eager-start; opening ``events()`` runs the broker-start hook, and
-                # its ``__aexit__`` leaves the broker running.
-                async with calfkit_client.events(terminal_only=True):
-                    pass
-
+                # No eager broker pre-start here (D-11 revisited): the first
+                # ``client.agent(name).start(...)`` self-ensures the broker BEFORE it
+                # publishes — calfkit's ``AgentGateway.start`` awaits
+                # ``_ensure_started`` (→ ``broker.start()``) ahead of ``_publish_call``,
+                # and with ``provisioning=PROVISIONING`` that provisions the durable
+                # inbox and starts its groupless reply subscriber consuming before the
+                # request is sent, so a reply can't land on an unprovisioned/unconsumed
+                # inbox (calfkit's ``_ensure_started`` docstring calls out exactly the
+                # provisioning-enabled case). Nothing between here and the first mention
+                # publishes to the broker, and the mesh roster read opens its own
+                # independent reader — so there is nothing left to pre-start. (The CLI
+                # probes DO keep an ``events()`` pre-start, but for a different reason:
+                # there it doubles as the broker-reachability check.)
                 async with _open_transcript_store(settings) as transcript_store:
                     await _prune_on_startup(transcript_store, settings)
 
