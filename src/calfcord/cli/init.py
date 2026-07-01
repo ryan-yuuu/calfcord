@@ -59,6 +59,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
+import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -211,6 +213,7 @@ def run(
     first_reply_fn: Callable[..., Awaitable[bool]] | None = None,
     pc_binary_fn: Callable[[], str] | None = None,
     now: Callable[[], datetime] | None = None,
+    open_url_fn: Callable[[str], None] | None = None,
 ) -> int:
     """Run the guided, resumable, ends-live setup flow and return an exit code.
 
@@ -293,6 +296,7 @@ def run(
         poll_joined_fn=poll_joined_fn,
         list_guilds_fn=list_guilds_fn,
         list_channels_fn=list_channels_fn,
+        open_url_fn=open_url_fn or _try_open_browser,
     )
     setup_state.save(checkpoint_file, checkpoint, now=now)
     print()
@@ -327,6 +331,24 @@ def run(
     )
 
 
+def _try_open_browser(url: str) -> None:
+    """Best-effort browser pop for the invite link; never raises.
+
+    The URL is ALWAYS printed before this runs, so a wrong guess in either
+    direction only costs the convenience, never the link (§12.6). Skipped over
+    SSH and on display-less Linux, where ``webbrowser`` may fall back to a
+    terminal browser and hijack the wizard mid-flow.
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return
+    if sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        return
+    with contextlib.suppress(Exception):
+        webbrowser.open(url)
+
+
 def _run_discord(
     prompter: Prompter,
     *,
@@ -336,6 +358,7 @@ def _run_discord(
     poll_joined_fn: Callable[..., list[Guild]],
     list_guilds_fn: Callable[..., list[Guild]],
     list_channels_fn: Callable[..., ChannelListing],
+    open_url_fn: Callable[[str], None] = _try_open_browser,
 ) -> setup_state.SetupCheckpoint:
     """The Discord sub-flow: validate-on-paste → invite → poll → pick (§4.5/§12.6).
 
@@ -364,11 +387,16 @@ def _run_discord(
     # Invite step: print the ready-made link + the privileged-intents reminder +
     # the resumability banner BEFORE the wait (§12.6 — Ctrl-C is safe here).
     app_id = _capture_app_id(prompter, env_path, current)
+    invite = discord_discovery.invite_url(app_id)
     print()
     print("Invite the bot to your server:")
-    print(f"    {discord_discovery.invite_url(app_id)}")
+    print(f"    {invite}")
     print(f"  {discord_discovery.INTENTS_REMINDER}")
     print("  (Ctrl-C is safe & resumable — re-run `disco init` to pick up where you left off.)")
+    # Pop the link in a browser AFTER printing it — best-effort only, and a
+    # broken opener must never derail the wizard.
+    with contextlib.suppress(Exception):
+        open_url_fn(invite)
     print()
     print("Waiting for the bot to join a server…")
 

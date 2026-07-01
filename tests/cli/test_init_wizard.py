@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -227,8 +228,12 @@ def _run(
     discord: _DiscordStub | None = None,
     finish: _FinishStub | None = None,
     server_urls: str = "localhost:9092",
+    open_url: Callable[[str], None] | None = None,
 ) -> int:
-    """Drive ``init.run`` with all world-touching seams stubbed."""
+    """Drive ``init.run`` with all world-touching seams stubbed.
+
+    ``open_url`` defaults to a no-op so no test ever pops a real browser.
+    """
     discord = discord or _DiscordStub()
     finish = finish or _FinishStub()
     return init.run(
@@ -238,6 +243,7 @@ def _run(
         home=home,
         server_urls=server_urls,
         now=_now,
+        open_url_fn=open_url or (lambda url: None),
         verify_identity_fn=discord.verify,
         poll_joined_fn=discord.poll,
         list_guilds_fn=discord.guilds,
@@ -365,6 +371,75 @@ def test_invite_url_and_intents_reminder_and_ctrlc_banner_printed_before_wait(
     idx_banner = out.index("Ctrl-C")
     idx_connected = out.index("Connected as")
     assert idx_connected < idx_banner  # token echoed before the wait banner
+
+
+def test_invite_step_opens_browser_and_still_prints_url(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The browser pop is a best-effort extra: the opener gets the exact invite
+    URL, and the URL is printed regardless so a wrong platform guess can never
+    hide the link."""
+    opened: list[str] = []
+    discord = _DiscordStub()
+    rc = _run(
+        _prompter(app_id="999"), tmp_path, home=tmp_path, discord=discord, open_url=opened.append
+    )
+    assert rc == 0
+    assert opened == [discord_discovery.invite_url("999")]
+    out = capsys.readouterr().out
+    assert discord_discovery.invite_url("999") in out  # printed even though it opened
+
+
+def test_invite_step_browser_open_failure_is_swallowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A broken opener (no browser, weird platform) must not derail the wizard."""
+
+    def boom(url: str) -> None:
+        raise RuntimeError("no browser here")
+
+    discord = _DiscordStub()
+    assert _run(_prompter(app_id="999"), tmp_path, home=tmp_path, discord=discord, open_url=boom) == 0
+    assert discord_discovery.invite_url("999") in capsys.readouterr().out
+
+
+def test_try_open_browser_skips_over_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22")
+    init._try_open_browser("https://example.test")
+    assert calls == []
+
+
+def test_try_open_browser_skips_headless_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    for var in ("SSH_CONNECTION", "SSH_TTY", "DISPLAY", "WAYLAND_DISPLAY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(init.sys, "platform", "linux")
+    init._try_open_browser("https://example.test")
+    assert calls == []
+
+
+def test_try_open_browser_opens_on_desktop(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    for var in ("SSH_CONNECTION", "SSH_TTY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(init.sys, "platform", "darwin")
+    init._try_open_browser("https://example.test")
+    assert calls == ["https://example.test"]
+
+
+def test_try_open_browser_swallows_webbrowser_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(url: str) -> bool:
+        raise RuntimeError("webbrowser exploded")
+
+    monkeypatch.setattr(init.webbrowser, "open", boom)
+    for var in ("SSH_CONNECTION", "SSH_TTY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(init.sys, "platform", "darwin")
+    init._try_open_browser("https://example.test")  # must not raise
 
 
 def test_guild_and_channel_persisted_from_pick_lists(tmp_path: Path) -> None:
