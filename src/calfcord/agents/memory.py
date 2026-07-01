@@ -29,12 +29,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 
 from calfkit._vendor.pydantic_ai import RunContext
-
-from calfcord.agents.definition import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -117,38 +115,11 @@ def memory_instructions(agent_id: str) -> Callable[[RunContext[dict]], str | Non
     return _hook
 
 
-def memory_prompt_deps_for_registry(specs: Iterable[AgentDefinition]) -> dict[str, str]:
-    """Build the ``deps`` entry that ships the memory-prompt template, or ``{}``.
-
-    The bridge is the single reader of the template (:func:`load_memory_prompt`).
-    It ships the raw (un-localized) text under :data:`MEMORY_PROMPT_DEPS_KEY` on
-    every agent invocation it originates **whenever the deployment has at least
-    one memory-enabled agent** — so the template reaches every agent and, because
-    ``private_chat`` forwards ``deps`` wholesale, propagates through A2A chains;
-    each memory-enabled agent's instructions hook then localizes it.
-
-    Returns ``{}`` when no agent in ``specs`` opted into memory (existing
-    deployments stay byte-identical — no template read, no wire cost). Raises
-    :class:`ValueError` (propagated from :func:`load_memory_prompt`) when a memory
-    agent exists but the template can't be loaded; the **caller** decides how to
-    log and degrade — the high-frequency bridge-ingress path dedups the error to a
-    single log, while rarer call sites (e.g. the outbox retry) log per occurrence.
-
-    Shared by every bridge path that originates an agent invocation
-    (:meth:`~calfcord.bridge.ingress.BridgeIngress._memory_prompt_deps`
-    and the outbox retry-with-feedback publish) so the "is memory enabled +
-    load the template" decision lives in exactly one place.
-    """
-    if not any(spec.memory for spec in specs):
-        return {}
-    return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
-
-
 class MemoryPromptDeps:
     """Always-ship memory-prompt ``deps`` provider for the pure-``Client`` bridge (R-A4).
 
     The bridge no longer holds a registry, so the old ``any(spec.memory)`` gate
-    (:func:`memory_prompt_deps_for_registry`) is gone: the template is shipped on
+    is gone: the template is shipped on
     **every** bridge-originated call. Non-memory agents ignore the key (their
     instructions hook returns ``None``), so the only cost is a small constant wire
     payload — and ``deps`` propagate to native ``message_agent`` peers and handoff

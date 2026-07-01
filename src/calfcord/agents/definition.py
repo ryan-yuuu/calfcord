@@ -37,7 +37,7 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
 from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
@@ -106,13 +106,6 @@ class AgentDefinition(BaseModel):
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
     model."""
     thinking_effort: ThinkingEffort | None = None
-    publish_topic: str | None = Field(default=None, min_length=1)
-    """Reserved and unused: it must be left ``None``. Every agent emits its
-    ``ReturnCall`` to the inbound frame's ``callback_topic`` (the caller's reply
-    topic, e.g. the bridge's ``discord.outbox``) -- the standard calfkit dispatch
-    pattern -- so there is no fixed published-output topic. A non-``None`` value
-    is rejected by :meth:`_forbid_publish_topic` so a stale setting fails loudly
-    rather than silently doing nothing."""
     memory: bool = False
     """Opt in to a persistent per-agent notepad. When ``True``, the factory
     registers a runtime instructions hook
@@ -233,26 +226,6 @@ class AgentDefinition(BaseModel):
         if bad:
             raise ValueError("malformed MCP tool selector(s) in tools: " + "; ".join(bad))
         return v
-
-    @model_validator(mode="after")
-    def _forbid_publish_topic(self) -> AgentDefinition:
-        """Reject a non-``None`` ``publish_topic`` -- it must be left unset.
-
-        ``publish_topic`` was reserved for the built-in router, removed in the
-        0.12 migration. With no router, every agent emits its ``ReturnCall`` to
-        the inbound frame's ``callback_topic`` (the caller's reply topic), so a
-        ``publish_topic`` would be a silent no-op an operator might mistake for
-        working custom-output wiring. Reject it at validation so a stale setting
-        fails loudly rather than doing nothing.
-        """
-        if self.publish_topic is not None:
-            raise ValueError(
-                f"agent {self.agent_id!r} declares publish_topic="
-                f"{self.publish_topic!r}, which is not supported; agents emit "
-                f"ReturnCall to the inbound frame's callback_topic (set by the "
-                f"caller). Remove the publish_topic field."
-            )
-        return self
 
 
 def parse_agent_md(path: Path) -> AgentDefinition:
