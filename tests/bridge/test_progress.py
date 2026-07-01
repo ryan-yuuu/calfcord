@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -40,6 +41,7 @@ import calfcord.bridge.steps_render as steps_render
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.progress import ProgressEntry, ProgressRenderer
 from calfcord.bridge.step_events import StepEvent
+from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.messages import SentMessage
 
 _CORRELATION_ID = "evt-1"
@@ -78,7 +80,17 @@ def _req(*, channel_id: int = _CHANNEL_ID, source_channel_id: int = _CHANNEL_ID)
         message_id=_MESSAGE_ID,
         source_channel_id=source_channel_id,
         channel_id=channel_id,
-        wire={},
+        wire=WireMessage(
+            event_id="e1",
+            kind="message",
+            message_id=_MESSAGE_ID,
+            channel_id=channel_id,
+            source_channel_id=source_channel_id,
+            guild_id=1,
+            content="hello",
+            author=WireAuthor(discord_user_id=1, display_name="alice", is_bot=False, is_webhook=False),
+            created_at=datetime.now(UTC),
+        ),
         reply_target=None,
     )
 

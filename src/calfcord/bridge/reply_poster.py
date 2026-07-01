@@ -96,7 +96,7 @@ class ReplyPoster:
             # Discord rejects an empty webhook send; there is nothing to post and
             # nothing the agent can fix, so treat it as a (no-op) success.
             return ReplyOutcome("ok")
-        wire = WireMessage.model_validate(req.wire)
+        wire = req.wire  # already a validated WireMessage (built at the gateway)
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
@@ -174,7 +174,7 @@ class ReplyPoster:
         Returns ``True`` if at least one chunk posted (or there was nothing to
         post), ``False`` if the reply was fully lost (every chunk failed) so the
         handler can surface an operator notice rather than ghost the user."""
-        wire = WireMessage.model_validate(req.wire)
+        wire = req.wire  # already a validated WireMessage (built at the gateway)
         text = (result.output or "").strip()
         chunks = chunk_split(text)
         if not chunks:

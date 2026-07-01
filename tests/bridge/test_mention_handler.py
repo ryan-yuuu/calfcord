@@ -6,6 +6,7 @@ Drives :class:`MentionHandler` through a ``FakeHandle`` (scripted ``stream()`` +
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,6 +20,7 @@ from calfkit.models.state import State
 
 from calfcord.agents.thinking import build_model_settings_union
 from calfcord.bridge.mention_handler import MentionHandler, MentionRequest, ReplyOutcome
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 
 def _fixable_error() -> Any:
@@ -212,6 +214,20 @@ def _consult_reply(tcid: str, peer: str, text: str) -> ToolResultEvent:
     )
 
 
+def _wire(content: str = "hello") -> WireMessage:
+    return WireMessage(
+        event_id="e1",
+        kind="message",
+        message_id=1,
+        channel_id=10,
+        source_channel_id=10,
+        guild_id=42,
+        content=content,
+        author=WireAuthor(discord_user_id=111, display_name="alice", is_bot=False, is_webhook=False),
+        created_at=datetime.now(UTC),
+    )
+
+
 def _req(content: str = "hello", mentions: tuple[str, ...] = ("scribe",)) -> MentionRequest:
     return MentionRequest(
         content=content,
@@ -220,7 +236,7 @@ def _req(content: str = "hello", mentions: tuple[str, ...] = ("scribe",)) -> Men
         message_id=1,
         source_channel_id=10,
         channel_id=10,
-        wire={"channel_id": 10},
+        wire=_wire(content),
         reply_target=object(),
     )
 
@@ -261,10 +277,11 @@ class TestRouting:
         handler, client, fakes = _make()
         await handler.handle(_req(mentions=("scribe",)))
         assert client.requested_agent == "scribe"
-        # start carried history, author, the discord wire, memory deps.
+        # start carried history, author, the serialized discord wire, memory deps.
         started = client.gw.started
         assert started["author"] == "alice"
-        assert started["deps"]["discord"] == {"channel_id": 10}
+        discord_dep = started["deps"]["discord"]
+        assert discord_dep["content"] == "hello" and discord_dep["channel_id"] == 10
         assert started["deps"]["memory_prompt"] == "tmpl"
         # one reply, persona named for the emitter, text == result.output.
         assert len(fakes["reply"].replies) == 1

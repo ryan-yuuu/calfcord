@@ -16,7 +16,12 @@ the :class:`~calfcord.bridge.mention_handler.MentionHandler` consults per turn; 
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from calfcord.bridge.transcripts import TranscriptStoreLike
+
+if TYPE_CHECKING:
+    from calfcord.agents.definition import ThinkingEffort
 
 
 class EffortOverrides:
@@ -43,8 +48,12 @@ class EffortOverrides:
         """
         return self._map.get(agent_id)
 
-    async def set(self, agent_id: str, effort: str) -> None:
-        """Persist and cache an override for ``agent_id`` (``/thinking-effort`` write)."""
+    async def set(self, agent_id: str, effort: ThinkingEffort) -> None:
+        """Persist and cache an override for ``agent_id`` (``/thinking-effort`` write).
+
+        Strict in (a validated :data:`ThinkingEffort` tier — the slash command
+        validates before calling), tolerant out (:meth:`effort_for` returns the
+        opaque ``str`` the store holds, which a hand-edited DB could dirty)."""
         await self._store.set_agent_override(agent_id, effort)
         self._map[agent_id] = effort
 

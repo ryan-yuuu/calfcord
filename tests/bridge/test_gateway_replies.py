@@ -26,6 +26,7 @@ recording/failing fake so a mention only has to REACH ``handler.handle``. The
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +37,7 @@ from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer
 from calfcord.bridge.steps_toggle import StepsToggleView
+from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.settings import DiscordSettings
 
 _GUILD_ID = 5678
@@ -106,7 +108,17 @@ def _req() -> MentionRequest:
         message_id=1,
         source_channel_id=10,
         channel_id=10,
-        wire={"channel_id": 10},
+        wire=WireMessage(
+            event_id="e1",
+            kind="message",
+            message_id=1,
+            channel_id=10,
+            source_channel_id=10,
+            guild_id=1,
+            content="@scribe hi",
+            author=WireAuthor(discord_user_id=1, display_name="alice", is_bot=False, is_webhook=False),
+            created_at=datetime.now(UTC),
+        ),
         reply_target=object(),
     )
 
@@ -150,9 +162,10 @@ class TestOnMessageSpawnsHandler:
         assert req.channel_id == 200
         assert req.source_channel_id == 200
         assert req.reply_target is msg
-        # The serialized wire rides along for ``deps["discord"]``.
-        assert req.wire["content"] == "@scribe help me"
-        assert req.wire["slash_target"] == "scribe"
+        # The typed WireMessage rides along (the handler serializes it into
+        # ``deps["discord"]``; the reply poster reads its typed fields).
+        assert req.wire.content == "@scribe help me"
+        assert req.wire.slash_target == "scribe"
 
     async def test_thread_message_flattens_parent_but_keeps_thread_source(self, fake_message) -> None:
         gateway = _gateway()

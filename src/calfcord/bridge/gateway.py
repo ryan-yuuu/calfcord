@@ -334,7 +334,7 @@ class DiscordIngressGateway:
             message_id=wire.message_id,
             source_channel_id=wire.source_channel_id or wire.channel_id,
             channel_id=wire.channel_id,
-            wire=wire.model_dump(mode="json"),
+            wire=wire,
             reply_target=message,
         )
         self._spawn_handle(req)

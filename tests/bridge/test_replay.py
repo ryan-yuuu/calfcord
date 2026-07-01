@@ -51,10 +51,27 @@ from calfcord.bridge.history import (
 )
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.transcripts import NullTranscriptStore, TranscriptRow, TranscriptStore
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
+
+
+def _inert_wire(channel_id: int, *, content: str = "hi") -> WireMessage:
+    """A minimal valid WireMessage for MentionRequest fixtures whose code paths
+    read only the request's typed fields, never the wire itself."""
+    return WireMessage(
+        event_id="e1",
+        kind="message",
+        message_id=1,
+        channel_id=channel_id,
+        source_channel_id=channel_id,
+        guild_id=1,
+        content=content,
+        author=WireAuthor(discord_user_id=1, display_name="ryan", is_bot=False, is_webhook=False),
+        created_at=datetime.now(UTC),
+    )
 
 
 def _record(
@@ -115,7 +132,7 @@ def _req(*, message_id: int = 30, source_channel_id: int = 6789) -> MentionReque
         message_id=message_id,
         source_channel_id=source_channel_id,
         channel_id=source_channel_id,
-        wire={"channel_id": source_channel_id},
+        wire=_inert_wire(source_channel_id, content="and again?"),
         reply_target=object(),
     )
 

@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import NodeFaultError
 
@@ -28,6 +29,7 @@ from calfcord.agents.thinking import build_model_settings_union
 from calfcord.bridge.a2a_dispatch import A2ACall, A2ADispatcher, A2AProjection
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event
+from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import Persona
 from calfcord.discord.retry_feedback import (
     MAX_REPLY_RETRY_ATTEMPTS,
@@ -86,9 +88,12 @@ class MentionRequest:
     """A normalized inbound ``@mention`` — what the Discord gateway hands the
     handler.
 
-    ``mention_ids`` are the parsed ``@<id>`` tokens in order; ``wire`` is the raw
-    Discord context the agent reads off ``deps["discord"]``; ``reply_target`` is
-    the opaque discord.py object the reply / notice posts against.
+    ``mention_ids`` are the parsed ``@<id>`` tokens in order; ``wire`` is the typed
+    :class:`WireMessage` the normalizer already produced (validated once at the
+    gateway boundary) — the handler serializes it into ``deps["discord"]`` for the
+    agent, and the reply poster reads its typed ``channel_id``/``thread_id`` without
+    re-validating. ``reply_target`` is the opaque discord.py object the reply /
+    notice posts against.
 
     ``message_id`` is the triggering Discord message id — the history-fetch anchor
     (``before=``) and the transcript-replay join key. ``source_channel_id`` is the
@@ -102,7 +107,7 @@ class MentionRequest:
     message_id: int
     source_channel_id: int
     channel_id: int
-    wire: dict[str, Any]
+    wire: WireMessage
     reply_target: Any
 
 
@@ -133,10 +138,15 @@ class ReplyOutcome:
     or a persistent 5xx — logged + abandoned, no retry); ``"retry"`` a Discord
     rejection the agent can plausibly fix (e.g. too long), carrying the rejecting
     ``error`` and the ``failed_text`` for the corrective retry envelope.
+
+    ``error`` is typed ``discord.HTTPException | None`` (not ``Any``) because the
+    retry branch feeds it straight into ``build_retry_reminder``, which reads
+    ``.status``/``.code``/``.text`` and requires a non-``None`` HTTPException — the
+    only producer sets it exactly when ``status == "retry"``.
     """
 
     status: Literal["ok", "dropped", "retry"]
-    error: Any = None
+    error: discord.HTTPException | None = None
     failed_text: str = ""
 
 
@@ -195,7 +205,9 @@ class MentionHandler:
             return
 
         history = await self._history.message_history(req)
-        deps = {"discord": req.wire, **self._memory_deps()}
+        # Serialize the typed wire into deps once per turn (the agent reads
+        # ``deps["discord"]`` as JSON); the reply poster uses ``req.wire`` typed.
+        deps = {"discord": req.wire.model_dump(mode="json"), **self._memory_deps()}
         # Compute the C11 effort override once and reuse it on every retry.
         model_settings = build_model_settings_union(self._overrides.effort_for(target))
         handle = await self._client.agent(target).start(

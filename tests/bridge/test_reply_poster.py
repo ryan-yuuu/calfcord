@@ -35,7 +35,7 @@ def _http(status: int, text: str = "rejected") -> discord.HTTPException:
     return discord.HTTPException(_Resp(status), text)
 
 
-def _wire_dict(*, source_channel_id: int | None = None, channel_id: int = 6789) -> dict[str, Any]:
+def _wire(*, source_channel_id: int | None = None, channel_id: int = 6789) -> WireMessage:
     return WireMessage(
         event_id="c1",
         kind="message",
@@ -47,18 +47,18 @@ def _wire_dict(*, source_channel_id: int | None = None, channel_id: int = 6789) 
         content="hello?",
         author=WireAuthor(discord_user_id=111, display_name="alice", is_bot=False, is_webhook=False),
         created_at=datetime.now(UTC),
-    ).model_dump(mode="json")
+    )
 
 
-def _req(wire: dict[str, Any] | None = None) -> MentionRequest:
-    wire = wire if wire is not None else _wire_dict()
+def _req(wire: WireMessage | None = None) -> MentionRequest:
+    wire = wire if wire is not None else _wire()
     return MentionRequest(
         content="hello?",
         mention_ids=("scribe",),
         author_label="alice",
         message_id=12345,
-        source_channel_id=wire["source_channel_id"] or wire["channel_id"],
-        channel_id=wire["channel_id"],
+        source_channel_id=wire.source_channel_id or wire.channel_id,
+        channel_id=wire.channel_id,
         wire=wire,
         reply_target=_FakeReplyTarget(),
     )
@@ -203,7 +203,7 @@ class TestPostReply:
     async def test_thread_routing(self) -> None:
         poster, personas, _ = _poster()
         await poster.post_reply(
-            _req(_wire_dict(source_channel_id=99999)),
+            _req(_wire(source_channel_id=99999)),
             Persona(name="scribe"),
             _result("done"),
             initial_len=0,
