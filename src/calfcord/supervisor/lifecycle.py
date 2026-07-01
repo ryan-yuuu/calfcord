@@ -47,7 +47,11 @@ from calfcord.supervisor._workspace import (
     workspace_is_up,
 )
 from calfcord.supervisor.client import ProcessComposeClient
-from calfcord.supervisor.compose import SUPERVISOR_LOG_STEM, render_compose
+from calfcord.supervisor.compose import (
+    SUPERVISOR_LOG_STEM,
+    broker_is_compose_managed,
+    render_compose,
+)
 
 # A process launcher: hand it an argv and it starts the process. Production wires
 # this to a detached ``subprocess.Popen`` (the ``up`` must outlive ``start``); a
@@ -363,11 +367,17 @@ async def start(
     (after tearing the substrate back down) if the bridge does not become ready
     within ``ready_timeout_s`` — never a green light that lies (§12.6).
 
-    The broker is a **fast-fail precondition** (§13.2): before rendering or
-    launching anything, ``start`` probes the broker via ``broker_probe`` (default
-    derived from ``server_urls``); a down broker returns non-zero immediately with
-    an actionable hint instead of burning the full bridge-readiness budget waiting
-    for a bridge that can never connect.
+    An **external** broker is a **fast-fail precondition** (§13.2): before
+    rendering or launching anything, ``start`` probes it via ``broker_probe``
+    (default derived from ``server_urls``); a down remote broker returns non-zero
+    immediately with an actionable hint instead of burning the full
+    bridge-readiness budget waiting for a bridge that can never connect. A
+    **compose-managed** (loopback) broker is EXEMPT from this probe: it is a cold
+    autostart process ``up`` itself launches (with its own readiness probe +
+    ``depends_on`` graph), so pre-probing it would fast-fail the very broker being
+    started. The same :func:`broker_is_compose_managed` predicate also drives
+    whether the rendered manifest declares a local ``broker`` slot, so the two
+    decisions cannot diverge.
 
     ``client`` / ``spawn`` / ``spawn_blocking`` / ``clock`` / ``sleep`` /
     ``broker_probe`` are injected for testing; in production they default to a
@@ -406,17 +416,28 @@ async def start(
             )
             return 0
 
-        # Broker fast-fail precondition (§13.2): the bridge cannot reach Ready
-        # without a live broker, so probe it BEFORE rendering/launching. A down
-        # broker fails here in a heartbeat instead of after the full bridge
-        # readiness timeout — and we leave the workspace untouched (no `up`).
-        probe = broker_probe or default_broker_probe(server_urls)
-        if not await probe():
-            print(
-                f"error: broker not reachable at {server_urls}; "
-                "start it with `disco broker`, then re-run `disco start`."
-            )
-            return 1
+        # One predicate governs both the pre-launch probe and the manifest's broker
+        # slot, so they can never diverge (§13.2). A loopback URL means the broker
+        # is a compose-managed AUTOSTART process that `up` itself launches; an
+        # external URL means the operator's broker lives elsewhere.
+        broker_managed = broker_is_compose_managed(server_urls)
+
+        # Broker fast-fail precondition (§13.2) — EXTERNAL brokers ONLY. For a
+        # remote broker the bridge cannot reach Ready without it, so probe it
+        # BEFORE rendering/launching: a down broker fails here in a heartbeat
+        # instead of after the full bridge readiness timeout, and the workspace is
+        # left untouched (no `up`). A compose-managed loopback broker is EXEMPT: it
+        # is a cold autostart process `up` brings up (with its own readiness probe
+        # + depends_on graph), so probing it here would fast-fail the very broker we
+        # are about to start — the P0 cold-start bug.
+        if not broker_managed:
+            probe = broker_probe or default_broker_probe(server_urls)
+            if not await probe():
+                print(
+                    f"error: broker not reachable at {server_urls}; "
+                    "start it with `disco broker`, then re-run `disco start`."
+                )
+                return 1
 
         port = pc_port_for(home)
         yaml_text = render_compose(
@@ -424,6 +445,7 @@ async def start(
             home=home,
             launcher=launcher,
             mcp_servers=list(mcp_servers),
+            broker_managed=broker_managed,
         )
         yaml_path = _write_compose(home, yaml_text)
         log_path = _ensure_log_path(home)

@@ -273,8 +273,9 @@ def test_default_provider_persisted_from_configure_provider(tmp_path: Path) -> N
 
 
 def test_broker_native_sets_local_url(tmp_path: Path) -> None:
-    """The native broker choice still seeds ``CALF_HOST_URL`` (the live finish
-    starts the broker, so — unlike the old flow — no command is printed here)."""
+    """The native broker choice still seeds ``CALF_HOST_URL`` (the live finish's
+    `start` launches the broker as a compose-managed autostart process, so —
+    unlike the old flow — no command is printed here)."""
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(name="scribe", description="d", broker="native")
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0

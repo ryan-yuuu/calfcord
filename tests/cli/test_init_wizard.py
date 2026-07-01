@@ -795,14 +795,17 @@ def test_substrate_start_failure_does_not_start_agent_or_watch(
     assert len(finish.reply_calls) == 0
 
 
-def test_substrate_readiness_timeout_hints_privileged_intents(
+def test_substrate_start_failure_points_at_logs_and_doctor(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A substrate-start failure maps to the §12.6 'intents probably off' hint."""
+    """A substrate-start failure points at the diagnostics (§12.6) rather than
+    misattributing the cause — a cold-broker failure, an intents gap, and a bad
+    config all land here, so name `disco logs` / `disco doctor`, not one guess."""
     finish = _FinishStub(start_rc=1)
     _run(_prompter(), tmp_path, home=tmp_path, finish=finish)
-    out = capsys.readouterr().out
-    assert "intent" in out.lower()
+    out = capsys.readouterr().out.lower()
+    assert "disco logs" in out
+    assert "disco doctor" in out
 
 
 def test_agent_start_failure_skips_reply_watch(tmp_path: Path) -> None:

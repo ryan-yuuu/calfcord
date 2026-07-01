@@ -104,6 +104,59 @@ def mcp_slot_name(server: str) -> str:
     return f"{MCP_SLOT_PREFIX}{server}"
 
 
+# Hosts whose broker URL means "a local broker calfcord itself supervises": the
+# native install runs Tansu as the compose-managed ``broker`` process bound to
+# loopback. Anything else is an EXTERNAL broker the operator runs elsewhere, so
+# calfcord must neither declare a local broker slot for it nor start one. The
+# empty host (":9092" / bare "") is treated as loopback (no host == localhost).
+_LOOPBACK_HOSTS = frozenset({"", "localhost", "::1"})
+
+
+def _host_of(url: str) -> str:
+    """Extract the host from a bare ``host[:port]`` broker URL (no scheme).
+
+    Handles the bracketed IPv6 form (``[::1]:9092`` → ``::1``) and a bare IPv6
+    literal (multiple colons, unbracketed, no port — kept whole); a single colon
+    is the ordinary ``host:port`` separator.
+    """
+    url = url.strip()
+    if url.startswith("["):
+        end = url.find("]")
+        if end != -1:
+            return url[1:end]
+    if url.count(":") == 1:
+        return url.rsplit(":", 1)[0]
+    return url
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Whether ``host`` names this machine's loopback (localhost / 127.0.0.0/8 / ::1)."""
+    host = host.strip().lower()
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
+def broker_is_compose_managed(server_urls: str) -> bool:
+    """Whether ``server_urls`` designates a local broker calfcord supervises.
+
+    This is the single predicate that keeps two decisions from diverging (design
+    §13.2): whether the rendered project declares a local ``broker`` process, and
+    whether :func:`lifecycle.start` runs its pre-launch broker fast-fail probe.
+
+    A **loopback** URL (``localhost`` / ``127.0.0.0/8`` / ``::1``, with or without
+    a port) means calfcord runs Tansu as the compose-managed ``broker`` process:
+    ``process-compose up`` launches it (with its own readiness probe + depends_on
+    graph), so `start` must NOT pre-probe it — the broker is cold until `up` starts
+    it. A non-loopback (external) URL means the operator's broker lives elsewhere,
+    so no local slot is declared and the pre-launch fast-fail stands. A
+    comma-separated bootstrap list is compose-managed only if EVERY host is
+    loopback; an empty string is external (unknown → keep the fast-fail).
+    """
+    hosts = [h for h in (part.strip() for part in server_urls.split(",")) if h]
+    if not hosts:
+        return False
+    return all(_is_loopback_host(_host_of(h)) for h in hosts)
+
+
 def _log_location(home: str, name: str) -> str:
     return os.path.join(home, "state", "logs", f"{name}.log")
 
@@ -158,7 +211,12 @@ def _process(
 
 
 def build_compose_project(
-    *, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()
+    *,
+    agent_ids: Iterable[str],
+    home: str,
+    launcher: str,
+    mcp_servers: Iterable[str] = (),
+    broker_managed: bool = True,
 ) -> dict:
     """Build the Process Compose project that supervises one calfcord host.
 
@@ -172,6 +230,16 @@ def build_compose_project(
     use it. ``launcher`` is the shim prefix every ``command`` is built on
     (e.g. ``$CALFCORD_HOME/shims/disco``); the generator never reconstructs
     ``uv run`` flags or inlines secrets.
+
+    ``broker_managed`` (default ``True``, the native local install) declares Tansu
+    as the autostart ``broker`` process and health-gates the bridge + roster on it.
+    Set ``False`` for an EXTERNAL broker (the operator runs Kafka elsewhere): no
+    local ``broker`` process is declared — starting an ephemeral broker nobody
+    talks to is wrong — and nothing carries a ``depends_on`` the broker (a
+    dependency on an undeclared process would make process-compose reject the
+    project). The caller derives this flag from
+    :func:`broker_is_compose_managed` so manifest inclusion and `start`'s
+    pre-launch probe cannot diverge (design §13.2).
 
     Returns a plain ``dict`` (serialize with :func:`render_compose`). See the
     module docstring for the substrate/roster, restart, depends_on, and probe
@@ -197,31 +265,38 @@ def build_compose_project(
 
     processes: dict[str, dict] = {}
 
-    # Substrate — autostarts, health-gated. The broker's readiness probe checks
-    # metadata reachability (not bare TCP); the bridge's checks the Discord
-    # heartbeat. `start` gates downstream on the bridge.
-    processes["broker"] = _process(
-        command=f"{launcher} broker",
-        home=home,
-        name="broker",
-        disabled=False,
-        restart_policy="always",
-        readiness_probe=_readiness_probe(launcher, "broker"),
-    )
+    # The broker gate every downstream process shares — present only when the
+    # broker is a local compose process. For an external broker there is no local
+    # ``broker`` process to health-gate on, so the dependency is dropped entirely
+    # (process-compose rejects a depends_on to an undeclared process).
+    broker_dep = {"broker": _HEALTHY} if broker_managed else None
+
+    # Substrate — autostarts, health-gated. The broker (when compose-managed) has a
+    # readiness probe checking metadata reachability (not bare TCP); the bridge's
+    # checks the Discord heartbeat. `start` gates downstream on the bridge.
+    if broker_managed:
+        processes["broker"] = _process(
+            command=f"{launcher} broker",
+            home=home,
+            name="broker",
+            disabled=False,
+            restart_policy="always",
+            readiness_probe=_readiness_probe(launcher, "broker"),
+        )
     processes["bridge"] = _process(
         command=f"{launcher} run bridge",
         home=home,
         name="bridge",
         disabled=False,
         restart_policy="always",
-        depends_on={"broker": _HEALTHY},
+        depends_on=broker_dep,
         readiness_probe=_readiness_probe(launcher, "bridge"),
     )
 
     # Roster — declared disabled; each member clocks in on an explicit start and
-    # gates on the broker being healthy. Every roster member (agents *and*
-    # tools) runs via run_worker_until_signal, which forces a non-zero
-    # exit on any uncommanded exit, so on_failure restarts a crash while an
+    # gates on the broker being healthy (when it is a local process). Every roster
+    # member (agents *and* tools) runs via run_worker_until_signal, which forces a
+    # non-zero exit on any uncommanded exit, so on_failure restarts a crash while an
     # operator-commanded stop is suppressed from restart by Process Compose.
     for agent_id in agent_ids:
         processes[agent_id] = _process(
@@ -230,7 +305,7 @@ def build_compose_project(
             name=agent_id,
             disabled=True,
             restart_policy="on_failure",
-            depends_on={"broker": _HEALTHY},
+            depends_on=broker_dep,
         )
 
     for component in ("tools",):
@@ -240,11 +315,11 @@ def build_compose_project(
             name=component,
             disabled=True,
             restart_policy="on_failure",
-            depends_on={"broker": _HEALTHY},
+            depends_on=broker_dep,
         )
 
     # MCP servers — roster members like agents (disabled, on_failure,
-    # broker-gated), one slot per mcp.json server for failure isolation.
+    # broker-gated when local), one slot per mcp.json server for failure isolation.
     for slot, server in mcp_slots.items():
         processes[slot] = _process(
             command=f"{launcher} run mcp {server}",
@@ -252,7 +327,7 @@ def build_compose_project(
             name=slot,
             disabled=True,
             restart_policy="on_failure",
-            depends_on={"broker": _HEALTHY},
+            depends_on=broker_dep,
         )
 
     return {
@@ -269,12 +344,26 @@ def build_compose_project(
     }
 
 
-def render_compose(*, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()) -> str:
+def render_compose(
+    *,
+    agent_ids: Iterable[str],
+    home: str,
+    launcher: str,
+    mcp_servers: Iterable[str] = (),
+    broker_managed: bool = True,
+) -> str:
     """Render the Process Compose project as a YAML string.
 
     Thin serializer over :func:`build_compose_project` — ``sort_keys=False`` keeps
     the substrate-before-roster ordering the builder emits, which makes the
-    generated file readable even though the user never edits it.
+    generated file readable even though the user never edits it. ``broker_managed``
+    is threaded through unchanged (see :func:`build_compose_project`).
     """
-    project = build_compose_project(agent_ids=agent_ids, home=home, launcher=launcher, mcp_servers=mcp_servers)
+    project = build_compose_project(
+        agent_ids=agent_ids,
+        home=home,
+        launcher=launcher,
+        mcp_servers=mcp_servers,
+        broker_managed=broker_managed,
+    )
     return yaml.safe_dump(project, sort_keys=False)
