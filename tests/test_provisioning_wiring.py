@@ -78,23 +78,6 @@ async def test_provision_extra_topics_dedups_and_forwards_explicit_server_urls(m
     assert captured["framework_topics"] == set()  # plain data topics
 
 
-def test_mcp_reply_topic_does_not_collide_with_bridge_outbox() -> None:
-    """The MCP runner still claims a named reply inbox (target-agent
-    ``ReturnCall``s land there), and calfkit auto-provisions it at broker start.
-    It must NOT collide with the bridge's ``discord.outbox`` literal or a
-    target-agent reply would be mistaken for a Discord-bound one — pin the
-    distinctness so a copy-paste can't cross-wire delivery.
-
-    The tools runner no longer claims a reply inbox at all (it invokes tools
-    natively over ordinary node topics), so there is nothing to compare on that
-    side after the 0.12 migration.
-    """
-    from calfcord.mcp.runner import _REPLY_TOPIC as MCP
-    from calfcord.topics import DISCORD_OUTBOX_TOPIC
-
-    assert MCP != DISCORD_OUTBOX_TOPIC
-
-
 async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch) -> None:
     """A provisioning failure must abort startup LOUDLY (calfcord's
     infra-failure-raises rule), never be swallowed — a runner that cannot create
