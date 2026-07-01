@@ -107,10 +107,12 @@ async def provision_and_start_broker(
     ``broker.running`` guard avoids a non-idempotent second ``start()`` if the
     broker was already brought up (e.g. by an earlier lazy first publish).
 
-    The Worker-hosted runners do NOT need this helper: tools/agents run via
-    ``Worker.run()`` and the bridge via the embedded ``Worker.start()``, whose
-    managed lifecycle auto-provisions reply + node topics; none of them declare
-    any blind-spot topics, so the managed broker start does all the provisioning.
+    The production runners do NOT need this helper: the tools/agents runners use
+    the managed ``Worker.start()`` surface (whose lifecycle auto-provisions reply
+    + node topics), and the bridge is a pure :class:`~calfkit.client.Client` that
+    hand-rolls no broker (its reply topic is covered by the connect-time pre-start
+    hook). None of them declare blind-spot topics, so nothing here is needed —
+    this stays a general-purpose helper for a future raw-broker caller.
     """
     await provision_extra_topics(server_urls, topics)
     if not client.broker.running:
