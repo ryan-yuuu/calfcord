@@ -1,6 +1,6 @@
 # Architecture
 
-Calfcord is a set of independent processes that communicate **exclusively
+Agent Disco is a set of independent processes that communicate **exclusively
 through Kafka**. Each is safe to deploy on its own host, and switching between
 deployment styles (supervised native, all-in-Docker, or a mix) needs no code
 changes — they share the same `.env` and `agents/*.md`.
@@ -109,12 +109,12 @@ for the rationale.
 
 ## Runtime model: substrate + roster
 
-The processes above are the *what*; this is the *how you run them*. Calfcord
+The processes above are the *what*; this is the *how you run them*. Agent Disco
 splits the running system into two layers so the always-on plumbing is separate
 from the teammates you stand up on demand:
 
 - **Substrate** — the **broker** (Kafka / Tansu) and the **bridge**. This is the
-  office: the message bus plus the single Discord gateway. `calfcord start`
+  office: the message bus plus the single Discord gateway. `disco start`
   brings up *only* the substrate, detached and **health-gated** — it does not
   return until the bridge reports it is connected to Discord (the bridge writes
   its first heartbeat on Discord `on_ready`, so "substrate healthy" *means*
@@ -124,33 +124,33 @@ from the teammates you stand up on demand:
   servers**). These are the teammates that clock into the live office. `start`
   deliberately does **not** auto-start any roster member — "nothing runs that
   you didn't start" is a trust property — so you bring each one online
-  explicitly: `calfcord agent start <name>`, `calfcord tools start`,
-  `calfcord mcp start <server>` (and the matching `stop`). `calfcord agent
+  explicitly: `disco agent start <name>`, `disco tools start`,
+  `disco mcp start <server>` (and the matching `stop`). `disco agent
   restart <name>` reloads a running agent after you edit its `.md`.
 
 The minimum path to a live agent is two honest commands — open the office, then
 clock a teammate in:
 
 ```bash
-calfcord start                  # substrate only (broker + bridge), health-gated
-calfcord agent start assistant  # roster: a teammate joins the live org → replies in Discord
+disco start                  # substrate only (broker + bridge), health-gated
+disco agent start assistant  # roster: a teammate joins the live org → replies in Discord
 ```
 
-`calfcord init` runs this whole sequence for a newcomer, walking both layers
+`disco init` runs this whole sequence for a newcomer, walking both layers
 visibly so the substrate↔roster split is learned by doing it. After that,
-`calfcord status` is the org board (substrate health + which roster members are
-online), `calfcord agent ps` shows what is *running* now (vs. `agent list`, which
-shows what is *defined* on disk), and `calfcord logs [component] [-f]` tails the
+`disco status` is the org board (substrate health + which roster members are
+online), `disco agent ps` shows what is *running* now (vs. `agent list`, which
+shows what is *defined* on disk), and `disco logs [component] [-f]` tails the
 unified or per-component logs.
 
 ### Process Compose supervises one host
 
 On a single host the substrate and roster are managed by
 **[Process Compose](https://f1bonacc1.github.io/process-compose)**, a
-cross-platform single-binary supervisor that calfcord bootstraps the same way it
+cross-platform single-binary supervisor that Agent Disco bootstraps the same way it
 bootstraps the Tansu broker (a pinned binary under `$CALFCORD_HOME/bin`, kept out
 of the agent Python path). The supervisor configuration is **derived state**:
-calfcord generates `$CALFCORD_HOME/state/process-compose.yaml` from your
+Agent Disco generates `$CALFCORD_HOME/state/process-compose.yaml` from your
 `agents/*.md` and config — you never hand-edit it. The CLI verbs are a thin
 veneer over the supervisor's REST API.
 
@@ -158,13 +158,13 @@ This is where the layer split becomes mechanical. In the generated config the
 substrate (broker, bridge) is declared `autostart`, while every defined agent,
 plus the tools host and any MCP servers, is declared but **disabled** — present
 but not started until you run its `start`. The supervisor absorbs the lifecycle
-work calfcord would otherwise hand-roll:
+work Agent Disco would otherwise hand-roll:
 
 - **Dependency ordering and health gates** — `depends_on` keeps the bridge from
   starting until the broker is healthy, and keeps roster members waiting on the
   substrate. Both the dependency gates and the `start` readiness poll are driven
   by the *same* signal: an exec readiness probe that runs
-  `calfcord _healthcheck <component>` against the per-component heartbeat files
+  `disco _healthcheck <component>` against the per-component heartbeat files
   under `$CALFCORD_HOME/state/health/`.
 - **Autorestart** — the broker and bridge exit 0 on a clean return, so they use
   `restart: always`; the whole roster (agents, tools, MCP servers) runs
@@ -172,15 +172,15 @@ work calfcord would otherwise hand-roll:
   that forces a non-zero exit on a clean, signal-less return, so it uses
   `restart: on_failure`. An intentional `stop` does not trigger a restart.
 - **Per-process log capture** — each component's stdout/stderr lands at
-  `$CALFCORD_HOME/state/logs/<component>.log` (what `calfcord logs` tails).
+  `$CALFCORD_HOME/state/logs/<component>.log` (what `disco logs` tails).
 
 ### The same commands graduate to distributed
 
 The substrate/roster model is host-agnostic. The substrate just needs to be
 reachable over a broker URL, so graduating from one host to many does not change
 the commands — it changes *where the broker is*. Point a second host's
-`CALF_HOST_URL` at the shared substrate (`calfcord self set-broker <url>`) and
-the same `calfcord agent start <name>` / `calfcord tools start` clock a teammate
+`CALF_HOST_URL` at the shared substrate (`disco self set-broker <url>`) and
+the same `disco agent start <name>` / `disco tools start` clock a teammate
 into the *same* live org from a different machine. Idempotency is enforced
 org-wide over the broker, not per host: `agent start` first probes the live
 agent **mesh** (`client.mesh`, calfkit's native `calf.agents` heartbeat view)
@@ -200,23 +200,23 @@ Pick by intent — operating an install, hacking on the source, or containerizin
 
 ### 1. Supervised native (primary)
 
-The end-user path. The native installer (`curl … | bash`) drops a `calfcord`
-shim under `~/.calfcord/`; `calfcord init` walks you through first-run config and
+The end-user path. The native installer (`curl … | bash`) drops a `disco`
+shim under `~/.calfcord/`; `disco init` walks you through first-run config and
 ends with your first agent online. From then on you operate the
 [substrate and roster](#runtime-model-substrate--roster) through the shim, and
 **Process Compose supervises everything on the host** — health-gated startup,
 dependency ordering, autorestart, and per-component logs, no terminal-juggling:
 
 ```bash
-calfcord start                  # substrate (broker + bridge), detached, health-gated
-calfcord agent start assistant  # roster: clock a teammate in → replies in Discord
-calfcord status                 # org board: substrate + roster health
-calfcord logs -f                # follow the unified supervisor log
-calfcord stop                   # close the office (stops the supervised substrate)
+disco start                  # substrate (broker + bridge), detached, health-gated
+disco agent start assistant  # roster: clock a teammate in → replies in Discord
+disco status                 # org board: substrate + roster health
+disco logs -f                # follow the unified supervisor log
+disco stop                   # close the office (stops the supervised substrate)
 ```
 
 On a native install the agent and state directories are pinned under the install
-home so they survive `calfcord self update` and are found from any directory —
+home so they survive `disco self update` and are found from any directory —
 `CALFKIT_AGENTS_DIR` → `~/.calfcord/agents`, `CALFKIT_STATE_DIR` →
 `~/.calfcord/state/agents` — while the tools **workspace follows the launch
 directory** (`CALFCORD_WORKSPACE_DIR` defaults to the `$PWD` where the substrate
@@ -227,13 +227,13 @@ See the [README quick start](../README.md#quick-start) and
 
 ### 2. Low-level `uv run` (development)
 
-For working *on* calfcord, you can run each process in the foreground yourself,
+For working *on* Agent Disco, you can run each process in the foreground yourself,
 bypassing the shim and the supervisor. This is the dev/debug path; it keeps the
 CWD-relative defaults (`agents/`, `state/agents/`, `state/workspace/`):
 
 ```bash
 uv sync                                              # install dependencies
-calfcord broker                                      # native Tansu broker — or bring your own Kafka
+disco broker                                      # native Tansu broker — or bring your own Kafka
 
 # Add to .env so every uv-run terminal picks it up automatically:
 echo 'CALF_HOST_URL=localhost:9092' >> .env
@@ -248,13 +248,13 @@ uv run calfkit-mcp <server>                          # one MCP server from mcp.j
 ```
 
 `localhost:9092` is the default Kafka port the native Tansu broker listens on.
-Skip `calfcord broker` if you have Kafka elsewhere — just point `CALF_HOST_URL`
+Skip `disco broker` if you have Kafka elsewhere — just point `CALF_HOST_URL`
 at it. Tansu's default storage is ephemeral memory, so topics/messages reset on
-broker restart and calfcord re-creates the topics it needs on startup. Writing
+broker restart and Agent Disco re-creates the topics it needs on startup. Writing
 the value to `.env` rather than `export`ing it means every `uv run` terminal
 picks it up via `python-dotenv` without a per-shell re-export.
 
-> The `calfcord broker` and `calfcord run <bridge|agent|tools|mcp>` shim
+> The `disco broker` and `disco run <bridge|agent|tools|mcp>` shim
 > verbs are the same low-level escape hatches surfaced for when you want one
 > process in the foreground without the supervisor. The supervised native path
 > above is what most installs use.
@@ -268,11 +268,11 @@ is the only wire-format contract between them, so modes also **mix**: run the
 bridge in compose while you iterate on an agent natively, or the reverse.
 Native-side processes need `CALF_HOST_URL=localhost:9092` in `.env`; containerized
 services pick up `tansu:9092` from compose's per-service environment block. (To
-run only the broker in Docker but the calfcord processes natively on the host,
+run only the broker in Docker but the Agent Disco processes natively on the host,
 advertise the host address: `TANSU_ADVERTISE=localhost docker compose up tansu`,
 then point the native processes at `localhost:9092`.)
 
-For unattended production hosts, `calfcord deploy <systemd|k8s|docker>` renders
+For unattended production hosts, `disco deploy <systemd|k8s|docker>` renders
 the matching manifests (a systemd unit, Kubernetes resources, or a Docker
 artifact) from your current config and agents, so you can hand the supervised
 model off to the host's own init system or an orchestrator. See
@@ -285,7 +285,7 @@ each `calfkit-mcp` — run on calfkit's **managed** `Worker` lifecycle
 (start/serve/drain and topic provisioning in one place) via the shared
 [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper's blocking
 `Worker.run()`. Each `calfkit-agent` **auto-advertises its `AgentCard`** on the
-native mesh (`calf.agents`) — there is no calfcord presence/departure plumbing
+native mesh (`calf.agents`) — there is no Agent Disco presence/departure plumbing
 anymore, and no control-plane roster to maintain.
 
 The **bridge is different**: it is a pure calfkit `Client` (the caller surface),

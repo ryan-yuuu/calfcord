@@ -1,4 +1,4 @@
-"""Tests for ``calfcord mcp add|list|remove`` (:mod:`calfcord.cli.mcp_admin`).
+"""Tests for ``disco mcp add|list|remove`` (:mod:`calfcord.cli.mcp_admin`).
 
 The add command is dual-mode: an interactive wizard over the injected
 :class:`Prompter` seam when no transport flag is given, and a flag-driven
@@ -361,7 +361,7 @@ def test_list_shows_configured_servers(tmp_path: Path, capsys) -> None:
 def test_list_empty_config_hints_add(tmp_path: Path, capsys) -> None:
     rc = mcp_admin.run_list(config_path=_config(tmp_path), home=None)
     assert rc == 0
-    assert "calfcord mcp add" in capsys.readouterr().out
+    assert "disco mcp add" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------- remove

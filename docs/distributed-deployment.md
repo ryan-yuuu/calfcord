@@ -2,7 +2,7 @@
 
 Going multi-host is a **graduation, not a rewrite**. Nothing you built on
 one machine changes: the same `agents/*.md`, the same `.env`, the same
-`calfcord start` / `calfcord agent start <name>` commands all keep
+`disco start` / `disco agent start <name>` commands all keep
 working. The single thing that moves is where the broker lives — every
 process just dials a remote `CALF_HOST_URL` instead of a local one.
 
@@ -13,9 +13,9 @@ a tool to one box, per-agent crash isolation, broker auth) you reach for
 
 ## The portable invariant
 
-What makes calfcord portable across one host or twenty is **not** the
+What makes Agent Disco portable across one host or twenty is **not** the
 Process Compose YAML the single-host supervisor generates. That YAML is
-host-local derived state — `calfcord start` regenerates it from your
+host-local derived state — `disco start` regenerates it from your
 config and you never edit it (see
 [`architecture.md`](architecture.md#running-modes)). It does not travel.
 
@@ -43,12 +43,12 @@ on a VM, K8s in a cluster) without touching a single user-facing command.
 The minimal multi-host split needs no new concepts — only a broker
 address every host can reach. On each host:
 
-1. **Install calfcord** the same way (the one-line installer, then
+1. **Install Agent Disco** the same way (the one-line installer, then
    restart your shell). Each host gets its own `$CALFCORD_HOME`.
 2. **Point it at the shared broker:**
 
    ```bash
-   calfcord self set-broker laptop:9092
+   disco self set-broker laptop:9092
    ```
 
    This writes `CALF_HOST_URL=laptop:9092` into the install's config
@@ -59,7 +59,7 @@ address every host can reach. On each host:
 3. **On the host where the broker + bridge live, open the workspace:**
 
    ```bash
-   calfcord start          # broker + bridge, detached, health-gated
+   disco start          # broker + bridge, detached, health-gated
    ```
 
    `start` brings up only the **substrate** (broker + bridge). It is the
@@ -69,9 +69,9 @@ address every host can reach. On each host:
 4. **On each host, clock in the roster it owns:**
 
    ```bash
-   calfcord agent start scribe     # this host runs the scribe agent
-   calfcord tools start            # ...or this host runs the tools process
-   calfcord mcp start github       # ...or an MCP server (one per mcp.json entry)
+   disco agent start scribe     # this host runs the scribe agent
+   disco tools start            # ...or this host runs the tools process
+   disco mcp start github       # ...or an MCP server (one per mcp.json entry)
    ```
 
    A roster member started on host B joins the *same live org* as the
@@ -79,13 +79,13 @@ address every host can reach. On each host:
    per-host config beyond `CALF_HOST_URL`: an agent's `.md` is identical
    wherever it runs.
 
-That is the graduation. `calfcord status` on any host shows the org board
+That is the graduation. `disco status` on any host shows the org board
 (the substrate health plus the live roster, reconstructed broker-wide),
 so you see every agent regardless of which host it clocked in from.
 
 ### The cross-host duplicate-name guard is CLI-side
 
-`calfcord agent start <name>` first probes the **whole organization** over
+`disco agent start <name>` first probes the **whole organization** over
 the broker (the live-roster probe reads calfkit's native agent mesh —
 `client.mesh.get_agents()` over `calf.agents` — org-wide) and refuses to
 start `<name>` if it is already live on *any* host — printing "agent 'X' is
@@ -109,24 +109,24 @@ two `agent start scribe` fired at the same instant on two hosts can both
 see nothing and both start. The common "X is already running, you try to
 start another" case is fully covered.
 
-## Generating deployment manifests: `calfcord deploy`
+## Generating deployment manifests: `disco deploy`
 
-For the heavier tiers, `calfcord deploy <systemd|k8s|docker>` renders a
+For the heavier tiers, `disco deploy <systemd|k8s|docker>` renders a
 starting-point manifest from the same seam everything else uses — your
 `agents/*.md` roster and `.env` broker address — and never inlines a
 secret. Output goes to stdout by default; `-o PATH` writes a file:
 
 ```bash
-calfcord deploy systemd                 # print a systemd unit
-calfcord deploy k8s -o calfcord.yaml    # write reference K8s manifests
-calfcord deploy docker                  # point at the shipped compose + per-agent override
+disco deploy systemd                 # print a systemd unit
+disco deploy k8s -o disco.yaml       # write reference K8s manifests
+disco deploy docker                  # point at the shipped compose + per-agent override
 ```
 
 What each target renders:
 
 - **`systemd`** — a *real, correct-by-construction* unit for the
   single-host substrate. It runs the install **shim** (`<shim> start` /
-  `<shim> stop`) as `Type=forking` — matching how `calfcord start`
+  `<shim> stop`) as `Type=forking` — matching how `disco start`
   actually forks a detached supervisor and returns once the bridge is
   healthy — so the unit reuses the one seam that owns the `up` flags, the
   derived REST port, and the readiness gate rather than reconstructing
@@ -139,7 +139,7 @@ What each target renders:
   one per *defined* agent **and one per configured MCP server**
   (`calfkit-mcp <server>`) — each running a `calfkit-*` console script on the
   shipped image, dialing the shared broker. This is the Altitude-3 distributed
-  shape, **not** `calfcord start` (there is no in-pod supervisor; each process
+  shape, **not** `disco start` (there is no in-pod supervisor; each process
   type is its own workload). Secrets arrive via a `Secret` you create out of
   band (`kubectl create secret generic calfcord-secrets --from-env-file=.env`),
   never inlined. Tune replicas, resource limits, ingress, and durable broker
@@ -175,7 +175,7 @@ Tools are location-transparent over Kafka. An agent declaring
 `tools: [terminal]` can't tell whether the `calfkit-tools` process
 answering on `tool.terminal.input` is on the same host or behind a
 Tailscale exit node — calfkit's RPC layer abstracts the wire and
-calfcord inherits the contract.
+Agent Disco inherits the contract.
 
 The killer use case is the **remote terminal tool**. On a remote dev box,
 run the canonical image narrowed to just `terminal` —
@@ -267,14 +267,14 @@ subscribes to `tool.<dst>.input` instead, so two hosts can serve `patch`
 a remote VM) and agents can call either by picking the appropriate name.
 
 **Manage it with the CLI.** Rather than hand-editing the env var, use
-`calfcord tools alias` — it validates against the live tool surface (rejecting
+`disco tools alias` — it validates against the live tool surface (rejecting
 an unknown or non-aliasable tool, a name collision, etc.) and writes the
 install `.env` on the host you run it on:
 
 ```bash
-calfcord tools alias add patch patch_eu   # run on EACH host that should know the name
-calfcord tools alias list
-calfcord tools alias remove patch_eu      # by the new name
+disco tools alias add patch patch_eu   # run on EACH host that should know the name
+disco tools alias list
+disco tools alias remove patch_eu      # by the new name
 ```
 
 Add `--restart` to apply it to a running workspace immediately (otherwise it
@@ -316,7 +316,7 @@ clone.)
 
 For an agent to call `patch_eu`, that name must exist in the
 agent host's `TOOL_REGISTRY`. Set the same alias on the agent host —
-`calfcord tools alias add patch patch_eu` (or the raw env directly):
+`disco tools alias add patch patch_eu` (or the raw env directly):
 
 ```env
 # .env on the agent host
@@ -362,14 +362,14 @@ which is fine for most deployments. If you want a misbehaving agent to be
 able to restart without touching its peers, split that single process into
 one per agent — all on the same `calfcord:latest` image, no custom build.
 
-`calfcord deploy docker` emits exactly this as a `compose.override.yml`
+`disco deploy docker` emits exactly this as a `compose.override.yml`
 snippet: one `calfkit-agent <name>` service per defined agent, each
 inheriting the base build/env from the shipped compose via `extends`. Run
 each with `restart: unless-stopped` so the supervisor recovers them
 independently.
 
 ```bash
-calfcord deploy docker            # points at the real compose + prints the per-agent override
+disco deploy docker            # points at the real compose + prints the per-agent override
 ```
 
 Bare metal, the equivalent is running one `calfkit-agent` process per agent
@@ -388,12 +388,12 @@ servers (and their tokens) and agents anywhere else.
 **MCP host** — where `mcp.json` and its secrets live:
 
 ```bash
-calfcord self set-broker laptop:9092
-calfcord start                                  # this host can be the substrate, or just dial the shared broker
-calfcord mcp add github \
+disco self set-broker laptop:9092
+disco start                                  # this host can be the substrate, or just dial the shared broker
+disco mcp add github \
   --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
-calfcord stop && calfcord start                 # declare the new mcp-github slot (added after start)
-calfcord mcp start github                       # toolbox connects + advertises on the bus
+disco stop && disco start                 # declare the new mcp-github slot (added after start)
+disco mcp start github                       # toolbox connects + advertises on the bus
 ```
 
 Set `GITHUB_TOKEN` in *this* host's `config/.env` only. The toolbox advertises
@@ -403,10 +403,10 @@ the github server's tools onto `mcp.capabilities`, reachable org-wide.
 
 ```bash
 # scribe.md already declares  tools: [..., mcp/github]
-calfcord agent restart scribe                   # picks the tools up from the advertisement
+disco agent restart scribe                   # picks the tools up from the advertisement
 ```
 
-Because the capability view is org-wide, `calfcord agent tools` on the agent
+Because the capability view is org-wide, `disco agent tools` on the agent
 host still surfaces the github server's live per-tool rows even though this host
 runs no MCP server. The toolbox is an ordinary calfkit node, so running the same
 server on two hosts makes them competing consumers on one dispatch topic — a
@@ -431,12 +431,12 @@ EXCEPT the all-in-one tools — the remote box owns `terminal` (see § 10 for
 excluding it from a local tools process if you keep one):
 
 ```bash
-calfcord self set-broker laptop:9092   # advertise the broker on the tailnet
-calfcord start                          # broker + bridge (substrate)
-calfcord agent start scribe             # the agent
+disco self set-broker laptop:9092   # advertise the broker on the tailnet
+disco start                          # broker + bridge (substrate)
+disco agent start scribe             # the agent
 ```
 
-The native broker started by `calfcord start` advertises the address you
+The native broker started by `disco start` advertises the address you
 set in `CALF_HOST_URL`, so off-box clients on the tailnet resolve
 `laptop:9092`. (If you run the broker under Docker Compose instead, the
 equivalent is `TANSU_ADVERTISE=laptop docker compose up -d tansu bridge
@@ -491,16 +491,16 @@ SASL/ACL hardening with Tansu is still maturing (it is a newer broker),
 so follow [Tansu's docs](https://docs.tansu.io/) and the
 [upstream repo](https://github.com/tansu-io/tansu) for the current,
 canonical setup rather than a fixed command set here. Two
-calfcord-specific notes:
+Agent Disco-specific notes:
 
 - **The Kafka client is `aiokafka`** (via calfkit). The standard env
   vars (`KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`,
   `KAFKA_SASL_PASSWORD`, plus TLS cert paths) are the upstream contract.
 
   > **Planned enhancement — not yet wired.** Broker authentication
-  > (SASL/SCRAM + TLS) is **not plumbed through calfcord today**.
+  > (SASL/SCRAM + TLS) is **not plumbed through Agent Disco today**.
   > `Client.connect` already accepts a `security=` kwarg, but the
-  > calfcord runners only forward `CALF_HOST_URL` and never pass
+  > Agent Disco runners only forward `CALF_HOST_URL` and never pass
   > credentials. So at present every cross-host / cross-env split
   > requires a broker URL reachable **without auth** — keep it on a
   > private network or VPC (the trusted-overlay path above), never the
@@ -570,7 +570,7 @@ reconnect unless the tool body imposes its own deadline.
 
 **Multiple tool hosts on the same `tool.<name>.input` topic.** Kafka
 consumer-group semantics: each partition delivers to exactly one
-consumer in the group. With calfcord's single-partition default,
+consumer in the group. With Agent Disco's single-partition default,
 exactly one consumer receives each call — effectively random per call.
 To intentionally scale horizontally, bump the partition count; to pin
 a tool to one host, see § 10.

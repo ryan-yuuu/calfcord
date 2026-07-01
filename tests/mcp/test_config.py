@@ -2,7 +2,7 @@
 
 The loader is the **server-path** half of the MCP boundary: it owns
 transport config and credential expansion, and is only ever imported by the
-``calfkit-mcp`` runner and the ``calfcord mcp`` CLI (never the agent path —
+``calfkit-mcp`` runner and the ``disco mcp`` CLI (never the agent path —
 pinned by ``test_import_isolation.py``).
 
 Pinned behaviors:
@@ -371,7 +371,7 @@ class TestLoadOneServer:
 
     def test_empty_registry_hints_add(self, tmp_path: Path) -> None:
         path = _write(tmp_path, {"mcpServers": {}})
-        with pytest.raises(McpConfigError, match="calfcord mcp add"):
+        with pytest.raises(McpConfigError, match="disco mcp add"):
             load_one_server(path, "anything")
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:

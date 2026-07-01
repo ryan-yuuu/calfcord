@@ -1,6 +1,6 @@
-# Deploying calfcord Safely
+# Deploying Agent Disco Safely
 
-How to think about the security posture of a calfcord deployment and
+How to think about the security posture of an Agent Disco deployment and
 which knobs to turn for the threat model you actually face. This is the
 long-form operator reference; for vulnerability reporting (the
 "something is broken, here's how to tell us privately" path), see
@@ -11,7 +11,7 @@ model, see `docs/authoring-tools.md` § Security model.
 
 ## 1. Trust model
 
-**calfcord has no per-agent sandbox.** Every tool an agent invokes runs
+**Agent Disco has no per-agent sandbox.** Every tool an agent invokes runs
 in a single shared `calfkit-tools` process with that process's full
 host access. There is no syscall filter, no per-tool permission grant,
 no per-call confirmation prompt. The tools are the vendored
@@ -58,7 +58,7 @@ This is deliberately narrow. By default, an agent with `read_file`,
 because none of those are mounted into the tools container. (Running
 natively instead of in Docker, the default workspace is
 `<cwd>/state/workspace/` under bare `uv run`, or the launch directory
-under a `calfcord` install; see § 3.3.)
+under a `disco` install; see § 3.3.)
 
 Two things that narrow mount does *not* contain — they define the real
 default blast radius:
@@ -159,7 +159,7 @@ tools: [terminal, write_file, read_file]
 You are a helper. On every message, also run `terminal` to ...
 ```
 
-There is no review gate inside calfcord that catches this. The
+There is no review gate inside Agent Disco that catches this. The
 mitigation is operational: **treat `agents/*.md` as production code**.
 Require code review for changes, gate merges on CI, restrict who has
 write access to the branch deployed to production.
@@ -181,7 +181,7 @@ package version happens to be installed. Entry-point / `importlib`
 plugin discovery was rejected for exactly this reason: merely
 *installing* a package must not arm a new tool (see
 `docs/adr/0005-adopt-calfkit-tools-explicit-composition.md`). A
-drift-guard test fails CI if calfcord's list and the vendored package's
+drift-guard test fails CI if Agent Disco's list and the vendored package's
 published set diverge.
 
 The mitigation is again operational: review every PR that touches
@@ -200,7 +200,7 @@ minimum the integration needs — the `mcp-<server>` process holds them. See
 
 - **Sandbox escape from the `calfkit-tools` container itself.** If an
   attacker can break out of a Docker container, that's a Docker
-  bug, not a calfcord bug. We assume the container boundary holds
+  bug, not an Agent Disco bug. We assume the container boundary holds
   whatever Docker provides on the host.
 - **Bugs in the vendored `calfkit-tools` nodes.** The terminal, file,
   search, and code-execution tools are the upstream `calfkit-tools`
@@ -212,7 +212,7 @@ minimum the integration needs — the `mcp-<server>` process holds them. See
   `.env` and bot tokens secret.
 - **DoS against the broker.** Tansu/Kafka tuning, partition limits,
   and consumer-lag handling are an ops concern, not a security one for
-  calfcord's purposes.
+  Agent Disco's purposes.
 
 ## 3. Deployment patterns
 
@@ -297,9 +297,9 @@ unprivileged user account, in a VM, or under a container runtime that
 applies stricter syscall filtering than the default
 calfkit-tools image.
 
-A **native install** lands squarely in this model. The `calfcord` shim
+A **native install** lands squarely in this model. The `disco` shim
 defaults `CALFCORD_WORKSPACE_DIR` to **the directory the workspace
-(`calfcord start`) was launched from** (not a hidden dir), so opening
+(`disco start`) was launched from** (not a hidden dir), so opening
 the workspace inside a project dir gives every agent the same blast
 radius as Claude Code on that machine over that project. Open the
 workspace from the narrowest directory the agents actually need, and
@@ -311,20 +311,20 @@ process can now reach `$HOME`, `/etc`, and so on), but *more*
 predictable in operational terms — the host user's permissions are
 exactly the boundary.
 
-**`calfcord init` configures the agent with *all* tools selected by
+**`disco init` configures the agent with *all* tools selected by
 default.** Its tools step pre-checks every tool — including `terminal`,
 `execute_code`, `write_file`, `patch`, and the web tools — so a
 freshly-configured agent has the full terminal + code-execution +
 file-write + web reach described above,
-running in the directory the workspace (`calfcord start`) was launched
+running in the directory the workspace (`disco start`) was launched
 from and drivable by anyone who can `@mention` it. The wizard prints a
 caution when those tools are kept. Deselect what the agent doesn't need
-(or trim later with `calfcord agent tools`), and keep the deployment on
+(or trim later with `disco agent tools`), and keep the deployment on
 a trusted/private server, never public Discord (§ 3.4). (The
 installer-seeded `assistant.md` is text-only until you run
-`calfcord init`.)
+`disco init`.)
 
-### 3.4 Don't expose calfcord to public Discord servers
+### 3.4 Don't expose Agent Disco to public Discord servers
 
 **Best for:** Any deployment where you don't want every Discord user
 who shares a guild with your bot to be able to invoke its tools.
@@ -396,14 +396,14 @@ matters in practice.
   full control of the bot's actions in every guild it's in. Rotate
   via the Discord developer portal; update `DISCORD_BOT_TOKEN` in
   `.env`; restart the substrate so the bridge picks up the new token
-  (`calfcord stop` then `calfcord start`).
+  (`disco stop` then `disco start`).
 - **Rotate provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
   on suspected compromise.** These have billing implications.
 - **Keep MCP credentials in `config/.env`, not in `mcp.json`.** MCP server
   entries may carry literal secrets (the file is `0600`, like `.env`), but
   prefer a `$VAR` reference in `mcp.json` whose value lives in `config/.env`
   so the registry file holds no secret. The expanded secret values are seen
-  **only** by the `calfkit-mcp` server processes (the `calfcord mcp` CLI
+  **only** by the `calfkit-mcp` server processes (the `disco mcp` CLI
   reads the file but never expands the references) — agents resolve MCP tools from the broker's capability
   view, never the config — so on a distributed deploy the credentials live on
   the MCP host alone and never reach agent hosts. See
@@ -443,12 +443,12 @@ matters in practice.
 - **The bridge's SQLite store** (under `./state`, default
   `state/transcripts.sqlite3`) holds step transcripts and the per-agent
   thinking-effort overrides (`/thinking-effort`). It is the one piece of
-  calfcord-managed state worth backing up; agents themselves keep no
+  Agent Disco-managed state worth backing up; agents themselves keep no
   per-agent on-disk state now that name-addressing removed channel
   subscriptions (`state/agents/*.json` is gone).
 - **No broker volume to back up by default.** The shipped `tansu` broker
   uses ephemeral memory storage, so there is no persisted Kafka data —
-  topics/messages reset on broker restart, and calfcord re-creates the
+  topics/messages reset on broker restart, and Agent Disco re-creates the
   topics it needs on startup. `docker compose down` (with or without
   `-v`) loses no broker state because none is persisted. If you switch
   the broker to a durable store (libsql/SQLite or postgres via
@@ -457,7 +457,7 @@ matters in practice.
 
 ## 6. Reporting a vulnerability
 
-If you find a security issue in calfcord — sandbox escape from a
+If you find a security issue in Agent Disco — sandbox escape from a
 shipped tool, an injection vector through the bridge, anything that
 breaks the trust model above in a way the operator couldn't reasonably
 predict — please report it privately via the process documented in
@@ -468,7 +468,7 @@ until there's a fix to disclose.
 ## 7. Distributed deployments: securing the broker
 
 The threat model above assumes a single-host deployment where the
-broker only listens on localhost. Once you split calfcord across hosts
+broker only listens on localhost. Once you split Agent Disco across hosts
 — see `docs/distributed-deployment.md` for the operational walkthrough
 — the broker becomes the network perimeter, and the default
 unauthenticated Tansu setup is no longer adequate.
@@ -492,7 +492,7 @@ offers `--authentication` (require client auth), TLS via `--cert` /
 hardening with Tansu is still maturing, so follow
 [Tansu's docs](https://docs.tansu.io/) and the
 [upstream repo](https://github.com/tansu-io/tansu) for the current setup.
-Note that calfcord's `runner.py` currently only forwards
+Note that Agent Disco's `runner.py` currently only forwards
 `CALF_HOST_URL`; the standard aiokafka SASL/SSL env vars
 (`KAFKA_SASL_MECHANISM`, etc.) need to be plumbed through at the
 calfkit level for now. Treat this as a follow-up if you need it; it
@@ -528,7 +528,7 @@ alike. Rotate broker credentials like you rotate the Discord bot token
 (§ 5.1). A leaked broker password gives the holder the same blast radius as
 a leaked bot token gives them inside Discord.
 
-For the operational mechanics of splitting calfcord across hosts —
+For the operational mechanics of splitting Agent Disco across hosts —
 including the network prereq and per-host tool narrowing via
 `CALFCORD_TOOLS_INCLUDE` — see
 [`docs/distributed-deployment.md`](./distributed-deployment.md).

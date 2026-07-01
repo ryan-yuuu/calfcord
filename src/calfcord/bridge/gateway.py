@@ -64,7 +64,7 @@ from calfcord.health.refresher import run_refresher
 logger = logging.getLogger(__name__)
 
 # The component name the bridge writes its heartbeat under and that
-# ``calfcord _healthcheck bridge`` reads back (design §4.2 / §12.1).
+# ``disco _healthcheck bridge`` reads back (design §4.2 / §12.1).
 _HEALTH_COMPONENT = "bridge"
 
 _SEEN_MESSAGE_IDS_CAPACITY = 1024
@@ -100,7 +100,7 @@ def _a2a_category_name() -> str | None:
 def _resolve_health_home() -> Path:
     """Resolve the install home the heartbeat lands under, matching the reader.
 
-    The ``calfcord _healthcheck bridge`` probe resolves the beat directory as
+    The ``disco _healthcheck bridge`` probe resolves the beat directory as
     ``_resolve_home() or Path()`` (``cli/main.py``): ``$CALFCORD_HOME`` when the
     shim exported it, else the launch directory. The bridge MUST mirror that
     exact resolution so the beat it writes lands where the probe looks for it; an

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# calfcord installer — native, no-prerequisites, reproducible one-line install.
+# Agent Disco installer — native, no-prerequisites, reproducible one-line install.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
 #
@@ -8,12 +8,12 @@
 #   1. bootstraps `uv` (a static binary) privately under ~/.calfcord
 #   2. pins + downloads the source for a single commit of `main` (tarball, no git)
 #   3. builds an isolated, locked venv with `uv sync --locked --no-dev`
-#   4. installs a `calfcord` command that thinly wraps `uv run` in that venv
+#   4. installs a `disco` command that thinly wraps `uv run` in that venv
 #
 # Each version is built in its own `versions/<sha>` dir (Python venvs are not
 # relocatable, so they must be built in their final home); a `current` symlink
 # is flipped only after a build succeeds, making activation atomic and rollback
-# a symlink flip. The command surface is a pure passthrough — `calfcord <x>`
+# a symlink flip. The command surface is a pure passthrough — `disco <x>`
 # forwards `<x>` to `uv run`, so new entry points need no installer changes.
 #
 # Env knobs:
@@ -30,7 +30,7 @@ REF="${CALFCORD_REF:-main}"
 CALFCORD_HOME="${CALFCORD_HOME:-$HOME/.calfcord}"
 
 BIN_DIR="$CALFCORD_HOME/bin"          # private uv (NOT placed on PATH)
-SHIM_DIR="$CALFCORD_HOME/shims"       # calfcord + calfcord-self (placed on PATH)
+SHIM_DIR="$CALFCORD_HOME/shims"       # disco + disco-self (placed on PATH)
 VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
@@ -61,14 +61,14 @@ if [ -t 2 ]; then
 else
   C_I=''; C_W=''; C_E=''; C_0=''
 fi
-log()  { printf '%scalfcord%s %s\n' "$C_I" "$C_0" "$*" >&2; }
-warn() { printf '%scalfcord%s %s\n' "$C_W" "$C_0" "$*" >&2; }
-die()  { printf '%scalfcord error%s %s\n' "$C_E" "$C_0" "$*" >&2; exit 1; }
+log()  { printf '%sdisco%s %s\n' "$C_I" "$C_0" "$*" >&2; }
+warn() { printf '%sdisco%s %s\n' "$C_W" "$C_0" "$*" >&2; }
+die()  { printf '%sdisco error%s %s\n' "$C_E" "$C_0" "$*" >&2; exit 1; }
 trap 'die "install failed: $BASH_COMMAND"' ERR
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# True if this uv supports the flags the calfcord shim relies on (notably
+# True if this uv supports the flags the disco shim relies on (notably
 # `uv run --env-file`, a relatively recent addition).
 uv_supported() { "$1" run --help 2>/dev/null | grep -q -- '--env-file'; }
 
@@ -145,7 +145,7 @@ ensure_uv() {
 
 # Download the pinned native Tansu broker binary into $BIN_DIR/tansu. Best
 # effort: an unsupported platform or a failed download WARNS and leaves
-# TANSU_OK=0 rather than aborting the install — calfcord can still run against a
+# TANSU_OK=0 rather than aborting the install — Agent Disco can still run against a
 # Docker or remote broker. Net-new vs ensure_uv (which delegates to uv's own
 # installer): Tansu ships raw per-target tarballs, so we detect the target
 # triple, fetch, extract bin/tansu, and clear the macOS quarantine xattr that
@@ -187,7 +187,7 @@ ensure_tansu() {
   fi
   # Guard the placement like every other step in this function: a filesystem
   # fault moving the OPTIONAL broker binary must not trip the ERR trap and abort
-  # the whole install (calfcord still runs against Docker / a remote broker).
+  # the whole install (Agent Disco still runs against Docker / a remote broker).
   if ! { mv "$tmp/bin/tansu" "$BIN_DIR/tansu" && chmod +x "$BIN_DIR/tansu"; }; then
     rm -rf "$tmp"
     warn "failed to install tansu into $BIN_DIR (filesystem/permissions?); native broker unavailable (use Docker or a remote broker)"
@@ -210,8 +210,8 @@ ensure_tansu() {
 # Download the pinned process-compose supervisor binary into
 # $BIN_DIR/process-compose. Mirrors ensure_tansu's best-effort contract: an
 # unsupported platform or any download/extract/placement failure WARNS and
-# leaves PROCESS_COMPOSE_OK=0 rather than aborting the install — calfcord can
-# still run its processes manually (`calfcord run …`) or under Docker without the
+# leaves PROCESS_COMPOSE_OK=0 rather than aborting the install — Agent Disco can
+# still run its processes manually (`disco run …`) or under Docker without the
 # native supervisor. Two deliberate divergences from ensure_tansu, both verified
 # against the real v1.110.0 release assets:
 #   * os/arch use the Go-style names process-compose ships (darwin/linux,
@@ -228,12 +228,12 @@ ensure_process_compose() {
   case "$(uname -s)" in
     Darwin) os="darwin" ;;
     Linux) os="linux" ;;
-    *) warn "no native process-compose for $(uname -s); run components manually (calfcord run …) or use Docker"; return 0 ;;
+    *) warn "no native process-compose for $(uname -s); run components manually (disco run …) or use Docker"; return 0 ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) arch="arm64" ;;
     x86_64 | amd64) arch="amd64" ;;
-    *) warn "no native process-compose for CPU $(uname -m); run components manually (calfcord run …) or use Docker"; return 0 ;;
+    *) warn "no native process-compose for CPU $(uname -m); run components manually (disco run …) or use Docker"; return 0 ;;
   esac
   local asset="process-compose_${os}_${arch}.tar.gz"
   # Capital F1bonacc1 is the actual GitHub org name — not a typo.
@@ -303,7 +303,7 @@ seed_config() {
   if [ ! -f "$CONFIG_DIR/mcp.json" ]; then
     printf '{\n  "mcpServers": {}\n}\n' > "$CONFIG_DIR/mcp.json"
     chmod 600 "$CONFIG_DIR/mcp.json"
-    log "seeded MCP config at $CONFIG_DIR/mcp.json (add servers with: calfcord mcp add)"
+    log "seeded MCP config at $CONFIG_DIR/mcp.json (add servers with: disco mcp add)"
   fi
   if [ -f "$CONFIG_ENV" ]; then
     log "keeping existing config at $CONFIG_ENV"
@@ -322,7 +322,7 @@ seed_config() {
 # bundled starter agent on first install. ``calfkit-agent`` resolves the agents
 # dir from CALFKIT_AGENTS_DIR — the shim points it at $AGENTS_DIR
 # ($CALFCORD_HOME/agents), so this pre-creates exactly the dir the runtime uses.
-# It lives outside the GC'd ``versions/<sha>`` tree to survive ``calfcord self
+# It lives outside the GC'd ``versions/<sha>`` tree to survive ``disco self
 # update``. Seeding only happens when the agents dir is empty, so an operator who
 # removed the starter (or added their own agents) is never clobbered on re-install.
 seed_agents() {
@@ -337,7 +337,7 @@ seed_agents() {
     SEEDED_STARTER=1
     log "seeded starter agent at $AGENTS_DIR/assistant.md"
   else
-    warn "no starter agent in source; create one with: calfcord init"
+    warn "no starter agent in source; create one with: disco init"
   fi
 }
 
@@ -397,25 +397,25 @@ gc_versions() {
 write_shims() {
   mkdir -p "$SHIM_DIR"
 
-  cat > "$SHIM_DIR/calfcord" <<'CALF_SHIM'
+  cat > "$SHIM_DIR/disco" <<'CALF_SHIM'
 #!/usr/bin/env bash
-# calfcord — thin passthrough to `uv run` inside the pinned install.
-# `calfcord <command> [args]` runs any console script in the locked env;
-# `calfcord self ...` handles install management. New entry points need no
+# disco — thin passthrough to `uv run` inside the pinned install.
+# `disco <command> [args]` runs any console script in the locked env;
+# `disco self ...` handles install management. New entry points need no
 # changes here.
 set -euo pipefail
 # shellcheck disable=SC2154  # rc is assigned by rc=$? at the start of the trap body
-trap 'rc=$?; printf "calfcord: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
+trap 'rc=$?; printf "disco: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
 export CALFCORD_HOME="$H"  # so calfcord-cli can locate config/.env and the agents dir
 
 if [ "${1:-}" = "self" ]; then
   shift
-  exec "$H/shims/calfcord-self" "$@"
+  exec "$H/shims/disco-self" "$@"
 fi
 
-# `calfcord broker` runs the bundled native Tansu broker (a standalone Rust
+# `disco broker` runs the bundled native Tansu broker (a standalone Rust
 # binary, NOT a uv console script, so it short-circuits before the uv passthrough
 # below). Defaults are supplied via env so an operator's env or passthrough CLI
 # args still override them: ephemeral memory storage, advertised on
@@ -423,7 +423,7 @@ fi
 if [ "${1:-}" = "broker" ]; then
   shift
   TANSU="$H/bin/tansu"
-  [ -x "$TANSU" ] || { echo "calfcord: native tansu broker not installed at $TANSU; re-run the installer, or use the Docker broker (docker compose up tansu)" >&2; exit 1; }
+  [ -x "$TANSU" ] || { echo "disco: native tansu broker not installed at $TANSU; re-run the installer, or use the Docker broker (docker compose up tansu)" >&2; exit 1; }
   exec env \
     STORAGE_ENGINE="${STORAGE_ENGINE:-memory://tansu/}" \
     ADVERTISED_LISTENER_URL="${ADVERTISED_LISTENER_URL:-tcp://localhost:9092}" \
@@ -433,35 +433,35 @@ fi
 usage() {
   cat <<'USAGE'
 usage:
-  calfcord init                  guided setup; ends with your first agent live in Discord
-  calfcord doctor                check config, broker, Discord token/app id, and agents
-  calfcord start                 open the workspace (broker + bridge — the always-on substrate)
-  calfcord stop                  stop the local org
-  calfcord status                show what's running locally
-  calfcord logs [component] [-f] tail unified or per-component logs
-  calfcord explain topology      explain how the pieces split, and why
-  calfcord deploy <systemd|k8s|docker> [-o PATH]
-                                 generate deployment manifests (advanced)
-  calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
-  calfcord run <bridge|agent|tools|mcp>
-                                 run a calfcord process in the pinned env
-  calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
-                                 manage agents (create/inspect/edit/rename/delete)
-  calfcord agent <start|stop|restart> [<name>|--all]
-                                 clock an agent (or every agent on this host) in/out/reload
-  calfcord tools <start|stop|restart> [--all]
-                                 bring the tools host online / offline / reload
-  calfcord mcp <add|list|remove> [<server>]
-                                 manage MCP servers in mcp.json
-  calfcord mcp <start|stop|restart> <server>|--all
-                                 bring MCP servers online / offline / reload
-  calfcord auth [args]           Codex (ChatGPT subscription) login
-  calfcord self <version|status|update|rollback|set-broker>
+  disco init                  guided setup; ends with your first agent live in Discord
+  disco doctor                check config, broker, Discord token/app id, and agents
+  disco start                 open the workspace (broker + bridge — the always-on substrate)
+  disco stop                  stop the local org
+  disco status                show what's running locally
+  disco logs [component] [-f] tail unified or per-component logs
+  disco explain topology      explain how the pieces split, and why
+  disco deploy <systemd|k8s|docker> [-o PATH]
+                              generate deployment manifests (advanced)
+  disco broker                run a local Tansu broker (ephemeral, localhost:9092)
+  disco run <bridge|agent|tools|mcp>
+                              run an Agent Disco process in the pinned env
+  disco agent <create|list|show|edit|set|rename|delete|tools> [<name>]
+                              manage agents (create/inspect/edit/rename/delete)
+  disco agent <start|stop|restart> [<name>|--all]
+                              clock an agent (or every agent on this host) in/out/reload
+  disco tools <start|stop|restart> [--all]
+                              bring the tools host online / offline / reload
+  disco mcp <add|list|remove> [<server>]
+                              manage MCP servers in mcp.json
+  disco mcp <start|stop|restart> <server>|--all
+                              bring MCP servers online / offline / reload
+  disco auth [args]           Codex (ChatGPT subscription) login
+  disco self <version|status|update|rollback|set-broker>
 USAGE
 }
 
 # Explicit help -> stdout, exit 0; a bare invocation -> usage on stderr, exit 2.
-# (stdout-for-help diverges from calfcord-self, which writes help to stderr; intentional.)
+# (stdout-for-help diverges from disco-self, which writes help to stderr; intentional.)
 case "${1:-}" in
   -h|--help|help) usage; exit 0 ;;
   "") usage >&2; exit 2 ;;
@@ -471,12 +471,12 @@ UV="$H/bin/uv"
 if [ ! -x "$UV" ]; then
   UV="$(command -v uv || true)"
 fi
-{ [ -n "$UV" ] && [ -x "$UV" ]; } || { echo "calfcord: uv not found; re-run the installer" >&2; exit 1; }
-[ -e "$H/current" ] || { echo "calfcord: no active install at $H/current; re-run the installer" >&2; exit 1; }
+{ [ -n "$UV" ] && [ -x "$UV" ]; } || { echo "disco: uv not found; re-run the installer" >&2; exit 1; }
+[ -e "$H/current" ] || { echo "disco: no active install at $H/current; re-run the installer" >&2; exit 1; }
 
 ENVF="$H/config/.env"
 
-# Default calfcord's runtime dirs into the install layout unless the operator
+# Default Agent Disco's runtime dirs into the install layout unless the operator
 # already chose them (shell env OR config .env wins — checked here so we don't
 # depend on `uv run --env-file` precedence). Agents and per-agent state live
 # under the install home so they survive `self update` and are found from any
@@ -497,13 +497,13 @@ _default_env CALFKIT_AGENTS_DIR     "$H/agents"
 _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 
 # Translate friendly verbs to the underlying console scripts. Management verbs go to the
-# calfcord-cli argparse entry point; raw `calfcord calfkit-*` runner names aren't matched
+# calfcord-cli argparse entry point; raw `disco calfkit-*` runner names aren't matched
 # here and fall through to the `uv run` passthrough below, so they keep working unchanged.
 case "${1:-}" in
   # Management + day-to-day lifecycle verbs all resolve to the calfcord-cli
   # argparse entry point. `start|stop|status` drive the process-compose
   # supervisor; `_healthcheck` is the readiness-probe command PC's exec probes
-  # invoke (`calfcord _healthcheck <component>`). These are listed explicitly so
+  # invoke (`disco _healthcheck <component>`). These are listed explicitly so
   # they don't fall through to the `uv run` passthrough (which would try to exec
   # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
   # verb group (the singleton tools-host lifecycle: `tools start|stop|restart`);
@@ -529,11 +529,11 @@ else
 fi
 CALF_SHIM
 
-  cat > "$SHIM_DIR/calfcord-self" <<'CALF_SELF'
+  cat > "$SHIM_DIR/disco-self" <<'CALF_SELF'
 #!/usr/bin/env bash
-# calfcord self-management: version | status | update | rollback | set-broker
+# disco self-management: version | status | update | rollback | set-broker
 set -euo pipefail
-trap 'rc=$?; printf "calfcord self: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
+trap 'rc=$?; printf "disco self: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 H="${CALFCORD_HOME:-$HOME/.calfcord}"
 VERSION_FILE="$H/version"
@@ -576,7 +576,7 @@ remote_sha() {
       wget -qO- --header='Accept: application/vnd.github.sha' "$url"
     fi
   else
-    echo "calfcord self: need curl or wget" >&2; return 1
+    echo "disco self: need curl or wget" >&2; return 1
   fi
 }
 
@@ -593,27 +593,27 @@ case "$cmd" in
     [ -n "$have" ] || { echo "no install metadata; re-run the installer" >&2; exit 1; }
     ref="${CALFCORD_REF:-main}"
     if ! latest="$(remote_sha "$ref")" || [ -z "$latest" ]; then
-      echo "calfcord self: could not reach GitHub to check for updates (offline or rate-limited)" >&2
+      echo "disco self: could not reach GitHub to check for updates (offline or rate-limited)" >&2
       exit 1
     fi
     if [ "$have" = "$latest" ]; then
       echo "up to date ($(short "$have") on $ref)"
     else
       echo "outdated: have $(short "$have"), latest $(short "$latest") on $ref"
-      echo "run 'calfcord self update' to upgrade"
+      echo "run 'disco self update' to upgrade"
     fi
     ;;
   update)
     url="https://raw.githubusercontent.com/$REPO/main/scripts/install.sh"
     ref="${CALFCORD_REF:-main}"
-    echo "calfcord: updating $REPO ($ref)..." >&2
+    echo "disco: updating $REPO ($ref)..." >&2
     tmp="$(mktemp)"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$url" -o "$tmp" || { echo "calfcord self: update download failed" >&2; rm -f "$tmp"; exit 1; }
+      curl -fsSL "$url" -o "$tmp" || { echo "disco self: update download failed" >&2; rm -f "$tmp"; exit 1; }
     else
-      wget -qO- "$url" > "$tmp" || { echo "calfcord self: update download failed" >&2; rm -f "$tmp"; exit 1; }
+      wget -qO- "$url" > "$tmp" || { echo "disco self: update download failed" >&2; rm -f "$tmp"; exit 1; }
     fi
-    [ -s "$tmp" ] || { echo "calfcord self: downloaded installer is empty" >&2; rm -f "$tmp"; exit 1; }
+    [ -s "$tmp" ] || { echo "disco self: downloaded installer is empty" >&2; rm -f "$tmp"; exit 1; }
     # Re-run for the SAME ref/repo/home this install used, not a hardcoded main.
     rc=0
     CALFCORD_REPO="$REPO" CALFCORD_REF="$ref" CALFCORD_HOME="$H" bash "$tmp" || rc=$?
@@ -625,7 +625,7 @@ case "$cmd" in
     cur_sha="$(basename "$(readlink "$CURRENT_LINK")")"
     prev="${CALFCORD_PREVIOUS_COMMIT:-}"
     if [ -z "$prev" ] || [ ! -f "$VERSIONS_DIR/$prev/.calfcord-ok" ]; then
-      echo "calfcord self: no valid previous version to roll back to" >&2
+      echo "disco self: no valid previous version to roll back to" >&2
       exit 1
     fi
     ln -sfn "$VERSIONS_DIR/$prev" "$CURRENT_LINK"
@@ -641,23 +641,23 @@ EOF
     ;;
   set-broker)
     val="${1:-}"
-    [ -n "$val" ] || { echo "usage: calfcord self set-broker <host:port>" >&2; exit 2; }
+    [ -n "$val" ] || { echo "usage: disco self set-broker <host:port>" >&2; exit 2; }
     mkdir -p "$(dirname "$CONFIG_ENV")"
     [ -f "$CONFIG_ENV" ] || { : > "$CONFIG_ENV"; chmod 600 "$CONFIG_ENV"; }
     tmp="$(mktemp)"
     rc=0
     grep -v '^CALF_HOST_URL=' "$CONFIG_ENV" > "$tmp" || rc=$?
     if [ "$rc" -gt 1 ]; then
-      echo "calfcord self: failed to read $CONFIG_ENV (grep exit $rc)" >&2; rm -f "$tmp"; exit 1
+      echo "disco self: failed to read $CONFIG_ENV (grep exit $rc)" >&2; rm -f "$tmp"; exit 1
     fi
-    echo "CALF_HOST_URL=$val" >> "$tmp" || { echo "calfcord self: failed to write $CONFIG_ENV" >&2; rm -f "$tmp"; exit 1; }
+    echo "CALF_HOST_URL=$val" >> "$tmp" || { echo "disco self: failed to write $CONFIG_ENV" >&2; rm -f "$tmp"; exit 1; }
     mv "$tmp" "$CONFIG_ENV"
     chmod 600 "$CONFIG_ENV"
     echo "set CALF_HOST_URL=$val in $CONFIG_ENV"
     ;;
   ""|-h|--help|help)
     cat >&2 <<'USAGE'
-calfcord self <command>:
+disco self <command>:
   version              show installed commit + timestamp
   status               compare installed commit to the latest on the branch
   update               re-run the installer to upgrade to the latest
@@ -668,13 +668,19 @@ USAGE
     exit 0
     ;;
   *)
-    echo "calfcord self: unknown command '$cmd'" >&2
+    echo "disco self: unknown command '$cmd'" >&2
     exit 2
     ;;
 esac
 CALF_SELF
 
-  chmod +x "$SHIM_DIR/calfcord" "$SHIM_DIR/calfcord-self"
+  chmod +x "$SHIM_DIR/disco" "$SHIM_DIR/disco-self"
+
+  # Clean cutover: remove any command shims from a pre-rename install so no
+  # stale command lingers on PATH (there is no compatibility alias). The glob
+  # matches only the old-named shims (the command shim + its self sibling); the
+  # fresh disco shims written above are untouched.
+  rm -f "$SHIM_DIR"/calfcord* 2>/dev/null || true
 }
 
 ensure_path() {
@@ -689,7 +695,7 @@ ensure_path() {
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     [ -e "$rc" ] || continue
     if ! grep -qsF "$SHIM_DIR" "$rc"; then
-      printf '\n# calfcord\n%s\n' "$line" >> "$rc"
+      printf '\n# disco\n%s\n' "$line" >> "$rc"
       log "added $SHIM_DIR to PATH in $rc"
       added=1
     fi
@@ -705,7 +711,7 @@ ensure_path() {
 # -------------------------------------------------------------------- main ---
 main() {
   require_bash
-  log "installing calfcord from $REPO @ $REF"
+  log "installing Agent Disco from $REPO @ $REF"
   mkdir -p "$CALFCORD_HOME" "$VERSIONS_DIR"
   ensure_uv
   ensure_tansu
@@ -721,26 +727,26 @@ main() {
   write_shims
   ensure_path
   log "done."
-  log "  version:  calfcord self version"
-  log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: calfcord self set-broker <url>)"
+  log "  version:  disco self version"
+  log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: disco self set-broker <url>)"
   if [ "$TANSU_OK" -eq 1 ]; then
-    log "  broker:   calfcord broker   (native Tansu, ephemeral, localhost:9092)"
+    log "  broker:   disco broker   (native Tansu, ephemeral, localhost:9092)"
   else
     log "  broker:   native broker unavailable — use Docker (docker compose up tansu) or a remote CALF_HOST_URL"
   fi
   if [ "$PROCESS_COMPOSE_OK" -eq 1 ]; then
     log "  supervisor: process-compose $PROCESS_COMPOSE_VERSION installed"
   else
-    log "  supervisor: process-compose unavailable — run components manually (calfcord run …) or use Docker"
+    log "  supervisor: process-compose unavailable — run components manually (disco run …) or use Docker"
   fi
   if [ "$SEEDED_STARTER" -eq 1 ]; then
     log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
   else
     log "  agents:   $AGENTS_DIR"
   fi
-  log "  check:    calfcord doctor"
-  log "  setup:    calfcord init      (guided; ends with your first agent live in Discord)"
-  log "  status:   calfcord status    (the org board, once you're up)"
+  log "  check:    disco doctor"
+  log "  setup:    disco init      (guided; ends with your first agent live in Discord)"
+  log "  status:   disco status    (the org board, once you're up)"
 }
 
 # Run main only when executed (``bash install.sh``) or piped (``curl | bash``),

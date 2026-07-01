@@ -7,7 +7,7 @@ from Python directly, so we drive the *actual shell* here:
 * ``seed_agents`` — must give the native install a stable agents home and
   drop in the starter agent on first install, **without** clobbering an
   operator who removed the starter or added their own agents.
-* the generated ``calfcord`` shim's ``_default_env`` block — must default
+* the generated ``disco`` shim's ``_default_env`` block — must default
   ``CALFKIT_AGENTS_DIR`` under the install home and ``CALFCORD_WORKSPACE_DIR``
   to the *launch* directory, while letting an operator override either of them
   via the shell env or ``config/.env``.
@@ -63,11 +63,11 @@ def _make_source_dest(tmp: Path, *, with_assistant: bool = True) -> Path:
 def _install_shims(home: Path) -> None:
     result = _source_and_run("write_shims", home=home)
     assert result.returncode == 0, result.stderr
-    assert (home / "shims" / "calfcord").exists()
+    assert (home / "shims" / "disco").exists()
 
 
 def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Invoke the generated ``calfcord`` shim and capture the env the fake uv saw."""
+    """Invoke the generated ``disco`` shim and capture the env the fake uv saw."""
     (home / "bin").mkdir(parents=True, exist_ok=True)
     uv = home / "bin" / "uv"
     uv.write_text(_FAKE_UV)
@@ -80,7 +80,7 @@ def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str,
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
-        [str(home / "shims" / "calfcord"), "calfkit-agent"],
+        [str(home / "shims" / "disco"), "calfkit-agent"],
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -231,14 +231,14 @@ def _run_shim_argv(home: Path, argv: list[str]) -> str:
 
 
 def test_shim_dispatches_init_to_calfcord_cli(tmp_path: Path) -> None:
-    """``calfcord init`` must exec ``calfcord-cli init`` through the same `uv run`."""
+    """``disco init`` must exec ``calfcord-cli init`` through the same `uv run`."""
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_argv(home, ["init"]) == "calfcord-cli init"
 
 
 def test_shim_dispatches_agent_to_calfcord_cli(tmp_path: Path) -> None:
-    """``calfcord agent tools`` must exec ``calfcord-cli agent tools`` unchanged."""
+    """``disco agent tools`` must exec ``calfcord-cli agent tools`` unchanged."""
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_argv(home, ["agent", "tools"]) == "calfcord-cli agent tools"
@@ -252,7 +252,7 @@ def test_shim_passes_runner_commands_through_unchanged(tmp_path: Path) -> None:
 
 
 def test_shim_run_maps_services_to_runner_scripts(tmp_path: Path) -> None:
-    """``calfcord run <svc>`` is the friendly form of ``calfcord calfkit-<svc>``."""
+    """``disco run <svc>`` is the friendly form of ``disco calfkit-<svc>``."""
     home = tmp_path / "home"
     _install_shims(home)
     assert _run_shim_argv(home, ["run", "bridge"]) == "calfkit-bridge"
@@ -279,7 +279,7 @@ def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
         # the calfcord-cli argparse entry point, with their sub-args forwarded
         # verbatim. If the dispatch ever lets one fall through to the bare uv-run
         # passthrough, the shim would try to exec a nonexistent `logs`/`explain`/
-        # `deploy` console script and `calfcord logs`/`explain`/`deploy` would
+        # `deploy` console script and `disco logs`/`explain`/`deploy` would
         # break — which this guards against.
         (["logs"], "calfcord-cli logs"),
         (["logs", "broker", "-f"], "calfcord-cli logs broker -f"),
@@ -324,7 +324,7 @@ def _run_shim_proc(home: Path, argv: list[str]) -> subprocess.CompletedProcess[s
     (home / "config" / ".env").write_text("")
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
-        [str(home / "shims" / "calfcord"), *argv],
+        [str(home / "shims" / "disco"), *argv],
         env=env,
         capture_output=True,
         text=True,
@@ -373,8 +373,32 @@ def test_shim_exports_calfcord_home(tmp_path: Path) -> None:
     """The shim must export CALFCORD_HOME so calfcord-cli can locate config + agents."""
     home = tmp_path / "home"
     _install_shims(home)
-    shim_text = (home / "shims" / "calfcord").read_text()
+    shim_text = (home / "shims" / "disco").read_text()
     assert 'export CALFCORD_HOME="$H"' in shim_text
+
+
+def test_write_shims_removes_legacy_shims(tmp_path: Path) -> None:
+    """Clean cutover: a re-run deletes any pre-rename command shims.
+
+    The command was renamed from the old name to ``disco`` with no compat alias,
+    so an install/re-run must leave no stale command on PATH — the legacy shim
+    and its self-management sibling are removed if present.
+    """
+    home = tmp_path / "home"
+    shims = home / "shims"
+    shims.mkdir(parents=True)
+    legacy = shims / "calfcord"
+    legacy_self = shims / ("calfcord" + "-self")  # composed to avoid a literal stale ref
+    legacy.write_text("#legacy\n")
+    legacy_self.write_text("#legacy\n")
+
+    result = _source_and_run("write_shims", home=home)
+    assert result.returncode == 0, result.stderr
+    # New command lands, legacy command is gone.
+    assert (shims / "disco").exists()
+    assert (shims / ("disco" + "-self")).exists()
+    assert not legacy.exists()
+    assert not legacy_self.exists()
 
 
 @pytest.mark.skipif(not INSTALL_SH.exists(), reason="installer script missing")
@@ -509,15 +533,15 @@ def test_gc_versions_prunes_nothing_with_only_cur_and_prev(tmp_path: Path) -> No
     assert bbb.is_dir()
 
 
-# -------------------------------------------------------- calfcord-self rollback ---
+# -------------------------------------------------------- disco-self rollback ---
 
 
 def _run_self(home: Path, argv: list[str]) -> subprocess.CompletedProcess:
-    """Invoke the generated ``calfcord-self`` shim against ``$CALFCORD_HOME=home``."""
+    """Invoke the generated ``disco-self`` shim against ``$CALFCORD_HOME=home``."""
     _install_shims(home)
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
-        [str(home / "shims" / "calfcord-self"), *argv],
+        [str(home / "shims" / ("disco" + "-self")), *argv],
         env=env,
         capture_output=True,
         text=True,
@@ -560,7 +584,7 @@ def test_self_rollback_refuses_when_previous_lacks_ok_marker(tmp_path: Path) -> 
     assert (home / "current").resolve() == bbb.resolve()
 
 
-# ------------------------------------------------------ calfcord-self set-broker ---
+# ------------------------------------------------------ disco-self set-broker ---
 
 
 def _read_config_env(home: Path) -> str:
@@ -652,7 +676,7 @@ def test_ensure_path_is_idempotent(tmp_path: Path) -> None:
     shim_dir = str(home / "shims")
     # The shim dir is wired into PATH exactly once, not appended on every run.
     assert text.count(shim_dir) == 1
-    assert text.count("# calfcord") == 1
+    assert text.count("# disco") == 1
 
 
 # -------------------------------------------------- meta() parses, never sources ---
@@ -663,7 +687,7 @@ def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
 
     ``meta()`` reads the marker by line-parsing, so a value containing a command
     substitution / backticks must NOT run. We plant such a value, run a
-    ``calfcord-self`` command that reads the marker (``version``), and assert no
+    ``disco-self`` command that reads the marker (``version``), and assert no
     side-effect file was created.
     """
     home = tmp_path / "home"
@@ -686,7 +710,7 @@ def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
 
 
 def test_shim_run_maps_mcp_to_runner_script(tmp_path: Path) -> None:
-    """``calfcord run mcp <server>`` is the supervised slot's command — it must
+    """``disco run mcp <server>`` is the supervised slot's command — it must
     resolve to ``calfkit-mcp <server>``."""
     home = tmp_path / "home"
     _install_shims(home)

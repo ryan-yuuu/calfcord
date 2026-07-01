@@ -1,4 +1,4 @@
-"""The editable-field registry: one source of truth for ``calfcord agent`` edits.
+"""The editable-field registry: one source of truth for ``disco agent`` edits.
 
 Three surfaces onto an agent's ``.md`` — the interactive ``edit``
 menu (which rows exist, in what order, showing each field's current value), the

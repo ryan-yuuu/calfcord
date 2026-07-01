@@ -1,6 +1,6 @@
 """Gated REAL-broker test for the production broker-reachability healthcheck.
 
-The Process Compose readiness probe (``calfcord _healthcheck broker``) must prove
+The Process Compose readiness probe (``disco _healthcheck broker``) must prove
 the broker can *serve metadata*, not just that a port is bound — Tansu is
 no-auto-create, so a bound socket alone does not mean it can answer (design §12.1
 / §13.2). :func:`calfcord.health.check.default_broker_probe` does a real

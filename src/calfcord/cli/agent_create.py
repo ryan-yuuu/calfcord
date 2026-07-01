@@ -1,4 +1,4 @@
-"""``calfcord agent create [<name>]`` — the reusable agent-creation flow.
+"""``disco agent create [<name>]`` — the reusable agent-creation flow.
 
 This is the one place the "name → describe → provider/model → tools → write"
 sequence lives, so the two surfaces that need it — the standalone ``agent
@@ -174,7 +174,7 @@ def create_agent(
 
 
 def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | None = None) -> int:
-    """``calfcord agent create [<name>]``: create one agent and return an exit code.
+    """``disco agent create [<name>]``: create one agent and return an exit code.
 
     The standalone create command: it runs :func:`create_agent` with
     ``prune_seed=False`` (adding an agent must never delete the operator's
@@ -186,7 +186,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     On success it names the created agent then prints the terse next-step block
     (behavior #3): a sentence ending in a colon, a blank line, the indented
     command. A brand-new agent comes online via the roster verb (the new
-    substrate/roster model), so the steer is ``calfcord agent start <name>`` — not
+    substrate/roster model), so the steer is ``disco agent start <name>`` — not
     the old runner-restart banner. Per the CLI error-handling convention, a write
     failure (``ValueError``/``OSError`` from the validate-before-write path) is
     reported as a single ``error:`` line and returns 1 with no success banner —
@@ -211,5 +211,5 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
         return 1
 
     print(f"Created agent {created.name!r}.")
-    print(f"Bring {created.name} online:\n\n  calfcord agent start {created.name}")
+    print(f"Bring {created.name} online:\n\n  disco agent start {created.name}")
     return 0

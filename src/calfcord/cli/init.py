@@ -1,4 +1,4 @@
-"""``calfcord init`` — one continuous, resumable guided setup that ends LIVE.
+"""``disco init`` — one continuous, resumable guided setup that ends LIVE.
 
 This is the onboarding alternative to hand-editing ``.env`` *and* hand-writing an
 ``agents/<name>.md``. It walks the operator through one agent end to end, then —
@@ -238,7 +238,7 @@ def run(
     checkpoint_file = setup_state.checkpoint_path(home)
     checkpoint = setup_state.load(checkpoint_file) or setup_state.SetupCheckpoint()
 
-    print("calfcord init — configuring", env_path)
+    print("disco init — configuring", env_path)
     # Advisory resume greeting: only when the checkpoint claims the agent step is
     # done AND the real .md still parses (re-verify, never trust the flag alone).
     resuming = (
@@ -368,7 +368,7 @@ def _run_discord(
     print("Invite the bot to your server:")
     print(f"    {discord_discovery.invite_url(app_id)}")
     print(f"  {discord_discovery.INTENTS_REMINDER}")
-    print("  (Ctrl-C is safe & resumable — re-run `calfcord init` to pick up where you left off.)")
+    print("  (Ctrl-C is safe & resumable — re-run `disco init` to pick up where you left off.)")
     print()
     print("Waiting for the bot to join a server…")
 
@@ -382,7 +382,7 @@ def _run_discord(
         print("    - did you click Authorize on the invite link?")
         print("    - are the Message Content and Server Members intents enabled?")
         print("    - do you have Manage Server on the server you tried to add it to?")
-        print("  No server yet? Create one in Discord (the + button), then re-run `calfcord init`.")
+        print("  No server yet? Create one in Discord (the + button), then re-run `disco init`.")
         return checkpoint
     except discord_discovery.DiscordDiscoveryError as e:
         # Rate-limited / unreachable on the one-shot poll: surface and degrade.
@@ -508,7 +508,7 @@ def _pick_channel(
         if listing.unpostable:
             names = ", ".join(f"#{c.name}" for c in listing.unpostable)
             print(f"  the bot can see {names} but can't post there (needs Send Messages + Manage Webhooks).")
-            print("  Grant those permissions on a channel (or the bot's role), then re-run `calfcord init`.")
+            print("  Grant those permissions on a channel (or the bot's role), then re-run `disco init`.")
         else:
             print("  this server has no text channels the bot can post in — re-run init after adding one.")
         return None
@@ -550,7 +550,7 @@ def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
     elif not current.get(_BROKER_VAR):
         print(
             f"  warning: no {_BROKER_VAR} is set — the processes won't start until one "
-            f"is (re-run 'calfcord init' or run 'calfcord self set-broker <url>')."
+            f"is (re-run 'disco init' or run 'disco self set-broker <url>')."
         )
 
 
@@ -585,7 +585,7 @@ def _run_finish(
       into a workspace that isn't up);
     * agent start failed → stop before the presence watch;
     * agent seen online → 🎉; timed out → the bounded "org is live — try it
-      yourself / run ``calfcord doctor``" downgrade.
+      yourself / run ``disco doctor``" downgrade.
     """
     pc_binary_fn = pc_binary_fn or _default_pc_binary
 
@@ -637,7 +637,7 @@ async def _finish_live(
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
     # supervised process execs under, the broker URL, the defined roster, and
-    # the mcp.json servers. Unlike `calfcord start`, a broken mcp.json is a
+    # the mcp.json servers. Unlike `disco start`, a broken mcp.json is a
     # WARNING here: onboarding's job is reaching a live org, and MCP slots are
     # optional — the strict readers surface the error for fixing afterwards.
     from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
@@ -647,7 +647,7 @@ async def _finish_live(
     except McpConfigError as exc:
         print(f"  warning: skipping MCP servers ({exc})")
         mcp_servers = []
-    launcher = str(home / "shims" / "calfcord")
+    launcher = str(home / "shims" / "disco")
     rc = await start_fn(
         home,
         server_urls=server_urls,
@@ -661,7 +661,7 @@ async def _finish_live(
         print(
             "  the workspace didn't come up. If the broker is running, the bridge's "
             "privileged intents are probably off — enable Message Content and Server "
-            "Members on the Bot tab, then re-run `calfcord init`."
+            "Members on the Bot tab, then re-run `disco init`."
         )
         return rc
 
@@ -719,10 +719,10 @@ async def _finish_live(
     else:
         # Bounded fallback (§12.6): never promise more than we detected.
         print(
-            f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `calfcord doctor`."
+            f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `disco doctor`."
         )
     print()
-    print(f"({_REBOOT_NOTE} `calfcord start` reopens it; `calfcord status` shows who's online.)")
+    print(f"({_REBOOT_NOTE} `disco start` reopens it; `disco status` shows who's online.)")
     return 0
 
 
@@ -734,10 +734,10 @@ def _print_manual_finish(name: str) -> None:
     the operator is never stranded at "configured, now what?".
     """
     print(f"Set up agent '{name}'. To bring it online:")
-    print("    calfcord start")
-    print(f"    calfcord agent start {name}")
+    print("    disco start")
+    print(f"    disco agent start {name}")
     print(f"Then in Discord, say: @{name} hello")
-    print(f"({_REBOOT_NOTE} Re-run `calfcord start` after a reboot.)")
+    print(f"({_REBOOT_NOTE} Re-run `disco start` after a reboot.)")
 
 
 def _supervisor_available(pc_binary_fn: Callable[[], str]) -> bool:

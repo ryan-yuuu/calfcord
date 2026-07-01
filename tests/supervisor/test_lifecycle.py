@@ -275,7 +275,7 @@ async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=["assistant"],
         client=client,
         spawn=spawn,
@@ -312,7 +312,7 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=["assistant"],
         client=client,
         spawn=spawn,
@@ -381,7 +381,7 @@ async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) ->
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=["assistant"],
         mcp_servers=["github"],
         client=client,
@@ -394,7 +394,7 @@ async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) ->
     assert code == 0
     project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
     proc = project["processes"]["mcp-github"]
-    assert proc["command"] == "/h/shims/calfcord run mcp github"
+    assert proc["command"] == "/h/shims/disco run mcp github"
     assert proc["disabled"] is True
 
 
@@ -416,7 +416,7 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=["assistant", "scribe"],
         client=client,
         spawn=spawn,
@@ -472,7 +472,7 @@ async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
     await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
@@ -500,7 +500,7 @@ async def test_start_waits_for_rest_server_then_primes(tmp_path, fake_pc_bin) ->
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
@@ -534,7 +534,7 @@ async def test_start_fails_fast_when_broker_unreachable(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=spawn,
@@ -552,7 +552,7 @@ async def test_start_fails_fast_when_broker_unreachable(
     out = capsys.readouterr().out.lower()
     assert "broker" in out
     assert "localhost:9092" in out
-    assert "calfcord broker" in out
+    assert "disco broker" in out
 
 
 # --- start: readiness timeout -> teardown -> non-zero -----------------------
@@ -575,7 +575,7 @@ async def test_start_readiness_timeout_tears_down_and_returns_nonzero(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=spawn,
@@ -622,7 +622,7 @@ async def test_start_running_but_not_ready_bridge_times_out_and_tears_down(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=spawn,
@@ -645,7 +645,7 @@ async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
     # Fix #5: the priming reconcile (`update_project`) runs AFTER the detached
     # supervisor is already up. If it raises (a PC reconcile error / transport
     # failure), an unhandled exception would orphan the supervisor and dump a
-    # traceback — crashing `calfcord init`, since `start` is the wizard's start_fn.
+    # traceback — crashing `disco init`, since `start` is the wizard's start_fn.
     # It must fail like the readiness-gate path right below it: tear the substrate
     # back down via the BLOCKING seam, print an actionable error, and return 1.
     home = _home(tmp_path)
@@ -663,7 +663,7 @@ async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=spawn,
@@ -706,7 +706,7 @@ async def test_start_server_up_timeout_returns_nonzero_without_priming(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
@@ -735,7 +735,7 @@ async def test_start_readiness_tolerates_transient_bridge_error(
     code = await lifecycle.start(
         home,
         server_urls="localhost:9092",
-        launcher="/h/shims/calfcord",
+        launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
@@ -845,7 +845,7 @@ async def test_status_not_running(tmp_path, capsys) -> None:
     assert code == 0
     out = capsys.readouterr().out.lower()
     assert "not running" in out
-    assert "calfcord start" in out
+    assert "disco start" in out
 
 
 async def test_status_running_renders_board(tmp_path, capsys) -> None:

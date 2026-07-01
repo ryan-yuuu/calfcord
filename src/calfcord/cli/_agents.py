@@ -1,13 +1,13 @@
 """Shared agent-directory inspection and ``.md`` write helpers for the CLI.
 
-Both ``calfcord init`` (which *reports* the agents an install would load) and
-``calfcord agent tools`` (which *picks* one to edit) need the same answer to
+Both ``disco init`` (which *reports* the agents an install would load) and
+``disco agent tools`` (which *picks* one to edit) need the same answer to
 "which ``.md`` files are live agents?". Factoring :func:`detect_agents` here
 keeps that one definition from drifting between the two callers — a mismatch
 would let ``init`` report an agent the editor can't open, or vice versa.
 
 This module also owns the agent-file *write* and *identity* helpers that both
-``calfcord init`` (first-run setup) and ``calfcord agent create`` build on:
+``disco init`` (first-run setup) and ``disco agent create`` build on:
 slugifying a typed name into a valid stem, deriving a default display name and
 body, the create/update :func:`write_agent` path, and the tools-checkbox
 builder :func:`pick_tools`. They live here rather than in ``init`` so the two

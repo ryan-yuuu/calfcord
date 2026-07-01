@@ -1,4 +1,4 @@
-"""``calfcord explain <topic>`` — read-only teaching screens for the runtime model.
+"""``disco explain <topic>`` — read-only teaching screens for the runtime model.
 
 This is the graduation-tier command that installs the mental model the rest of
 calfcord assumes: the **substrate** (the always-on background office) versus the
@@ -76,15 +76,15 @@ def run(topic: str, *, out: OutputSink = print) -> int:
 # content tests pinned to one place. Wording follows design §11.2's "what you just
 # built" teaching block and ``docs/architecture.md``'s four-process model.
 _TOPOLOGY = """\
-calfcord: how the pieces split, and why
-=======================================
+Agent Disco: how the pieces split, and why
+==========================================
 
-calfcord runs as two layers over a shared message bus (Kafka, via Tansu). You
-manage both with the same `calfcord` command, on one machine or twenty.
+Agent Disco runs as two layers over a shared message bus (Kafka, via Tansu). You
+manage both with the same `disco` command, on one machine or twenty.
 
 The substrate — your always-on workspace
 -----------------------------------------
-`calfcord start` opens the substrate and nothing else:
+`disco start` opens the substrate and nothing else:
 
   - broker   the Kafka message bus every other process talks through.
   - bridge   the single Discord gateway (calfkit-bridge): it turns Discord
@@ -106,8 +106,8 @@ Roster members join the *running* workspace on demand and leave when stopped:
              tools on the bus. The only processes holding MCP credentials —
              agents pick the tools up from the advertisement, never the config.
 
-  `calfcord agent start <name>` brings a teammate online; `calfcord status`
-  shows who is in the office; `calfcord stop` closes it.
+  `disco agent start <name>` brings a teammate online; `disco status`
+  shows who is in the office; `disco stop` closes it.
 
 The four process types
 ----------------------

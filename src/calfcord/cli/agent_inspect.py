@@ -1,4 +1,4 @@
-"""``calfcord agent list`` / ``calfcord agent show`` — read-only agent inspection.
+"""``disco agent list`` / ``disco agent show`` — read-only agent inspection.
 
 These two commands let an operator survey the install ("which agents exist, on
 what model, with how many tools?") and drill into one ("show me every field this
@@ -114,7 +114,7 @@ def _parse_all(agents_dir: Path) -> tuple[list[AgentDefinition], list[str]]:
 
 
 def run_list(agents_dir: Path, *, as_json: bool = False) -> int:
-    """``calfcord agent list``: survey every agent in ``agents_dir``.
+    """``disco agent list``: survey every agent in ``agents_dir``.
 
     Parses each detected agent (skipping dotfiles / ``*.template.md`` templates,
     matching the loader) and prints either an aligned NAME / PROVIDER·MODEL /
@@ -173,7 +173,7 @@ def _print_table(agents: list[AgentDefinition]) -> None:
 
 
 def run_show(agents_dir: Path, name: str, *, as_json: bool = False) -> int:
-    """``calfcord agent show <name>``: print one agent's full configuration.
+    """``disco agent show <name>``: print one agent's full configuration.
 
     Parses ``agents_dir/<name>.md``; a missing or unparseable file prints an
     ``error: ...`` line and returns 1 (operator-recoverable, per the CLI

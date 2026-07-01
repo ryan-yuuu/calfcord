@@ -36,7 +36,7 @@ def test_one_hint_string_is_shared_by_every_surface() -> None:
 
     assert roster._NOT_RUNNING_HINT is _workspace.WORKSPACE_NOT_RUNNING_HINT
     assert component._NOT_RUNNING_HINT is _workspace.WORKSPACE_NOT_RUNNING_HINT
-    assert "calfcord start" in _workspace.WORKSPACE_NOT_RUNNING_HINT
+    assert "disco start" in _workspace.WORKSPACE_NOT_RUNNING_HINT
 
 
 def test_resolve_client_passes_through_an_injected_client() -> None:

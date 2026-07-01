@@ -12,7 +12,7 @@ physical half of the ps union).
 The contracts pinned here are the distributed-correct duplicate guard (§3.5 —
 refuse to start a name already live anywhere, CLI-side, without a bridge change),
 the not-declared-agent reload path (§13.1 — a brand-new agent authored after
-``calfcord start`` needs a workspace reload, never an ``update_project`` that
+``disco start`` needs a workspace reload, never an ``update_project`` that
 would bounce the substrate), and the three-way ps union (§3.4 — physical∩logical,
 physical-only "not yet registered", logical-only "running on another host").
 """
@@ -54,7 +54,7 @@ class _StubClient:
     ``workspace_up`` drives the ``project_state`` workspace check (False → the
     real client's RuntimeError-on-transport-failure, i.e. supervisor unreachable).
     ``start_raises`` models the not-declared-process error the PC server returns
-    for an agent authored after ``calfcord start``. Every lifecycle call records
+    for an agent authored after ``disco start``. Every lifecycle call records
     its name so tests can assert it was (or was NOT) issued. ``update_project`` is
     present only so a test can assert §13.1: the not-declared path NEVER calls it.
     """
@@ -283,7 +283,7 @@ async def test_agent_start_workspace_down_short_circuits(tmp_path, capsys):
     assert client.start_calls == []
     out = capsys.readouterr().out
     assert "workspace not running" in out
-    assert "calfcord start" in out
+    assert "disco start" in out
 
 
 class _RaisingProbe:
@@ -359,7 +359,7 @@ async def test_agent_start_tolerates_probe_failure_and_proceeds(tmp_path, capsys
 async def test_agent_start_not_declared_asks_for_reload_no_update_project(tmp_path, capsys):
     """start_process raises (brand-new agent) → reload message, exit 1, no update.
 
-    A new agent authored after ``calfcord start`` is not a declared slot, so the
+    A new agent authored after ``disco start`` is not a declared slot, so the
     PC server errors on start with a 4xx. §13.1: bringing it online needs a
     workspace reload (stop && start) because an in-place ``update_project`` bounces
     the substrate — so we must NOT call ``update_project``. The reload hint is
@@ -387,8 +387,8 @@ async def test_agent_start_not_declared_asks_for_reload_no_update_project(tmp_pa
     out = capsys.readouterr().out
     assert "newbie" in out
     # The message must steer to a reload, not leave the operator stranded.
-    assert "calfcord stop" in out
-    assert "calfcord start" in out
+    assert "disco stop" in out
+    assert "disco start" in out
 
 
 async def test_agent_start_server_error_raises_loudly_not_reload_hint(tmp_path):
@@ -469,7 +469,7 @@ async def test_agent_stop_workspace_down(tmp_path, capsys):
     assert client.stop_calls == []
     out = capsys.readouterr().out
     assert "workspace not running" in out
-    assert "calfcord start" in out
+    assert "disco start" in out
 
 
 # --- agent_restart ----------------------------------------------------------
@@ -539,7 +539,7 @@ async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys)
     The caller (main.py) passes the RAW ``.md`` stems from ``detect_agents``,
     unfiltered — and a creatable ``tools.md`` / ``router.md`` /
     ``broker.md`` / ``bridge.md`` is not rejected by the id pattern (only
-    ``calfcord start``'s ``build_compose_project`` rejects them). So if a reserved
+    ``disco start``'s ``build_compose_project`` rejects them). So if a reserved
     name leaks into ``agent_ids`` the sweep must drop it rather than ``start`` /
     ``restart`` the live singleton — the "--all never touches another component
     type" invariant. Note the leak would be a mis-START, not a mis-restart: even
@@ -596,7 +596,7 @@ async def test_agent_start_single_op_refuses_reserved_name(tmp_path, capsys):
     """A single ``agent start tools`` is refused at the chokepoint: error + exit 1.
 
     Reserved names (substrate + the tools/router singletons) are owned by
-    ``calfcord start`` and their own component verbs, never the agent roster. The
+    ``disco start`` and their own component verbs, never the agent roster. The
     single-op guard at the top of ``agent_start`` closes the ``agent start tools``
     exposure before any workspace check / probe / start runs.
     """
@@ -698,8 +698,8 @@ async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(
     assert client.start_calls == ["newbie", "later"]
     out = capsys.readouterr().out
     # agent_start's 4xx steer fired for newbie (the reload guidance).
-    assert "calfcord stop" in out
-    assert "calfcord start" in out
+    assert "disco stop" in out
+    assert "disco start" in out
 
 
 async def test_agent_start_all_probes_org_once_and_threads_live(tmp_path, capsys):

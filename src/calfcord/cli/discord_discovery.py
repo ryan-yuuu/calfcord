@@ -1,4 +1,4 @@
-"""Discord auto-discovery for the ``calfcord init`` wizard (design §4.5).
+"""Discord auto-discovery for the ``disco init`` wizard (design §4.5).
 
 This module is a *library* — it has no CLI subcommand of its own. The init wizard composes it to
 replace the old "paste a numeric ID" prompts with discovery: validate the bot token the instant it

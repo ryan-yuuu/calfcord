@@ -350,7 +350,7 @@ def test_pick_model_auth_error_prints_loud_rejected_warning_then_falls_back(
 
     out = capsys.readouterr().out
     assert "the API key for anthropic was REJECTED" in out
-    assert "re-run 'calfcord init'" in out
+    assert "re-run 'disco init'" in out
     # Falls back to the curated list so the operator can still finish setup.
     assert [c.value for c in prompter.last_select_choices] == fallback
     assert chosen == fallback[0]
@@ -580,7 +580,7 @@ def test_codex_login_failure_warns_and_does_not_raise(
     assert "warning: Codex login did not complete" in out
     # The resume hint must name the real command — the calfkit-auth CLI requires
     # the `codex` subcommand (`calfkit-auth codex login`), not a bare `login`.
-    assert "calfcord calfkit-auth codex login" in out
+    assert "disco calfkit-auth codex login" in out
 
 
 # --- shared seam: PROVIDERS / ensure_credentials return / configure_provider ---

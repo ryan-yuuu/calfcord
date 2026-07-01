@@ -1,4 +1,4 @@
-"""``calfcord logs [component] [-f]`` — tail the supervisor's per-process logs.
+"""``disco logs [component] [-f]`` — tail the supervisor's per-process logs.
 
 Process Compose writes each supervised process's stdout/stderr to
 ``$CALFCORD_HOME/state/logs/<name>.log`` (the §13.2 ``log_location`` contract),
@@ -61,7 +61,7 @@ def _known_names(agents_dir: Path) -> list[str]:
     """The component names that may have a log, substrate/components first.
 
     Built from the same seams the generator uses so the set can never drift from
-    what ``calfcord start`` actually declares: the reserved substrate + fixed
+    what ``disco start`` actually declares: the reserved substrate + fixed
     component slots, the host's agent ids, and the supervisor's own log. Order is
     deterministic (substrate, fixed components, sorted agents, supervisor) so the
     merged "all logs" view and the unknown-name hint read predictably.
@@ -179,7 +179,7 @@ def tail(
     """
     log_dir = home / "state" / "logs"
     if not log_dir.is_dir():
-        out(f"error: no logs under {log_dir} — the workspace may not be running (start it with: calfcord start).")
+        out(f"error: no logs under {log_dir} — the workspace may not be running (start it with: disco start).")
         return 1
 
     names = _known_names(agents_dir)

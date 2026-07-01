@@ -97,7 +97,7 @@ def test_require_home_dev_run_prints_message_and_returns_none(
     assert main_mod._require_home("agent stop") is None
     out = capsys.readouterr().out
     assert out == (
-        "error: `calfcord agent stop` needs a native install — set CALFCORD_HOME "
+        "error: `disco agent stop` needs a native install — set CALFCORD_HOME "
         "(or run the installer) so the supervisor has a stable home.\n"
     )
 
@@ -111,7 +111,7 @@ def test_require_home_detail_customizes_trailing_clause(
     assert main_mod._require_home("deploy", detail="the manifest can reference a stable home and shim.") is None
     out = capsys.readouterr().out
     assert out == (
-        "error: `calfcord deploy` needs a native install — set CALFCORD_HOME "
+        "error: `disco deploy` needs a native install — set CALFCORD_HOME "
         "(or run the installer) so the manifest can reference a stable home and shim.\n"
     )
 
@@ -483,7 +483,7 @@ def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatc
     assert main(["start"]) == 0
     assert captured["home"] == home
     assert captured["server_urls"] == "broker.example:9092"
-    assert captured["launcher"] == str(home / "shims" / "calfcord")
+    assert captured["launcher"] == str(home / "shims" / "disco")
     # Roster is the sorted .md stems (the same seam `agent list` uses).
     assert captured["agent_ids"] == ["assistant", "scribe"]
 
@@ -978,7 +978,7 @@ def test_main_component_lifecycle_help_exits_zero(group: str, verb: str) -> None
 
 @pytest.mark.parametrize("group", ["tools"])
 def test_main_component_requires_subcommand(group: str) -> None:
-    # `tools` is a verb group: a bare `calfcord tools` must error (exit 2),
+    # `tools` is a verb group: a bare `disco tools` must error (exit 2),
     # never a silent no-op (so the group can grow further commands later).
     with pytest.raises(SystemExit) as exc:
         main([group])
@@ -1189,7 +1189,7 @@ def test_main_component_all_is_synonym_for_singular(
 
 
 def test_main_explain_requires_subcommand() -> None:
-    # `explain` is a verb group: a bare `calfcord explain` must error (exit 2),
+    # `explain` is a verb group: a bare `disco explain` must error (exit 2),
     # never silently no-op — the required sub-subparser enforces this so the group
     # can grow further topics later.
     with pytest.raises(SystemExit) as exc:
@@ -1256,7 +1256,7 @@ def test_main_logs_help_exits_zero() -> None:
 
 
 def test_main_logs_no_component_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # A bare `calfcord logs` tails ALL component logs: main resolves the install
+    # A bare `disco logs` tails ALL component logs: main resolves the install
     # home from CALFCORD_HOME and the agents dir via init.resolve_paths, then hands
     # logs.tail home + agents_dir with component=None and follow=False.
     home = tmp_path / "home"
@@ -1348,7 +1348,7 @@ def test_main_deploy_help_exits_zero() -> None:
 
 
 def test_main_deploy_requires_target() -> None:
-    # `deploy` needs a positional target: a bare `calfcord deploy` must error
+    # `deploy` needs a positional target: a bare `disco deploy` must error
     # (exit 2), never silently act on nothing.
     with pytest.raises(SystemExit) as exc:
         main(["deploy"])
@@ -1452,7 +1452,7 @@ def test_main_deploy_propagates_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_p
 def test_main_deploy_without_home_errors_native_install(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # deploy emits the install shim path (`<home>/shims/calfcord`), which has no
+    # deploy emits the install shim path (`<home>/shims/disco`), which has no
     # meaning on a dev run, so a missing CALFCORD_HOME refuses with the actionable
     # native-install message rather than rendering a manifest pointing at nothing.
     monkeypatch.delenv("CALFCORD_HOME", raising=False)
@@ -1574,7 +1574,7 @@ def test_main_mcp_without_home_errors_native_install(
 
 
 def test_main_start_passes_mcp_servers_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # `calfcord start` enumerates mcp.json alongside the agents dir so the
+    # `disco start` enumerates mcp.json alongside the agents dir so the
     # generated project declares one disabled slot per server.
     home = tmp_path / "home"
     agents = home / "agents"

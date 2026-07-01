@@ -1,4 +1,4 @@
-"""Readiness logic for the ``calfcord _healthcheck <component>`` exec probe.
+"""Readiness logic for the ``disco _healthcheck <component>`` exec probe.
 
 Process Compose runs this probe ON THE AGENT/TOOLS HOSTS to gate readiness
 (design §12.1 / §13.2), so this module must stay **light**: a readiness probe

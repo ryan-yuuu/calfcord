@@ -1,4 +1,4 @@
-"""``mcp.json`` mutation — the writer behind ``calfcord mcp add`` / ``remove``.
+"""``mcp.json`` mutation — the writer behind ``disco mcp add`` / ``remove``.
 
 Same validate-before-write discipline as the agent ``.md`` writer
 (:mod:`calfcord.agents.md_writer`): the new entry is shape-checked with the

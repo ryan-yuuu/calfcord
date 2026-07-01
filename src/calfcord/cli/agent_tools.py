@@ -1,4 +1,4 @@
-"""``calfcord agent tools [<name>]`` — interactive editor for an agent's tools.
+"""``disco agent tools [<name>]`` — interactive editor for an agent's tools.
 
 Picks an agent ``.md`` (by name, or via a prompt over the install's agents
 dir), shows a multi-select checkbox of every builtin tool, pre-checked from the
@@ -16,7 +16,7 @@ first save. Entries the editor cannot enumerate (``mcp/...`` selectors and
 other non-builtin tokens already in the ``.md``) are preserved as pre-checked
 rows so an unrelated edit never silently drops them.
 
-Tool edits take effect on the next ``calfcord calfkit-agent`` boot — the node
+Tool edits take effect on the next ``disco calfkit-agent`` boot — the node
 bakes its tool list at construction time (see the onboarding plan's "tools are
 baked into the node at boot" finding), so the command tells the operator to
 restart rather than implying a live reload.
@@ -227,5 +227,5 @@ def run(
         print(f"error: failed to update {agent_name!r}: {e}")
         return 1
 
-    print(f"Updated {agent_name}: {len(selected)} tool(s). Restart `calfcord calfkit-agent` to apply.")
+    print(f"Updated {agent_name}: {len(selected)} tool(s). Restart `disco calfkit-agent` to apply.")
     return 0

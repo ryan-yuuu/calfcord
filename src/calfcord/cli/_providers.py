@@ -1,6 +1,6 @@
 """Provider helpers shared by the interactive setup wizards.
 
-The ``calfcord init`` flow (and the Round-2 per-agent wizards built on top of
+The ``disco init`` flow (and the Round-2 per-agent wizards built on top of
 it) need three provider-specific operations that all touch heavy, optional
 dependencies — the OpenAI / Anthropic SDKs, the live Codex catalog, and the
 ChatGPT-subscription OAuth machinery. Putting them here, behind a small
@@ -61,7 +61,7 @@ _PROVIDER_KEY_VAR: dict[str, str] = {
 }
 
 # The selectable providers, with operator-facing labels, shared by every wizard
-# (`calfcord init`, `calfcord agent create`). Values are the ``provider:`` /
+# (`disco init`, `disco agent create`). Values are the ``provider:`` /
 # ``CALFKIT_AGENT_DEFAULT_PROVIDER`` literals; the order is the menu order.
 PROVIDERS: list[Choice] = [
     Choice("anthropic", "Anthropic"),
@@ -333,7 +333,7 @@ def pick_model(
     except ModelAuthError:
         print(
             f"warning: the API key for {provider} was REJECTED — the agent won't work "
-            f"until you fix it; re-run 'calfcord init' to re-enter it."
+            f"until you fix it; re-run 'disco init' to re-enter it."
         )
         choices = _fallback_choices(provider)
     except ModelListError as exc:
@@ -424,7 +424,7 @@ def configure_provider(
     if provider in _PROVIDER_KEY_VAR and not api_key:
         print(
             f"warning: no {_PROVIDER_KEY_VAR[provider]} is set — {provider} won't work "
-            f"until you add one (re-run 'calfcord init')."
+            f"until you add one (re-run 'disco init')."
         )
     model = pick_model(prompter, provider, api_key=api_key, cheap=cheap, current=current_model)
     return ProviderModel(provider, model)
@@ -445,7 +445,7 @@ def _codex_login() -> None:
        localhost callback the operator's machine can't reach over SSH).
 
     Any failure (network, OAuth error) is *caught*, surfaced as a warning with a
-    resume hint (``calfcord calfkit-auth codex login``), and swallowed — the wizard
+    resume hint (``disco calfkit-auth codex login``), and swallowed — the wizard
     must still proceed to write the rest of the config. Auth is never the thing
     that aborts setup. The OAuth machinery is imported lazily so this module
     stays SDK-free at import time.
@@ -475,7 +475,7 @@ def _codex_login() -> None:
         # tear down the wizard — warn with a resume hint and let setup finish.
         print(
             f"warning: Codex login did not complete ({exc}). "
-            "You can finish it later with: calfcord calfkit-auth codex login"
+            "You can finish it later with: disco calfkit-auth codex login"
         )
         return
     print("Logged in to ChatGPT.")

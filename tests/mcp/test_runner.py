@@ -1,6 +1,6 @@
 """Tests for the ``calfkit-mcp`` per-server runner's guards.
 
-One ``calfcord run mcp <server>`` process hosts exactly one
+One ``disco run mcp <server>`` process hosts exactly one
 :class:`MCPToolbox`. Selection/validation behaviors (unknown name, empty
 registry, sibling-secret isolation) live on the loader and are pinned in
 ``test_config.py``'s ``TestLoadOneServer``; here we pin the runner's own

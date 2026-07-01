@@ -2,7 +2,7 @@
 
 One-time, about 5 minutes. You'll create a Discord app, grab two values
 (the bot token and application ID), enable two intents, and invite the bot to
-your server. `calfcord init` takes it from there — it verifies the token, waits
+your server. `disco init` takes it from there — it verifies the token, waits
 for the invite, and **discovers your server and channel for you**, so these two
 values are the only Discord IDs you ever paste.
 
@@ -11,7 +11,7 @@ Server** on).
 
 ## 1. Create the app
 
-Grab two values to hand to `calfcord init` when it asks (it writes them to
+Grab two values to hand to `disco init` when it asks (it writes them to
 `.env` for you):
 
 1. Open the [Developer Portal](https://discord.com/developers/applications) →
@@ -42,13 +42,13 @@ pick your server, and click **Authorize**:
 https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=292594732032
 ```
 
-The link grants only the permissions calfcord needs. Invite it **only to
+The link grants only the permissions Agent Disco needs. Invite it **only to
 servers you trust** — agents can run code on the host (see
 [`security.md`](./security.md)).
 
 ## 4. The wizard takes it from here
 
-Discord setup is done — back in `calfcord init`, the wizard detects the moment
+Discord setup is done — back in `disco init`, the wizard detects the moment
 the bot joins, picks up your server and channel, brings your agent online, and
 waits until it sees the first reply. When it finishes, confirm in a channel the
 bot can see:
@@ -64,7 +64,7 @@ default starter agent — use whatever name you gave yours in `init`.)
 
 ## Advanced: override what `init` auto-discovers
 
-`calfcord init` discovers your server and channel automatically, so you don't
+`disco init` discovers your server and channel automatically, so you don't
 need these. They're here for cases where you want to set a value explicitly —
 e.g. pin slash-command sync to one guild, or unlock owner-only commands. Turn on
 **Developer Mode** (Discord → User Settings → Advanced), right-click to **Copy

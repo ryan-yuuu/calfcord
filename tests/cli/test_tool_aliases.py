@@ -1,4 +1,4 @@
-"""Tests for the ``calfcord tools alias`` command handlers.
+"""Tests for the ``disco tools alias`` command handlers.
 
 The handlers are pure-ish: given an install ``.env`` path (+ the tool surface
 for ``add``), they read/validate/edit the ``CALFCORD_TOOLS_ALIAS`` line and

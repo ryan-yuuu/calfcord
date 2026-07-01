@@ -1,8 +1,8 @@
-"""Unit tests for the per-server MCP roster lifecycle (``calfcord mcp ...``).
+"""Unit tests for the per-server MCP roster lifecycle (``disco mcp ...``).
 
 Each ``mcp.json`` server is its own Process Compose slot ``mcp-<server>`` —
 per-server isolation, so the verbs here are the agent-roster shape (a slot
-may be NOT declared when the server was added after ``calfcord start``)
+may be NOT declared when the server was added after ``disco start``)
 minus the agent-only pieces (no broker-wide duplicate guard: two hosts
 hosting the same toolbox id is a legitimate competing-consumer setup, not
 the agent split-brain).
@@ -13,7 +13,7 @@ Contracts pinned:
 * ``start`` of a Running slot is a restart in place (behavior #2) — this is
   also the "re-pick up an edited mcp.json entry" command;
 * a 4xx on start/restart is the not-declared case (server added after
-  ``calfcord start``) → the workspace-reload hint, exit 1 — while 5xx /
+  ``disco start``) → the workspace-reload hint, exit 1 — while 5xx /
   transport faults propagate loudly;
 * ``--all`` sweeps: start over the *configured* names (mcp.json), stop and
   restart over the *running* ``mcp-`` slots on this host;
@@ -118,18 +118,18 @@ async def test_start_workspace_down_prints_hint(tmp_path, capsys):
     rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
     assert rc == 1
     assert client.start_calls == []
-    assert "calfcord start" in capsys.readouterr().out
+    assert "disco start" in capsys.readouterr().out
 
 
 async def test_start_not_declared_4xx_prints_reload_hint(tmp_path, capsys):
-    """A server added to mcp.json after ``calfcord start`` has no declared
+    """A server added to mcp.json after ``disco start`` has no declared
     slot; PC answers 4xx. Steer to the workspace reload, exit 1."""
     err = ProcessComposeError("no such process", status_code=404)
     client = _StubClient(fail_start={"mcp-github": err})
     rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "calfcord stop" in out and "calfcord start" in out
+    assert "disco stop" in out and "disco start" in out
 
 
 async def test_start_5xx_propagates_loudly(tmp_path):
@@ -175,7 +175,7 @@ async def test_restart_not_declared_4xx_prints_reload_hint(tmp_path, capsys):
     rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=client)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "calfcord stop" in out and "calfcord start" in out
+    assert "disco stop" in out and "disco start" in out
 
 
 # --- sweeps -------------------------------------------------------------------
@@ -197,7 +197,7 @@ async def test_start_all_with_no_servers_says_so(tmp_path, capsys):
     rc = await mcp_roster.mcp_start_all(_home(tmp_path), servers=[], client=client)
     assert rc == 0
     assert client.start_calls == []
-    assert "calfcord mcp add" in capsys.readouterr().out
+    assert "disco mcp add" in capsys.readouterr().out
 
 
 async def test_start_all_aggregates_failures(tmp_path, capsys):
@@ -255,7 +255,7 @@ async def test_workspace_down_hints_and_exits_1(tmp_path, capsys, call):
     client = _StubClient(workspace_up=False)
     rc = await call(client, _home(tmp_path))
     assert rc == 1
-    assert "calfcord start" in capsys.readouterr().out
+    assert "disco start" in capsys.readouterr().out
     assert client.start_calls == client.stop_calls == client.restart_calls == []
 
 

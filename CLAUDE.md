@@ -1,10 +1,10 @@
-# calfcord development guide for dummies
+# Agent Disco development guide for dummies
 
-This file provides guidance to Claude Code, Codex, and other AI coding assistants when working on the calfcord codebase.
+This file provides guidance to Claude Code, Codex, and other AI coding assistants when working on the Agent Disco codebase.
 
-## What is calfcord
+## What is Agent Disco
 
-Calfcord is an assistant team that lives on Discord: a team of AI agents (each with its own responsibilities, tools, and memories) that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework to build and deploy AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
+Agent Disco is an assistant team that lives on Discord: a team of AI agents (each with its own responsibilities, tools, and memories) that talk to humans and to each other. It is built on the **calfkit** SDK (an event-driven and distributed microservices framework to build and deploy AI agents). The defining architectural property is that everything is **distributed and independently deployable** — agents and tools are microservices that can run on different hosts and still collaborate over a shared broker.
 
 ## Dependency management and development environment
 
@@ -14,7 +14,7 @@ Project dependencies are managed with **`uv`**.
 
 ## Architecture
 
-Calfcord is **five independent process types that communicate through Kafka** (bridge, agents, router, tools, MCP servers). Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
+Agent Disco is **five independent process types that communicate through Kafka** (bridge, agents, router, tools, MCP servers). Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
 
 ## Conventions
 

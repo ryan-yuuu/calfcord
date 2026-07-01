@@ -24,11 +24,11 @@ Three design contracts from the redesign live here:
   reads the wire, not the bridge's memory.
 
 * **A brand-new agent needs a workspace reload, never an ``update_project`` (§13.1).**
-  An agent authored *after* ``calfcord start`` is not a declared (``disabled``)
+  An agent authored *after* ``disco start`` is not a declared (``disabled``)
   slot, so ``POST /process/start/{name}`` errors. We do NOT recover by pushing an
   updated project: on v1.110.0 an ``update_project`` that changes the process set
   bounces broker+bridge. Instead we steer the operator to a clean reload
-  (``calfcord stop && calfcord start``) and return non-zero.
+  (``disco stop && disco start``) and return non-zero.
 
 ``agent_ps`` renders the §3.4 union: the LOGICAL view (agents answering across the
 whole org, from the probe) unioned with the PHYSICAL view (this host's Running
@@ -176,9 +176,9 @@ async def agent_start(
        supervisor; on success print ``agent <name> online`` and return ``0``.
     5. **Not-declared vs. genuine fault (§13.1 / Fix #9)** — if the start raises,
        branch on the STRUCTURAL HTTP status the client carries: a **4xx** is the
-       not-declared case (a brand-new agent authored after ``calfcord start`` is
+       not-declared case (a brand-new agent authored after ``disco start`` is
        not a declared slot, so the PC server rejects it), so steer the operator to
-       a workspace reload (``calfcord stop && calfcord start``) rather than an
+       a workspace reload (``disco stop && disco start``) rather than an
        in-place ``update_project`` (which would bounce broker+bridge on v1.110.0)
        and return ``1``. Anything else — a **5xx**, or a transport failure with no
        status — is a genuine infra fault, NOT a brand-new agent; per the error
@@ -194,9 +194,9 @@ async def agent_start(
     surface and is unused today.
     """
     # Reserved-name chokepoint: the substrate (broker/bridge) and the singleton
-    # tools component are owned by `calfcord start` and their own
+    # tools component are owned by `disco start` and their own
     # component verbs — never the agent roster. The id pattern does NOT reject a
-    # creatable `tools.md` (only `calfcord start`'s build_compose_project does), so
+    # creatable `tools.md` (only `disco start`'s build_compose_project does), so
     # an `agent start tools` would otherwise drive `start_process('tools')` against
     # the live singleton. Refuse here, before any workspace check / probe / start,
     # so this single seam closes the exposure for both `agent start <reserved>` and
@@ -204,7 +204,7 @@ async def agent_start(
     if name in _NON_AGENT_PROCESSES:
         print(
             f"error: {name!r} is a reserved component, not an agent; "
-            f"manage it with `calfcord {name} start` (or `calfcord start`)."
+            f"manage it with `disco {name} start` (or `disco start`)."
         )
         return 1
 
@@ -253,7 +253,7 @@ async def agent_start(
     except ProcessComposeError as exc:
         # The workspace check above already proved the REST server is up, so branch
         # on the structural status (Fix #9): a 4xx is "no such declared process" —
-        # a brand-new agent authored after `calfcord start`. §13.1: do NOT recover
+        # a brand-new agent authored after `disco start`. §13.1: do NOT recover
         # with `update_project` (it bounces the substrate); reload cleanly. A 5xx
         # (or no status — a transport fault) is a genuine infra failure, not a
         # brand-new agent, so it is re-raised loudly below rather than mistranslated
@@ -262,8 +262,8 @@ async def agent_start(
         if status is not None and 400 <= status < 500:
             print(
                 f"agent {name} is not in the running workspace. Bringing a brand-new "
-                "agent online needs a workspace reload: run `calfcord stop` then "
-                "`calfcord start` (an in-place update would bounce the broker and bridge)."
+                "agent online needs a workspace reload: run `disco stop` then "
+                "`disco start` (an in-place update would bounce the broker and bridge)."
             )
             return 1
         raise RuntimeError(

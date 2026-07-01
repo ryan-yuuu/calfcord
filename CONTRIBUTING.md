@@ -1,4 +1,4 @@
-# Contributing to calfcord
+# Contributing to Agent Disco
 
 Thanks for the interest. This doc covers the workflow for sending changes
 that the maintainers can merge with minimum back-and-forth. It assumes
@@ -7,7 +7,7 @@ process layout there are prerequisites for everything below.
 
 ## Setup
 
-calfcord is a Python 3.12+ project. Dependencies are managed with `uv`
+Agent Disco is a Python 3.12+ project. Dependencies are managed with `uv`
 (see `pyproject.toml`); do not hand-edit `[project.dependencies]`. Use
 `uv add <pkg>` so the lockfile stays canonical.
 
@@ -22,7 +22,7 @@ top of the README. If your branch lands below `main` without an
 explicit "this test is removed because X" note in the PR, something
 regressed.
 
-For running calfcord end-to-end, start with the **Quick start** in
+For running Agent Disco end-to-end, start with the **Quick start** in
 `README.md` (Docker Compose). Two more deployment modes — native
 (`uv run` each process) and the mix-and-match hybrid — are documented in
 [`docs/architecture.md`](docs/architecture.md#running-modes). New

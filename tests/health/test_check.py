@@ -1,7 +1,7 @@
 """Unit tests for the readiness healthcheck (design §12.1 / §13.2).
 
 :func:`calfcord.health.check.healthcheck` is the logic behind the
-``calfcord _healthcheck <component>`` exec probe Process Compose runs on the
+``disco _healthcheck <component>`` exec probe Process Compose runs on the
 agent/tools hosts. It returns a POSIX exit code — ``0`` healthy, ``1`` not — so
 the readiness tests assert the int code, not an exception.
 

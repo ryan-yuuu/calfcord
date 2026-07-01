@@ -1,6 +1,6 @@
-# Authoring a calfcord Tool
+# Authoring an Agent Disco Tool
 
-How to add or change a tool that calfcord agents can invoke. The tool
+How to add or change a tool that Agent Disco agents can invoke. The tool
 surface is an **explicit, composed list** — there is no auto-discovery —
 so where you make a change depends on *which kind* of tool it is. This
 guide covers both kinds, then the `@agent_tool` contract every tool
@@ -46,7 +46,7 @@ All of these are **vendored** from the `calfkit-tools` package (the
 hermes terminal / process / file / search / todo / code-execution / web
 nodes, plus an SSRF-safe `web_fetch`). There is **no first-party tool** in
 the default surface — agent-to-agent messaging is native to calfkit now
-(the old `private_chat` tool was removed), so nothing here needs calfcord's
+(the old `private_chat` tool was removed), so nothing here needs Agent Disco's
 own internals. You can still add a first-party tool (§ 2.2).
 `apply_deploy_filters` turns `ALL_TOOLS` into the name-keyed `TOOL_REGISTRY`
 at boot, applying the operator-facing `CALFCORD_TOOLS_INCLUDE` /
@@ -69,9 +69,9 @@ what the tool is.
 
 The terminal, file, search, todo, code-execution, and web tools live in
 the **`calfkit-tools` package** (the `calf-ai/calfkit-peripherals`
-repo), not in calfcord. To add a new general-purpose tool to that set,
+repo), not in Agent Disco. To add a new general-purpose tool to that set,
 or to change the behaviour of an existing one, **contribute it
-upstream**. Once the package publishes the node, adopt it in calfcord by:
+upstream**. Once the package publishes the node, adopt it in Agent Disco by:
 
 1. Bumping the `calfkit-tools` dependency (`uv add calfkit-tools@<ver>`).
 2. Importing the new node by name in `src/calfcord/tools/__init__.py`
@@ -79,17 +79,17 @@ upstream**. Once the package publishes the node, adopt it in calfcord by:
 3. Updating the `EXPECTED_TOOLS` set in `tests/tools/test_registry.py`.
 
 That third step matters: a **drift-guard test** in `test_registry.py`
-fails CI whenever the package publishes a hermes tool that calfcord
+fails CI whenever the package publishes a hermes tool that Agent Disco
 neither exposes in `ALL_TOOLS` nor lists in `_EXCLUDED_HERMES_NODES`. So
 a dependency bump that adds a new upstream tool forces a deliberate
 adopt-or-exclude decision — nothing reaches agents without a reviewable
 edit.
 
-### 2.2 Adding a first-party calfcord tool
+### 2.2 Adding a first-party Agent Disco tool
 
-Some tools can't be vendored — they need calfcord's own internals, or they
+Some tools can't be vendored — they need Agent Disco's own internals, or they
 wrap a service specific to your deployment. Those live as modules under
-`src/calfcord/tools/`. (calfcord ships none today; the worked example below
+`src/calfcord/tools/`. (Agent Disco ships none today; the worked example below
 adds one from scratch.)
 
 The workflow is two explicit steps:
@@ -198,7 +198,7 @@ ALL_TOOLS: tuple[ToolNodeDef, ...] = (
 )
 ```
 
-Restart `calfkit-tools` (`calfcord tools stop && calfcord tools start`,
+Restart `calfkit-tools` (`disco tools stop && disco tools start`,
 or `uv run calfkit-tools` in dev). The runner logs each registration:
 
 ```
@@ -206,7 +206,7 @@ INFO calfcord.tools: registered tool=pypi_info
 ```
 
 Agents opt into the tool by listing its name in the agent's `.md`
-frontmatter `tools:` array (or via `calfcord agent tools <name>`). Agent
+frontmatter `tools:` array (or via `disco agent tools <name>`). Agent
 boot resolves each name against `TOOL_REGISTRY`; unknown names fail fast
 with a "known tools: ..." error.
 
@@ -342,7 +342,7 @@ against the *composed registry* node, so a wiring change that dropped
 isolation fails CI.
 
 Scope is **agent-lifetime** by default: `session_id` is left unset
-(calfcord wires no `deps["session_id"]`), so an agent's tool state
+(Agent Disco wires no `deps["session_id"]`), so an agent's tool state
 persists across all of its turns and resets only on a tools-process
 restart. Finer per-conversation scope (one session per Discord thread,
 say) is a documented future option — it would wire a thread/channel id
@@ -541,7 +541,7 @@ pattern when the resource has a lifecycle the worker should own; the
 
 ## 9. Why not entry-point / third-party plugin discovery?
 
-calfcord deliberately does **not** support `importlib.metadata`
+Agent Disco deliberately does **not** support `importlib.metadata`
 entry-point loading or `[project.entry-points."calfcord.tools"]`
 discovery, and it does not walk a directory looking for tool modules.
 This is a security decision, not a missing feature: the tool surface is
@@ -550,7 +550,7 @@ the security boundary (§ 1), and entry-point discovery would let merely
 host. The surface must stay an explicit, code-reviewed list.
 
 If you want to ship a closed-source or externally-distributed tool
-without forking calfcord, the supported path is to contribute it to the
+without forking Agent Disco, the supported path is to contribute it to the
 `calfkit-tools` package (§ 2.1) so it goes through the same explicit
 adoption and drift-guard review as every other vendored tool. If that
 doesn't fit your use case, file an issue describing it — but note that

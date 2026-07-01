@@ -1,6 +1,6 @@
 # Codex subscription auth
 
-The `openai-codex` provider lets calfcord agents call OpenAI's Codex models (`gpt-5.5`, `gpt-5.3-codex`, etc.) through the same OAuth flow the official `codex` CLI uses, so requests are billed against an active **ChatGPT Plus or Pro subscription** rather than against OpenAI API credits.
+The `openai-codex` provider lets Agent Disco agents call OpenAI's Codex models (`gpt-5.5`, `gpt-5.3-codex`, etc.) through the same OAuth flow the official `codex` CLI uses, so requests are billed against an active **ChatGPT Plus or Pro subscription** rather than against OpenAI API credits.
 
 This page covers the one-time setup required before an agent with `provider: openai-codex` can boot. If a Codex-backed agent stops mid-response or fails to authenticate at runtime, see [troubleshooting.md](./troubleshooting.md#codex-subscription-auth).
 
@@ -41,14 +41,14 @@ The host CLI is the source of truth for both. Token rotation that happens later 
 On a native install the host login above is all the auth a Codex-backed agent needs — it reads `~/.calfcord/auth/openai_oauth.json` directly. Bring the agent online the same way as any other teammate:
 
 ```bash
-calfcord agent start codex_demo
+disco agent start codex_demo
 ```
 
 If it reports `CodexNotLoggedInError`, the host hasn't been logged in yet — run `uv run calfkit-auth codex login` on the host, then retry.
 
 ### Containerized agents
 
-The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent (and router) container, so once you've completed the host login above, `docker compose up agent` is the compose equivalent of `calfcord agent start`:
+The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent (and router) container, so once you've completed the host login above, `docker compose up agent` is the compose equivalent of `disco agent start`:
 
 ```yaml
 agent:
@@ -87,13 +87,13 @@ Supported model names are whatever upstream `openai/codex` lists in [`codex-rs/m
 | `gpt-5.2` | Optimized for professional work and long-running agents |
 
 `openai-codex` has **no fixed default model**: when an agent omits `model:`,
-calfcord uses the highest-priority model in upstream's live `models.json`
+Agent Disco uses the highest-priority model in upstream's live `models.json`
 catalog (`factory.py` sets `_PROVIDER_DEFAULT_MODELS["openai-codex"]` to `None`,
 which the Codex client resolves at request time).
 
 Anything not in upstream's `models.json` is sent verbatim. The Codex CLI prompt resolver uses longest-prefix matching against the slug list to pick the right `base_instructions` to send (so e.g. a legacy `gpt-5.2-codex` request still fingerprints against `gpt-5.2`'s prompt), but the model name itself is forwarded as-is — if the Codex backend doesn't recognize it, the request returns a 4xx.
 
-No allowlist is enforced calfcord-side — we trust upstream and forward the model name as-is.
+No allowlist is enforced Agent Disco-side — we trust upstream and forward the model name as-is.
 
 ## Maintenance commands
 
