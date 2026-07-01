@@ -54,6 +54,7 @@ PREVIOUS_SHA=""     # set by activate_version (for GC)
 SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
 TANSU_OK=0          # set by ensure_tansu when the native broker binary is in place
 PROCESS_COMPOSE_OK=0  # set by ensure_process_compose when the supervisor binary is in place
+PATH_WIRED=0        # set by ensure_path when it wires PATH (so activation is needed)
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -683,29 +684,48 @@ CALF_SELF
   rm -f "$SHIM_DIR"/calfcord* 2>/dev/null || true
 }
 
+# Put $SHIM_DIR on PATH the rustup/uv way: write ONE canonical sh-compatible env
+# file at $CALFCORD_HOME/env and source it from each login shell's profile with a
+# single hook line, CREATING profiles that don't exist. This is the fresh-account
+# fix — the previous "append only to already-existing rc files" wrote nothing on a
+# clean box (no dotfiles), leaving `disco` off PATH after the documented "restart
+# your terminal". Idempotent by construction, so it's safe on every re-run
+# (including `disco self update`, which re-execs this installer).
 ensure_path() {
+  # Already reachable — an active hook from a prior install, or a hand-wired
+  # PATH. Skip everything (this also covers the migration case where an old
+  # direct `export PATH=` line is already in effect).
   case ":$PATH:" in
     *":$SHIM_DIR:"*) return 0 ;;
   esac
-  local rc added=0
-  # The literal $PATH is intentional: it must be expanded by the shell at
-  # profile-load time, not now.
-  # shellcheck disable=SC2016
-  local line='export PATH="'"$SHIM_DIR"':$PATH"'
-  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
-    [ -e "$rc" ] || continue
-    if ! grep -qsF "$SHIM_DIR" "$rc"; then
-      printf '\n# disco\n%s\n' "$line" >> "$rc"
-      log "added $SHIM_DIR to PATH in $rc"
-      added=1
+
+  # The canonical activation file. The installer owns it, so overwriting on every
+  # run keeps it correct. The `case` guard makes it idempotent when sourced and
+  # keeps it POSIX-sh / bash-3.2 / zsh compatible. The heredoc is unquoted so
+  # SHIM_DIR interpolates, while `\$PATH` stays literal for profile-load-time
+  # expansion (expanding it now would bake in the installer's PATH).
+  mkdir -p "$CALFCORD_HOME"
+  cat > "$CALFCORD_HOME/env" <<EOF
+# $CALFCORD_HOME/env — added by the Agent Disco installer
+case ":\$PATH:" in
+  *":$SHIM_DIR:"*) ;;
+  *) export PATH="$SHIM_DIR:\$PATH" ;;
+esac
+EOF
+
+  # Source the env file from the login shells' profiles, creating any that are
+  # missing (>> creates). macOS zsh login shells read ~/.zprofile — the file the
+  # old candidate list omitted entirely. Guard on the exact hook line so re-runs
+  # never duplicate it; a pre-existing legacy `export PATH=` line is left alone.
+  local rc hook
+  hook='. "'"$CALFCORD_HOME"'/env"'
+  for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zprofile"; do
+    if ! grep -qsF "$hook" "$rc"; then
+      printf '\n# Agent Disco\n%s\n' "$hook" >> "$rc"
+      log "wired $SHIM_DIR onto PATH via $rc"
     fi
   done
-  if [ "$added" -eq 0 ]; then
-    warn "add this line to your shell profile, then restart your shell:"
-    warn "  $line"
-  else
-    warn "restart your shell, or run now:  $line"
-  fi
+  PATH_WIRED=1
 }
 
 # -------------------------------------------------------------------- main ---
@@ -727,6 +747,9 @@ main() {
   write_shims
   ensure_path
   log "done."
+  if [ "$PATH_WIRED" -eq 1 ]; then
+    log "  ACTIVATE: run  source $CALFCORD_HOME/env   now, or open a new terminal — then 'disco' is on your PATH"
+  fi
   log "  version:  disco self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: disco self set-broker <url>)"
   if [ "$TANSU_OK" -eq 1 ]; then

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -651,32 +652,152 @@ def test_seed_config_creates_new_env_at_mode_600(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------- ensure_path ---
+# ``ensure_path`` follows the rustup/uv env-file pattern: it writes ONE canonical
+# sh-compatible activation file at ``$CALFCORD_HOME/env`` (which prepends the shim
+# dir to PATH via an idempotent ``case`` guard) and sources it from each login
+# shell's profile with a single hook line, **creating profiles that don't exist**.
+# The headline fix: a fresh account with no dotfiles still ends up with ``disco``
+# on PATH after a shell restart, where the old "append only to already-existing rc
+# files" approach silently wrote nothing. These tests point ``$HOME`` at a temp
+# dir so the developer's real profiles are never touched.
+
+_PROFILES = (".profile", ".bashrc", ".zprofile")
 
 
-def test_ensure_path_is_idempotent(tmp_path: Path) -> None:
-    """A second ``ensure_path`` must not re-append the export block to a profile.
+def _run_ensure_path(home: Path, fake_home: Path, *, path: str | None = None) -> subprocess.CompletedProcess:
+    """Run ``ensure_path`` with ``$HOME`` redirected to ``fake_home`` (and an
+    optional ``$PATH`` override to exercise the already-on-PATH short-circuit)."""
+    extra = {"HOME": str(fake_home)}
+    if path is not None:
+        extra["PATH"] = path
+    return _source_and_run("ensure_path", home=home, extra_env=extra)
 
-    ``ensure_path`` edits the real ``$HOME`` rc files, so we point HOME at a temp
-    dir holding a single seeded ``.zshrc`` and run the function twice; the block
-    that adds ``$SHIM_DIR`` must appear exactly once.
-    """
+
+def test_ensure_path_creates_missing_profiles_with_hook(tmp_path: Path) -> None:
+    """A fresh account with NO rc files gets .profile/.bashrc/.zprofile created,
+    each sourcing the env file. This is the core quickstart-breaking bug fix."""
     home = tmp_path / "home"
     fake_home = tmp_path / "fakehome"
     fake_home.mkdir()
-    zshrc = fake_home / ".zshrc"
-    zshrc.write_text("# existing profile\n")
 
-    extra = {"HOME": str(fake_home)}
-    first = _source_and_run("ensure_path", home=home, extra_env=extra)
+    result = _run_ensure_path(home, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    hook = f'. "{home}/env"'
+    for name in _PROFILES:
+        rc = fake_home / name
+        assert rc.exists(), f"{name} was not created"
+        assert hook in rc.read_text()
+
+
+def test_ensure_path_writes_env_file_with_case_guard(tmp_path: Path) -> None:
+    """The canonical env file prepends the shim dir to PATH under a ``case`` guard
+    (so it is a no-op when the dir is already present) and keeps ``$PATH`` literal
+    for load-time expansion rather than expanding it at write time."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+
+    result = _run_ensure_path(home, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    env_file = home / "env"
+    assert env_file.exists()
+    text = env_file.read_text()
+    shim_dir = str(home / "shims")
+    assert f'export PATH="{shim_dir}:$PATH"' in text
+    assert "case" in text  # the idempotency guard
+    assert "$PATH" in text  # literal, expanded at profile-load time
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "zsh"])
+def test_env_file_is_idempotent_when_sourced(tmp_path: Path, shell: str) -> None:
+    """Sourcing the env file repeatedly must prepend the shim dir exactly once,
+    under every login shell the profiles hook it into (POSIX sh, bash, zsh)."""
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    _run_ensure_path(home, fake_home)
+
+    env_file = home / "env"
+    shim_dir = str(home / "shims")
+    script = f'export PATH=/usr/bin:/bin\n. "{env_file}"\n. "{env_file}"\nprintf %s "$PATH"'
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split(":").count(shim_dir) == 1
+
+
+def test_ensure_path_is_idempotent_across_reruns(tmp_path: Path) -> None:
+    """A second ``ensure_path`` must not re-append the hook line to any profile."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+
+    first = _run_ensure_path(home, fake_home)
     assert first.returncode == 0, first.stderr
-    second = _source_and_run("ensure_path", home=home, extra_env=extra)
+    second = _run_ensure_path(home, fake_home)
     assert second.returncode == 0, second.stderr
 
-    text = zshrc.read_text()
+    hook = f'. "{home}/env"'
+    for name in _PROFILES:
+        assert (fake_home / name).read_text().count(hook) == 1
+
+
+def test_ensure_path_skips_when_shim_already_on_path(tmp_path: Path) -> None:
+    """When the shim dir is already on PATH (an active hook, or a hand-wired
+    PATH), ensure_path is a complete no-op: no env file, no profiles created."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
     shim_dir = str(home / "shims")
-    # The shim dir is wired into PATH exactly once, not appended on every run.
-    assert text.count(shim_dir) == 1
-    assert text.count("# disco") == 1
+
+    result = _run_ensure_path(home, fake_home, path=f"{shim_dir}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert not (home / "env").exists()
+    for name in _PROFILES:
+        assert not (fake_home / name).exists()
+
+
+def test_ensure_path_appends_without_clobbering_existing_profiles(tmp_path: Path) -> None:
+    """Existing profiles keep their content; the hook is appended, not clobbered."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    for name in _PROFILES:
+        (fake_home / name).write_text(f"# existing {name}\nexport FOO=bar\n")
+
+    result = _run_ensure_path(home, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    hook = f'. "{home}/env"'
+    for name in _PROFILES:
+        text = (fake_home / name).read_text()
+        assert f"# existing {name}" in text
+        assert "export FOO=bar" in text
+        assert hook in text
+
+
+def test_ensure_path_leaves_legacy_export_line_and_adds_hook(tmp_path: Path) -> None:
+    """Migration niceness: an old direct ``export PATH=...shims...`` line from a
+    prior install is left untouched (harmless + idempotent) and the new hook is
+    appended alongside it rather than rewriting the operator's dotfile."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    shim_dir = str(home / "shims")
+    legacy = f'export PATH="{shim_dir}:$PATH"'
+    profile = fake_home / ".profile"
+    profile.write_text(f"# disco\n{legacy}\n")
+
+    result = _run_ensure_path(home, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    text = profile.read_text()
+    assert legacy in text  # old line untouched
+    assert f'. "{home}/env"' in text  # new hook added
 
 
 # -------------------------------------------------- meta() parses, never sources ---

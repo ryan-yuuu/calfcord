@@ -237,10 +237,42 @@ resolve_check 1111111111111111111111111111111111111111 ok  && pass "resolve_sha 
 resolve_check abcabc die                                   && pass "resolve_sha rejects short" || fail "resolve short"
 resolve_check "Not Found" die                              && pass "resolve_sha rejects non-hex" || fail "resolve non-hex"
 
-# ensure_path writes to ~/.bash_profile (macOS bash login shells)
-H2="$BASE/home2"; mkdir -p "$H2"; : > "$H2/.bash_profile"
+# ensure_path (env-file model): a fresh account with NO dotfiles gets
+# ~/.profile, ~/.bashrc and ~/.zprofile CREATED, each sourcing $CALFCORD_HOME/env,
+# and the canonical env file is written. This is the quickstart fix — the old
+# "append only to already-existing rc files" wrote nothing on a clean box.
+H2="$BASE/home2"; mkdir -p "$H2"
 CALFCORD_HOME="$TD" HOME="$H2" PATH="/usr/bin:/bin" "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
-grep -q "$TD/shims" "$H2/.bash_profile" && pass "ensure_path writes ~/.bash_profile" || fail "bash_profile"
+hook=". \"$TD/env\""
+fresh_ok=1
+for f in .profile .bashrc .zprofile; do
+  grep -qsF "$hook" "$H2/$f" || fresh_ok=0
+done
+[ "$fresh_ok" -eq 1 ] && pass "ensure_path creates missing profiles with env hook" || fail "ensure_path fresh profiles"
+grep -qsF "export PATH=\"$TD/shims:\$PATH\"" "$TD/env" \
+  && pass "ensure_path writes canonical env file" || fail "ensure_path env file"
+
+# The env file must be idempotent when sourced (case-guarded): the shim dir is
+# prepended exactly once no matter how many shells source it.
+p="$(PATH="/usr/bin:/bin" "$B" -c ". '$TD/env'; . '$TD/env'; printf %s \"\$PATH\"")"
+[ "$(printf '%s' "$p" | tr ':' '\n' | grep -Fxc "$TD/shims")" -eq 1 ] \
+  && pass "env file idempotent when sourced" || fail "env file not idempotent: $p"
+
+# Re-run must not duplicate the hook line in any profile.
+CALFCORD_HOME="$TD" HOME="$H2" PATH="/usr/bin:/bin" "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
+dup=0
+for f in .profile .bashrc .zprofile; do
+  [ "$(grep -cF "$hook" "$H2/$f")" -eq 1 ] || dup=1
+done
+[ "$dup" -eq 0 ] && pass "ensure_path idempotent across re-runs" || fail "ensure_path duplicate hooks"
+
+# When the shim dir is already on PATH, ensure_path is a no-op: no env file, no
+# profiles created (honors an active hook / hand-wired PATH).
+H3="$BASE/home3"; mkdir -p "$H3"; CFG3="$BASE/home3cfg"
+CALFCORD_HOME="$CFG3" HOME="$H3" PATH="$CFG3/shims:/usr/bin:/bin" \
+  "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
+{ [ ! -e "$CFG3/env" ] && [ ! -e "$H3/.profile" ]; } \
+  && pass "ensure_path skips when shim dir already on PATH" || fail "ensure_path skip-on-path"
 
 # Clean cutover: a re-run removes any pre-rename command shims left on PATH so
 # no stale command survives (there is no compat alias). Legacy names are
