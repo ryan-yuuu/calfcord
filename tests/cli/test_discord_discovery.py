@@ -25,6 +25,11 @@ SEND_MESSAGES = 1 << 11  # 2048
 MANAGE_WEBHOOKS = 1 << 29  # 536870912
 VIEW_CHANNEL = 1 << 10  # 1024
 ADMINISTRATOR = 1 << 3  # 8
+EMBED_LINKS = 1 << 14  # 16384
+READ_MESSAGE_HISTORY = 1 << 16  # 65536
+MANAGE_THREADS = 1 << 34  # 17179869184 — deliberately NOT in the invite (nothing uses it)
+CREATE_PUBLIC_THREADS = 1 << 35  # 34359738368 — /task + A2A thread creation
+SEND_MESSAGES_IN_THREADS = 1 << 38  # 274877906944 — posting into those threads
 POSTABLE = SEND_MESSAGES | MANAGE_WEBHOOKS
 
 GUILD_ID = "80351110224678912"
@@ -133,6 +138,39 @@ def test_invite_url_contains_app_id_scope_and_permission_bitmask():
     # dropping any required permission from either side surfaces here.
     assert f"permissions={dd.INVITE_PERMISSIONS}" in url
     assert dd.INVITE_PERMISSIONS & dd._POST_REQUIRED == dd._POST_REQUIRED
+
+
+def test_invite_permissions_is_the_exact_expected_mask():
+    # The invite must grant exactly the permissions calfcord uses — no more, no less.
+    # Computed from named bits (not a hand-typed integer) so the arithmetic is checked
+    # in-test; the literal is asserted too so docs/discord-setup.md can be verified
+    # against a single number.
+    expected = (
+        VIEW_CHANNEL
+        | SEND_MESSAGES
+        | EMBED_LINKS
+        | READ_MESSAGE_HISTORY
+        | MANAGE_WEBHOOKS
+        | CREATE_PUBLIC_THREADS
+        | SEND_MESSAGES_IN_THREADS
+    )
+    assert expected == dd.INVITE_PERMISSIONS
+    assert dd.INVITE_PERMISSIONS == 309774601216
+
+
+def test_invite_permissions_grants_thread_creation_bits():
+    # /task and the A2A audit projection create public threads and post into them; without
+    # these two bits the bridge's thread creation raises Forbidden and both flows silently
+    # break for anyone who followed the invite link (see bridge/egress.py, docs/a2a-threads.md).
+    assert dd.INVITE_PERMISSIONS & CREATE_PUBLIC_THREADS
+    assert dd.INVITE_PERMISSIONS & SEND_MESSAGES_IN_THREADS
+
+
+def test_invite_permissions_excludes_unused_manage_threads():
+    # MANAGE_THREADS (bit 34) is one bit below CREATE_PUBLIC_THREADS (bit 35): an easy
+    # off-by-one. Nothing in calfcord uses it, so keep it OUT of the invite to prevent
+    # both silent re-bloat and the historical CREATE_PUBLIC_THREADS-vs-MANAGE_THREADS mixup.
+    assert not dd.INVITE_PERMISSIONS & MANAGE_THREADS
 
 
 def test_invite_url_accepts_int_app_id():

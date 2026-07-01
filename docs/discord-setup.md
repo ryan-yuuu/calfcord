@@ -39,11 +39,14 @@ Replace `YOUR_APP_ID` with your Application ID, open the link in a browser,
 pick your server, and click **Authorize**:
 
 ```
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=292594732032
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=309774601216
 ```
 
-The link grants only the permissions Agent Disco needs. Invite it **only to
-servers you trust** — agents can run code on the host (see
+The link grants the channel permissions Agent Disco needs to operate: View
+Channel, Send Messages, Embed Links, Read Message History, Manage Webhooks,
+Create Public Threads, and Send Messages in Threads. (The two privileged
+*intents* from step 2 are a separate Bot-tab toggle the link can't set.) Invite
+it **only to servers you trust** — agents can run code on the host (see
 [`security.md`](./security.md)).
 
 ## 4. The wizard takes it from here
@@ -83,6 +86,6 @@ ID**, and set the key in `~/.calfcord/config/.env`:
 | Bridge exits with `PrivilegedIntentsRequired` | Do step 2 — enable both intents. |
 | Bot is online but never replies | Confirm Message Content intent (step 2); check it can **View Channel** + **Send Messages** in that channel. |
 | Agent can't post / `Forbidden` on a webhook | Bot needs **Manage Webhooks** in that channel. |
-| `/task` does nothing | Bot needs **Create Public Threads** in that channel — a channel override can block it even when the invite granted it. |
+| `/task` does nothing | The invite grants **Create Public Threads** server-wide, but a channel-level permission override can still deny it in a specific channel — check that channel's permission overrides. |
 | "typing…" indicator never shows | The bot **user** needs **Send Messages** (and **Send Messages in Threads** for `/task` threads) in that channel — this is separate from Manage Webhooks, and a channel override can deny it. Typing is cosmetic, so it fails silently; the first denial is logged at WARNING. |
 | Slash commands don't appear | Set `DISCORD_GUILD_ID` for instant sync (global takes ~1 h). |

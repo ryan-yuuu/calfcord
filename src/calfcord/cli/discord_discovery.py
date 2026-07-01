@@ -46,13 +46,24 @@ _HTTP_TIMEOUT = 5.0
 _VIEW_CHANNEL = 1 << 10
 _SEND_MESSAGES = 1 << 11
 _ADMINISTRATOR = 1 << 3
+_EMBED_LINKS = 1 << 14
+_READ_MESSAGE_HISTORY = 1 << 16
 _MANAGE_WEBHOOKS = 1 << 29
+_CREATE_PUBLIC_THREADS = 1 << 35  # /task + A2A thread creation (bridge/egress.py)
+_SEND_MESSAGES_IN_THREADS = 1 << 38  # posting into those threads
 
 # What the persona-reply path actually requires in a channel: View Channel (without it the bot can't
 # see the channel at all — and Send/Manage are dead bits), Send Messages (the bot user speaks), AND
 # Manage Webhooks (the bridge posts agent replies as persona webhooks). All three, not any subset:
 # a channel granting Send|Manage while denying View is one the bot can never reply in, so classifying
 # it postable would be a green light that lies.
+#
+# Thread bits (Create Public Threads / Send Messages in Threads) are deliberately NOT in this gate.
+# Postability answers "can the bot reply to an @mention here", the default agent's core function;
+# thread creation (/task, A2A audit projection) is an additive capability the invite grants
+# server-wide (see INVITE_PERMISSIONS). Folding thread perms in here would reclassify a channel that
+# hosts normal replies but has a thread override as "unpostable" — a *worse* lie than the current
+# gap, since the bot demonstrably can post there. The /task thread gap is handled in docs instead.
 _POST_REQUIRED = _VIEW_CHANNEL | _SEND_MESSAGES | _MANAGE_WEBHOOKS
 
 # Permission overwrite target types in the channel object (`permission_overwrites[].type`).
@@ -64,9 +75,22 @@ _OVERWRITE_MEMBER = 1
 _TEXT_CHANNEL = 0
 
 # The invite bitmask granted by the canonical invite link (kept in lock-step with
-# docs/discord-setup.md's `permissions=...`). It is a superset of `_POST_REQUIRED`; a guard test
-# asserts the relationship so the two can never silently drift.
-INVITE_PERMISSIONS = 292594732032
+# docs/discord-setup.md's `permissions=...`). Built as an OR of named bits so the value is
+# self-documenting and reviewable: everything the persona-reply path needs (_POST_REQUIRED) plus
+# Embed Links (rich agent replies) and the two thread bits the bridge's /task + A2A thread creation
+# requires (bridge/egress.py raises Forbidden without Create Public Threads). Notably it does NOT
+# grant Manage Threads (bit 34) — nothing uses it, and it is one bit below Create Public Threads
+# (bit 35), the exact off-by-one this constant previously shipped. A guard test asserts both the
+# _POST_REQUIRED superset relationship and the exact integer so the two can never silently drift.
+INVITE_PERMISSIONS = (
+    _VIEW_CHANNEL
+    | _SEND_MESSAGES
+    | _EMBED_LINKS
+    | _READ_MESSAGE_HISTORY
+    | _MANAGE_WEBHOOKS
+    | _CREATE_PUBLIC_THREADS
+    | _SEND_MESSAGES_IN_THREADS
+)  # == 309774601216
 
 # Shown verbatim at the invite step. The two privileged intents are the single most-missed setup
 # step (see docs/discord-setup.md); naming them inline turns a silent "bot online but never replies"
