@@ -515,12 +515,14 @@ async def test_start_waits_for_rest_server_then_primes(tmp_path, fake_pc_bin) ->
 # --- start: broker fast-fail precondition (§13.2) ---------------------------
 
 
-async def test_start_fails_fast_when_broker_unreachable(
+async def test_start_fails_fast_when_external_broker_unreachable(
     tmp_path, capsys, fake_pc_bin
 ) -> None:
-    # §13.2: the broker is a fast-fail precondition. If it is not reachable, start
-    # must bail BEFORE rendering/launching — no `up`, no supervisor — so a down
-    # broker fails in a heartbeat instead of after a 90s bridge-readiness timeout.
+    # §13.2: for an EXTERNAL (non-loopback) broker the fast-fail precondition
+    # stands. If the operator's remote broker is unreachable, start must bail
+    # BEFORE rendering/launching — no `up`, no supervisor — so it fails in a
+    # heartbeat instead of after a 90s bridge-readiness timeout. (A compose-managed
+    # loopback broker is exempt: it is launched by `up` itself, see the test below.)
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
 
@@ -533,7 +535,7 @@ async def test_start_fails_fast_when_broker_unreachable(
 
     code = await lifecycle.start(
         home,
-        server_urls="localhost:9092",
+        server_urls="broker.example.com:9092",
         launcher="/h/shims/disco",
         agent_ids=[],
         client=client,
@@ -551,8 +553,88 @@ async def test_start_fails_fast_when_broker_unreachable(
     # Actionable error: names the unreachable broker and how to start it.
     out = capsys.readouterr().out.lower()
     assert "broker" in out
-    assert "localhost:9092" in out
+    assert "broker.example.com:9092" in out
     assert "disco broker" in out
+
+
+async def test_start_skips_broker_probe_for_compose_managed_loopback_broker(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    # The cold-start regression (P0): on a fresh machine the broker is a
+    # compose-managed AUTOSTART process that `up` itself launches. A pre-launch
+    # probe would fast-fail the very broker we are about to start, so `start` must
+    # SKIP the probe for a loopback URL and proceed to `up` — even when the broker
+    # is (as it always is cold) not yet reachable. Here the injected probe reports
+    # unreachable, yet start must still render + spawn `up`.
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    clock = _FakeClock()
+    probe_calls = {"n": 0}
+
+    async def _unreachable() -> bool:
+        probe_calls["n"] += 1
+        return False
+
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        agent_ids=[],
+        client=client,
+        spawn=spawn,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_unreachable,
+    )
+
+    assert code == 0
+    # The pre-launch probe was NOT consulted for a compose-managed broker.
+    assert probe_calls["n"] == 0
+    # `up` was launched despite the (cold) broker being unreachable.
+    assert len(spawn.calls) == 1
+    assert spawn.calls[0][1] == "up"
+
+
+async def test_start_external_broker_manifest_omits_broker_slot(
+    tmp_path, fake_pc_bin
+) -> None:
+    # An external-broker install renders a manifest WITHOUT a local broker process
+    # (starting an ephemeral broker nobody talks to is wrong) — the probe governs
+    # inclusion and probe-skipping on the same predicate so they cannot diverge.
+    import yaml as _yaml
+
+    home = _home(tmp_path)
+    clock = _FakeClock()
+
+    async def _reachable() -> bool:
+        return True
+
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        bridge_states=[{"is_ready": "Ready"}],
+    )
+    code = await lifecycle.start(
+        home,
+        server_urls="broker.example.com:9092",
+        launcher="/h/shims/disco",
+        agent_ids=["assistant"],
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable,
+    )
+    assert code == 0
+    project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
+    procs = project["processes"]
+    assert "broker" not in procs
+    assert "depends_on" not in procs["bridge"]
+    assert "depends_on" not in procs["assistant"]
 
 
 # --- start: readiness timeout -> teardown -> non-zero -----------------------

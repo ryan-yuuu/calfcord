@@ -580,9 +580,9 @@ def _run_finish(
     it is already watching the mesh) → an in-flow ``@<name> hello`` prompt once the
     watcher is listening, mapping each failure to its specific hint:
 
-    * substrate not ready → tear-down already happened in ``start``; map to the
-      "privileged intents are probably off" hint and stop (don't clock the agent
-      into a workspace that isn't up);
+    * substrate not ready → tear-down already happened in ``start``; point at
+      ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
+      (don't clock the agent into a workspace that isn't up);
     * agent start failed → stop before the presence watch;
     * agent seen online → 🎉; timed out → the bounded "org is live — try it
       yourself / run ``disco doctor``" downgrade.
@@ -657,11 +657,12 @@ async def _finish_live(
     )
     if rc != 0:
         # start() already tore the substrate down and printed the specific cause;
-        # map a readiness failure to the most-missed onboarding cause (§12.6).
+        # point at the diagnostics rather than guessing one (§12.6 — never
+        # misattribute: a cold-start broker failure, a Discord-intents gap, and a
+        # bad config all land here, so name the tools that show which it was).
         print(
-            "  the workspace didn't come up. If the broker is running, the bridge's "
-            "privileged intents are probably off — enable Message Content and Server "
-            "Members on the Bot tab, then re-run `disco init`."
+            "  the workspace didn't come up. Check `disco logs` for the details or "
+            "run `disco doctor` to diagnose, then re-run `disco init`."
         )
         return rc
 

@@ -18,7 +18,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from calfcord.supervisor.compose import build_compose_project, render_compose
+from calfcord.supervisor.compose import (
+    broker_is_compose_managed,
+    build_compose_project,
+    render_compose,
+)
 
 _HOME = "/srv/calfcord"
 _LAUNCHER = "/srv/calfcord/shims/disco"
@@ -294,3 +298,85 @@ def test_agent_id_colliding_with_mcp_slot_rejected() -> None:
 def test_mcp_slot_log_location_under_state_logs() -> None:
     proc = _mcp_project(["github"])["processes"]["mcp-github"]
     assert proc["log_location"] == os.path.join(_HOME, "state", "logs", "mcp-github.log")
+
+
+# --- broker: compose-managed (local) vs external -----------------------------
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    [
+        "localhost",
+        "localhost:9092",
+        "127.0.0.1:9092",
+        "127.0.0.5:9092",
+        "::1",
+        "[::1]:9092",
+        ":9092",
+        "localhost:9092,127.0.0.1:9093",
+    ],
+)
+def test_loopback_urls_are_compose_managed(server_urls: str) -> None:
+    # A loopback broker URL means calfcord itself supervises a local Tansu as the
+    # ``broker`` compose process — so `start` lets `up` launch it (no pre-launch
+    # probe) and the manifest declares the slot.
+    assert broker_is_compose_managed(server_urls) is True
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    [
+        "broker.example.com:9092",
+        "10.0.0.5:9092",
+        "[2001:db8::1]:9092",
+        "localhost:9092,broker.example.com:9093",
+        "",
+    ],
+)
+def test_external_urls_are_not_compose_managed(server_urls: str) -> None:
+    # A real external broker (or an empty/unknown URL) is NOT supervised locally:
+    # `start` keeps its fast-fail probe and the manifest must not declare a broker.
+    assert broker_is_compose_managed(server_urls) is False
+
+
+def test_external_broker_omits_the_broker_process() -> None:
+    # Starting a local ephemeral broker nobody talks to is wrong: an external-broker
+    # install must not declare a ``broker`` slot at all.
+    procs = build_compose_project(
+        agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER, broker_managed=False
+    )["processes"]
+    assert "broker" not in procs
+    # The rest of the office is still declared.
+    assert "bridge" in procs
+    for name in ("tools", "assistant", "scribe"):
+        assert name in procs
+
+
+def test_external_broker_drops_depends_on_broker() -> None:
+    # With no local ``broker`` process, nothing may declare a depends_on to it —
+    # process-compose would reject a dependency on an undeclared process.
+    procs = build_compose_project(
+        agent_ids=_AGENTS,
+        home=_HOME,
+        launcher=_LAUNCHER,
+        mcp_servers=["github"],
+        broker_managed=False,
+    )["processes"]
+    for name in ("bridge", "tools", "assistant", "scribe", "mcp-github"):
+        assert "depends_on" not in procs[name]
+
+
+def test_external_broker_keeps_bridge_readiness_probe() -> None:
+    # The bridge still carries its own readiness probe (Discord heartbeat) even
+    # when the broker is external — only the broker gating changes.
+    procs = build_compose_project(
+        agent_ids=[], home=_HOME, launcher=_LAUNCHER, broker_managed=False
+    )["processes"]
+    assert "readiness_probe" in procs["bridge"]
+
+
+def test_broker_managed_defaults_true_backward_compatible() -> None:
+    # The default keeps the native (compose-managed) shape: broker present + gated.
+    procs = build_compose_project(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER)["processes"]
+    assert "broker" in procs
+    assert procs["bridge"]["depends_on"] == {"broker": {"condition": "process_healthy"}}
