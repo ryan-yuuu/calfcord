@@ -220,19 +220,31 @@ class TestFailureClassification:
         out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
         assert out.status == "retry" and out.failed_text == "x" and out.error is not None
 
-    async def test_forbidden_returns_dropped(self) -> None:
+    async def test_forbidden_returns_dropped_and_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
         personas = _FakePersonas()
         personas.errors = [discord.Forbidden(_Resp(403), "no perms")]
         poster, _, _ = _poster(personas)
-        out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
+        with caplog.at_level("WARNING"):
+            out = await poster.post_reply(
+                _req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1"
+            )
         assert out.status == "dropped"
+        # 403 (missing Manage Webhooks) is an operator-actionable misconfiguration → ERROR.
+        drops = [r for r in caplog.records if "dropping" in r.message]
+        assert len(drops) == 1 and drops[0].levelname == "ERROR"
 
-    async def test_rate_limited_returns_dropped(self) -> None:
+    async def test_rate_limited_returns_dropped_and_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         personas = _FakePersonas()
         personas.errors = [discord.RateLimited(1.0)]
         poster, _, _ = _poster(personas)
-        out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
+        with caplog.at_level("WARNING"):
+            out = await poster.post_reply(
+                _req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1"
+            )
         assert out.status == "dropped"
+        # Rate-limit is transient noise → WARNING, not ERROR.
+        drops = [r for r in caplog.records if "dropping" in r.message]
+        assert len(drops) == 1 and drops[0].levelname == "WARNING"
 
     async def test_non_discord_sender_error_returns_dropped(self) -> None:
         personas = _FakePersonas()
@@ -266,13 +278,14 @@ class TestPostChunked:
     async def test_long_reply_splits_first_chunk_has_toggle_and_row(self) -> None:
         poster, personas, store = _poster()
         big = "x" * 4500
-        await poster.post_chunked(
+        posted = await poster.post_chunked(
             _req(),
             Persona(name="scribe"),
             _result(big, message_history=_tool_history()),
             initial_len=1,
             correlation_id="c1",
         )
+        assert posted is True  # at least one chunk delivered
         assert len(personas.sends) >= 3  # >2 chunks
         assert personas.sends[0]["extra_buttons"] is not None  # toggle on first chunk only
         assert all(s["extra_buttons"] is None for s in personas.sends[1:])
@@ -280,14 +293,16 @@ class TestPostChunked:
         assert all(s["reply_to"] is None for s in personas.sends[1:])
         assert len(store.rows) == 1
 
-    async def test_all_chunks_fail_is_swallowed(self) -> None:
+    async def test_all_chunks_fail_returns_false(self) -> None:
         personas = _FakePersonas()
         personas.errors = [_http(403)] * 10
         poster, _, store = _poster(personas)
-        # must not raise even though every chunk fails
-        await poster.post_chunked(
+        # must not raise even though every chunk fails, and must signal total loss
+        # (False) so the handler surfaces an operator notice.
+        posted = await poster.post_chunked(
             _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
         )
+        assert posted is False
         assert store.rows == []
 
 

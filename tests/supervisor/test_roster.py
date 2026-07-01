@@ -19,7 +19,10 @@ physical-only "not yet registered", logical-only "running on another host").
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+from calfkit.exceptions import MeshUnavailableError
 
 from calfcord.supervisor import roster
 from calfcord.supervisor.client import ProcessComposeError
@@ -1078,3 +1081,89 @@ async def test_default_probe_delegates_to_probe_live_roster(monkeypatch):
 
     assert seen["server_urls"] == _SERVERS
     assert result == ["assistant"]
+
+
+# --- _probe_live_roster body (the native-mesh read; previously monkeypatched away) ---
+
+
+class _ProbeFakeClient:
+    """Scriptable stand-in for the short-lived Client ``_probe_live_roster`` opens.
+
+    Controls the ``events()`` start (broker-up), ``mesh.get_agents()``, and records
+    ``aclose()`` so a test can assert the connection is always cleaned up — even on
+    the error paths.
+    """
+
+    def __init__(self, *, agents=None, get_agents_error=None, events_error=None) -> None:
+        self._agents = agents or {}
+        self._get_agents_error = get_agents_error
+        self._events_error = events_error
+        self.mesh = self  # client.mesh.get_agents() resolves back here
+        self.aclosed = False
+
+    def events(self, *, terminal_only: bool = False):
+        outer = self
+
+        class _CM:
+            async def __aenter__(self):
+                if outer._events_error is not None:
+                    raise outer._events_error
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _CM()
+
+    async def get_agents(self):
+        if self._get_agents_error is not None:
+            raise self._get_agents_error
+        return self._agents
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+
+
+def _patch_probe_client(monkeypatch, fake: _ProbeFakeClient) -> None:
+    monkeypatch.setattr(roster.Client, "connect", lambda *a, **k: fake)
+
+
+async def test_probe_returns_sorted_online_names(monkeypatch):
+    """Success: the online agent NAMES from the mesh, sorted; connection closed."""
+    fake = _ProbeFakeClient(agents={"n2": SimpleNamespace(name="scribe"), "n1": SimpleNamespace(name="assistant")})
+    _patch_probe_client(monkeypatch, fake)
+    assert await roster._probe_live_roster(_SERVERS) == ["assistant", "scribe"]
+    assert fake.aclosed is True
+
+
+@pytest.mark.parametrize("reason", ["establishing", "open_failed"])
+async def test_probe_benign_mesh_unavailable_returns_empty(monkeypatch, reason):
+    """`establishing` (view catching up) and `open_failed` (calf.agents topic not
+    created until the first agent registers — the fresh-install state) both mean
+    'no online agents to report' here, since events() already confirmed the broker
+    is up. Map to [] and still close the connection."""
+    fake = _ProbeFakeClient(get_agents_error=MeshUnavailableError("nope", reason=reason))
+    _patch_probe_client(monkeypatch, fake)
+    assert await roster._probe_live_roster(_SERVERS) == []
+    assert fake.aclosed is True
+
+
+async def test_probe_reader_dead_propagates(monkeypatch):
+    """`reader_dead` is terminal — we genuinely can't read the roster, so it must
+    PROPAGATE (not mask to []) so the caller degrades visibly and the duplicate
+    guard stays conservative. Connection still closed."""
+    fake = _ProbeFakeClient(get_agents_error=MeshUnavailableError("dead", reason="reader_dead"))
+    _patch_probe_client(monkeypatch, fake)
+    with pytest.raises(MeshUnavailableError):
+        await roster._probe_live_roster(_SERVERS)
+    assert fake.aclosed is True
+
+
+async def test_probe_broker_down_propagates(monkeypatch):
+    """A down broker raises out of the events() start (not a MeshUnavailableError),
+    so it propagates unmasked — and the connection is still closed."""
+    fake = _ProbeFakeClient(events_error=ConnectionError("broker down"))
+    _patch_probe_client(monkeypatch, fake)
+    with pytest.raises(ConnectionError):
+        await roster._probe_live_roster(_SERVERS)
+    assert fake.aclosed is True

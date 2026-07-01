@@ -132,12 +132,16 @@ class _FakeProgress:
 
 
 class _FakeReply:
-    def __init__(self, outcomes: list[ReplyOutcome] | None = None) -> None:
+    def __init__(
+        self, outcomes: list[ReplyOutcome] | None = None, *, chunked_ok: bool = True
+    ) -> None:
         self.replies: list[tuple[Any, str]] = []
         self.chunked: list[tuple[Any, str]] = []
         self.notices: list[str] = []
         # Scripted per-post_reply outcomes; defaults to "ok" once exhausted.
         self._outcomes = list(outcomes or [])
+        # Whether post_chunked reports a successful delivery (False => fully lost).
+        self._chunked_ok = chunked_ok
 
     async def post_reply(
         self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
@@ -147,8 +151,9 @@ class _FakeReply:
 
     async def post_chunked(
         self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
-    ) -> None:
+    ) -> bool:
         self.chunked.append((persona, result.output))
+        return self._chunked_ok
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
         self.notices.append(text)
@@ -209,6 +214,7 @@ def _make(
     handles: list[_FakeHandle] | None = None,
     overrides: dict[str, str] | None = None,
     reply_outcomes: list[ReplyOutcome] | None = None,
+    chunked_ok: bool = True,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
     if handles is None:
         handles = [handle if handle is not None else _FakeHandle(result=_result("done", "scribe"))]
@@ -216,7 +222,7 @@ def _make(
     fakes = {
         "a2a": _FakeA2A(),
         "progress": _FakeProgress(),
-        "reply": _FakeReply(reply_outcomes),
+        "reply": _FakeReply(reply_outcomes, chunked_ok=chunked_ok),
         "history": _FakeHistory(),
     }
     handler = MentionHandler(
@@ -363,11 +369,37 @@ class TestRetryWithFeedback:
         assert len(fakes["reply"].chunked) == 1
         assert len(client.gw.starts) == 3  # original + 2 retries
 
-    async def test_dropped_outcome_does_not_retry(self) -> None:
+    async def test_dropped_outcome_does_not_retry_but_notifies(self) -> None:
         handler, client, fakes = _make(reply_outcomes=[ReplyOutcome("dropped")])
         await handler.handle(_req())
         assert len(client.gw.starts) == 1  # infra failure → no retry
         assert fakes["reply"].chunked == []
+        # I-2: a dropped reply must surface an operator notice, not ghost the user.
+        assert len(fakes["reply"].notices) == 1 and "couldn't post" in fakes["reply"].notices[0].lower()
+
+    async def test_chunk_total_loss_posts_notice(self) -> None:
+        # Retries exhausted → chunk-split fallback, and every chunk also fails
+        # (post_chunked returns False) → the user gets an operator notice.
+        handler, _client, fakes = _make(
+            handles=[_FakeHandle(result=_result("x", "scribe"))],
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
+            chunked_ok=False,
+        )
+        await handler.handle(_req())
+        assert len(fakes["reply"].chunked) == 1
+        assert len(fakes["reply"].notices) == 1 and "couldn't post" in fakes["reply"].notices[0].lower()
+
+    async def test_fault_logs_full_error_report_at_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        # I-1: the fault log must carry the ErrorReport calfkit shipped (error_type,
+        # message), not just the origin, and at ERROR.
+        handle = _FakeHandle(fault=NodeFaultError("billing.quota_exceeded", message="boom"))
+        handler, _client, _fakes = _make(handle=handle)
+        with caplog.at_level("ERROR"):
+            await handler.handle(_req())
+        faults = [r for r in caplog.records if "faulted" in r.message and r.levelname == "ERROR"]
+        assert len(faults) == 1
+        assert "error_type=billing.quota_exceeded" in faults[0].message
+        assert "message=boom" in faults[0].message
 
     async def test_retry_reinvocation_fault_posts_notice(self) -> None:
         # The retry re-invocation itself faults → user-facing notice, no crash.

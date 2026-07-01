@@ -38,6 +38,10 @@ from calfcord.discord.retry_feedback import (
 logger = logging.getLogger(__name__)
 
 _ROSTER_UNAVAILABLE = "I can't reach the agent roster right now — please try again in a moment."
+_REPLY_DROPPED = (
+    "I finished, but couldn't post my reply — a Discord error is blocking it. "
+    "If this keeps happening, an operator should check the bot's channel permissions."
+)
 
 
 def _none_online_text(mention_ids: tuple[str, ...]) -> str:
@@ -48,6 +52,33 @@ def _none_online_text(mention_ids: tuple[str, ...]) -> str:
 def _agent_error_text(origin: str | None) -> str:
     who = f"`{origin}`" if origin else "The agent"
     return f"{who} hit an error handling that message. Please try again."
+
+
+def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> str | None:
+    """Log the full ``ErrorReport`` calfkit shipped; return the fault origin node.
+
+    Agents run on other hosts, so the report the bridge received on the fault
+    (spec §11.1) is the operator's only in-hand diagnostic — log ``error_type``,
+    ``message``, ``retryable`` and the harvested upstream exception at ERROR, not
+    just ``origin`` (which alone forces a cross-host log dig for every fault). The
+    defensive ``getattr`` chain tolerates a framework/minted fault (no
+    ``exception`` slot) and a malformed fault with no report.
+    """
+    report = getattr(exc, "report", None)
+    origin = getattr(report, "origin_node_id", None)
+    exception = getattr(report, "exception", None)
+    upstream = f"{exception.type}: {exception.attrs}" if exception is not None else None
+    logger.error(
+        "agent %s faulted target=%s origin=%s error_type=%s retryable=%s message=%s upstream=%s",
+        phase,
+        target,
+        origin,
+        getattr(report, "error_type", None),
+        getattr(report, "retryable", None),
+        getattr(report, "message", None),
+        upstream,
+    )
+    return origin
 
 
 @dataclass(frozen=True)
@@ -115,7 +146,7 @@ class ReplyPoster(Protocol):
     ) -> ReplyOutcome: ...
     async def post_chunked(
         self, req: MentionRequest, persona: Persona, result: Any, *, initial_len: int, correlation_id: str
-    ) -> None: ...
+    ) -> bool: ...
     async def post_notice(self, req: MentionRequest, text: str) -> None: ...
 
 
@@ -178,14 +209,24 @@ class MentionHandler:
         dispatcher = A2ADispatcher()
         try:
             async for event in handle.stream():
-                step = normalize_run_event(event)
-                if step is None:
-                    continue  # terminal — handled by result() below
-                projection = dispatcher.classify(step)
-                if projection is not None:
-                    await self._a2a.project(projection)
-                else:
-                    await self._progress.on_step(step, req)
+                try:
+                    step = normalize_run_event(event)
+                    if step is None:
+                        continue  # terminal — handled by result() below
+                    projection = dispatcher.classify(step)
+                    if projection is not None:
+                        await self._a2a.project(projection)
+                    else:
+                        await self._progress.on_step(step, req)
+                except Exception:
+                    # A render/normalize/classify bug (or a future calfkit event
+                    # shape) must NOT unwind the drain and cost the user the
+                    # already-computed terminal reply — the progress and A2A
+                    # contracts both promise the render path can't fault the turn.
+                    # Drop just this step (logged) and keep draining; _deliver posts
+                    # the terminal reply below regardless. CancelledError is a
+                    # BaseException, so shutdown still propagates.
+                    logger.exception("bridge: dropping unrenderable run step; terminal reply unaffected")
         finally:
             await self._progress.finish(handle.correlation_id)
 
@@ -224,14 +265,25 @@ class MentionHandler:
             outcome = await self._reply.post_reply(
                 req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
             )
-            if outcome.status != "retry":
-                return  # "ok" or "dropped" — nothing more to do
+            if outcome.status == "ok":
+                return
+            if outcome.status == "dropped":
+                # A Discord error the agent can't fix (missing Manage Webhooks, bad
+                # token, persistent 5xx) blocked the persona-webhook post. The reply
+                # is otherwise lost silently — the progress message was already
+                # deleted in handle() — so surface an operator notice via the
+                # native-reply path, which needs only Send Messages and is
+                # independent of the failing webhook path.
+                await self._reply.post_notice(req, _REPLY_DROPPED)
+                return
             if attempts >= MAX_REPLY_RETRY_ATTEMPTS:
                 # Budget exhausted: post the last attempt chunk-split rather than
-                # losing the reply entirely.
-                await self._reply.post_chunked(
+                # losing the reply entirely; if every chunk also fails, notice.
+                posted = await self._reply.post_chunked(
                     req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
                 )
+                if not posted:
+                    await self._reply.post_notice(req, _REPLY_DROPPED)
                 return
             attempts += 1
             retry_history = build_retry_history(
@@ -250,11 +302,14 @@ class MentionHandler:
                 )
                 result = await retry_handle.result()
             except NodeFaultError as exc:
-                origin = getattr(getattr(exc, "report", None), "origin_node_id", None)
-                logger.warning("agent retry faulted target=%s origin=%s", target, origin)
-                await self._reply.post_notice(req, _agent_error_text(origin))
+                await self._post_fault_notice(req, exc, target, phase="retry")
                 return
             attempt_history = retry_history
+
+    async def _post_fault_notice(self, req: MentionRequest, exc: NodeFaultError, target: str, *, phase: str) -> None:
+        """Log the fault's full report (I-1) and post the user-facing error notice."""
+        origin = _log_agent_fault(exc, target, phase=phase)
+        await self._reply.post_notice(req, _agent_error_text(origin))
 
     async def _await_terminal(
         self, req: MentionRequest, handle: Any, dispatcher: A2ADispatcher, target: str
@@ -273,7 +328,5 @@ class MentionHandler:
         except NodeFaultError as exc:
             for call in dispatcher.dangling():
                 await self._a2a.project_fault(call)
-            origin = getattr(getattr(exc, "report", None), "origin_node_id", None)
-            logger.warning("agent run faulted target=%s origin=%s", target, origin)
-            await self._reply.post_notice(req, _agent_error_text(origin))
+            await self._post_fault_notice(req, exc, target, phase="run")
             return None

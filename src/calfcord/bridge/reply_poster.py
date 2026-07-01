@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Final
 
 import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 _SERVER_ERROR_RETRY_DELAY_SECONDS = 2.0
 """Delay before the one extra attempt on a first-try Discord 5xx (matches the
 old outbox value; a single-worker poster can't afford a long sleep)."""
+
+_OPERATOR_ACTIONABLE_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
+"""Discord drop statuses that mean the bot is *misconfigured* — 401 (bad token)
+and 403 (missing Manage Webhooks) — not transient. They silently break EVERY
+reply, so they log at ERROR (surfacing in alerting); rate-limit / 404 / 5xx are
+transient or environmental and stay at WARNING."""
 
 
 def _turn_delta(result: Any, initial_len: int) -> list[ModelMessage]:
@@ -111,24 +117,32 @@ class ReplyPoster:
             kind = classify_error(e)
             if kind == "agent_fixable":
                 return ReplyOutcome("retry", error=e, failed_text=text)
-            logger.warning(
+            # Auth/permission drops are operator-actionable misconfigurations that
+            # silently break every reply -> ERROR (so alerting sees them); rate-limit
+            # / 5xx are transient -> WARNING. Either way the handler surfaces an
+            # operator notice via the native-reply path.
+            status = getattr(e, "status", None)
+            log = logger.error if status in _OPERATOR_ACTIONABLE_STATUSES else logger.warning
+            log(
                 "reply post failed channel_id=%s correlation_id=%s: %s reply (status=%s); dropping",
                 wire.channel_id,
                 correlation_id,
                 kind,
-                getattr(e, "status", None),
+                status,
                 exc_info=True,
             )
             return ReplyOutcome("dropped")
         except (TypeError, RuntimeError) as e:
             # Non-Discord, operator-actionable sender errors (non-text channel /
-            # sender not started) — not agent-fixable or transient.
+            # sender not started) — not agent-fixable or transient. Keep the stack
+            # (exc_info) so an unexpected RuntimeError source is diagnosable.
             logger.error(
                 "reply post failed channel_id=%s correlation_id=%s: non-retryable sender error %s (%s); dropping",
                 wire.channel_id,
                 correlation_id,
                 type(e).__name__,
                 e,
+                exc_info=True,
             )
             return ReplyOutcome("dropped")
         if write_transcript:
@@ -150,18 +164,24 @@ class ReplyPoster:
         *,
         initial_len: int,
         correlation_id: str,
-    ) -> None:
+    ) -> bool:
         """Final fallback (retries exhausted): split the reply into ≤2000-char
         chunks and post each under ``persona``. The first chunk carries the
         inline-reply anchor + (if the turn used tools) the expand toggle and the
         transcript row; later chunks are bare continuations. Per-chunk failures
-        are logged independently so partial delivery survives."""
+        are logged independently so partial delivery survives.
+
+        Returns ``True`` if at least one chunk posted (or there was nothing to
+        post), ``False`` if the reply was fully lost (every chunk failed) so the
+        handler can surface an operator notice rather than ghost the user."""
         wire = WireMessage.model_validate(req.wire)
         text = (result.output or "").strip()
         chunks = chunk_split(text)
         if not chunks:
+            # Nothing to deliver (empty reply); not a loss to surface — mirrors
+            # post_reply treating an empty reply as a no-op success.
             logger.warning("chunk-split fallback received empty text correlation_id=%s", correlation_id)
-            return
+            return True
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
@@ -199,12 +219,14 @@ class ReplyPoster:
                 )
         if failures and len(failures) == total:
             dominant = max(set(failures), key=failures.count)
-            logger.warning(
+            logger.error(
                 "chunk-split delivered 0/%d chunks correlation_id=%s dominant_status=%s; reply fully lost",
                 total,
                 correlation_id,
                 dominant,
             )
+            return False
+        return True
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
         """Post a plain operator-facing notice as an inline reply (no persona).

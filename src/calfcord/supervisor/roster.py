@@ -43,6 +43,7 @@ CLI entry point.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Awaitable, Callable
 
@@ -57,6 +58,8 @@ from calfcord.supervisor._workspace import (
 )
 from calfcord.supervisor.client import ProcessComposeClient, ProcessComposeError
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
+
+logger = logging.getLogger(__name__)
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
 # NAMES of every agent currently online across the org. Injected so tests script
@@ -107,13 +110,23 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
     all the duplicate guard and the ps board consume. ``timeout_s`` bounds the
     whole probe (connect + broker start + view catch-up + read).
 
-    A :class:`~calfkit.exceptions.MeshUnavailableError` means the broker is
-    reachable but the ``calf.agents`` plane can't be read yet — most commonly
-    because no agent has ever come online (the compacted topic isn't created until
-    one does). That is "no online agents to report", not a fault, so it maps to an
-    empty roster. A broker that is actually down raises out of the ``events()``
-    start (or trips ``timeout_s``) and PROPAGATES, so the callers' "broker
-    unreachable" degradation stays accurate.
+    A :class:`~calfkit.exceptions.MeshUnavailableError` is branched on ``reason``
+    (never silently swallowed — that masked ``reader_dead`` and made a dead reader
+    read as a confident "nobody online"). Because the ``events()`` start above
+    already confirmed the broker is up, the reasons split cleanly:
+
+    * ``establishing`` (view still catching up) / ``open_failed`` (the
+      ``calf.agents`` directory topic doesn't exist until the first agent ever
+      registers) — both mean "no online agents to report" here, not a fault, so
+      they map to an empty roster.
+    * ``reader_dead`` (the reader died on a non-retriable error) — we genuinely
+      cannot read the roster, so log at ERROR and PROPAGATE. The callers'
+      ``except Exception`` degradation then fires ("broker unreachable; local
+      agents only") and the duplicate guard stays conservative rather than
+      failing open on a confident-but-wrong empty roster.
+
+    A broker that is actually down raises out of the ``events()`` start (or trips
+    ``timeout_s``) and PROPAGATES too, so the callers' degradation stays accurate.
 
     NOTE the behavior change from the deleted probe: liveness is now passive mesh
     heartbeat-staleness, not an active discovery ping/response round-trip.
@@ -125,7 +138,15 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
                 pass
             agents = await client.mesh.get_agents()
             return sorted(info.name for info in agents.values())
-    except MeshUnavailableError:
+    except MeshUnavailableError as exc:
+        if exc.reason == "reader_dead":
+            logger.error(
+                "live-roster probe: mesh reader died (reason=%s); cannot read the online "
+                "roster — treating the mesh as unreachable so the duplicate guard stays safe",
+                exc.reason,
+            )
+            raise
+        logger.debug("live-roster probe: mesh unavailable (reason=%s); reporting no online agents", exc.reason)
         return []
     finally:
         await client.aclose()
