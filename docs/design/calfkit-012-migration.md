@@ -750,3 +750,13 @@ ADR-0010/0011/0012/0013/0014/0018, `models/capability.py`, `controlplane/`.
 outbox, pending_wires, egress, synthesized, steps*), `agents/` (factory, runner,
 gates, phonebook, peer_roster, routing), `tools/private_chat.py`, `router/`,
 `control_plane/`, `mcp/`, `topics.py`.
+
+## Follow-ups
+
+- **`doctor` config-drift / deep-probe removed.** The `calfcord doctor` runtime
+  section's deep control-plane probe and local↔org drift check were removed in the
+  0.12 migration (they were fed by the now-deleted `control_plane`; production never
+  wired a probe, so both were unreachable). The runtime section now reports daemon
+  liveness plus a pointer to `calfcord status`. A follow-up could rewire drift onto
+  the native calfkit mesh view (`client.mesh.get_agents`) to compare the online mesh
+  roster against the locally-running processes.

@@ -8,7 +8,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from calfcord.agents.definition import AgentDefinition
 from calfcord.cli import doctor
 from calfcord.health.heartbeat import Heartbeat
 
@@ -267,14 +266,11 @@ def test_token_never_leaks_across_paths(monkeypatch, tmp_path, capsys):
 #
 # When the daemon is up (detected via the bridge heartbeat) doctor adds a RUNTIME
 # section on top of the 5 STATIC checks. The daemon-alive check (heartbeat
-# freshness) always runs; the deep-probe (confirm the org answers and list
-# registered agents) and drift (agents running per Process Compose vs. registered
-# per the probe) checks run ONLY when a probe is injected. The calfkit 0.12
-# migration removed the default control-plane probe (roster liveness rides the
-# native mesh now), so production leaves the probe unset and the runtime section
-# emits a single informational "roster" line instead; the tests below inject a
-# probe to exercise the deep-probe + drift path. Every world-touching dependency is
-# injected so no real broker / supervisor / heartbeat file is needed (§4.4 / §12.1 / §13.3).
+# freshness) always runs; a fresh beat then adds a single informational "roster"
+# line pointing at the native mesh view. The calfkit 0.12 migration removed the
+# bespoke control-plane deep-probe + local↔org drift checks (roster liveness rides
+# the native mesh now — see ``calfcord status``). The heartbeat reader / clock are
+# injected so no real heartbeat file is needed (§4.4 / §12.1 / §13.3).
 
 _NOW = datetime(2026, 6, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -297,41 +293,6 @@ def _reader(beats: dict[str, Heartbeat]):
     return lambda home, component: beats.get(component)
 
 
-def _probe_err(exc: Exception):
-    """An async ``probe_fn`` that raises (broker unreachable for the deep probe)."""
-
-    async def _run(server_urls):
-        raise exc
-
-    return _run
-
-
-def _agent(agent_id: str) -> AgentDefinition:
-    return AgentDefinition(
-        name=agent_id,
-        description="a live agent",
-        system_prompt=f"You are {agent_id}.",
-    )
-
-
-class _StubPCClient:
-    """A minimal ProcessComposeClient stand-in exposing only ``list_processes``.
-
-    ``raises`` models the supervisor being unreachable for the drift read — a REST
-    miss that is a SEPARATE failure domain from the (alive) bridge, so doctor must
-    degrade to a warn rather than crash on it.
-    """
-
-    def __init__(self, processes, *, raises: Exception | None = None):
-        self._processes = processes
-        self._raises = raises
-
-    async def list_processes(self):
-        if self._raises is not None:
-            raise self._raises
-        return self._processes
-
-
 def _runtime_setup(monkeypatch, tmp_path):
     """A healthy STATIC layout plus an install ``home`` for the runtime section."""
     env_path, agents_dir = _setup(monkeypatch, tmp_path)
@@ -339,14 +300,7 @@ def _runtime_setup(monkeypatch, tmp_path):
     return env_path, agents_dir, home
 
 
-def _run_runtime(
-    monkeypatch,
-    tmp_path,
-    *,
-    beats,
-    probe_fn,
-    processes=None,
-):
+def _run_runtime(monkeypatch, tmp_path, *, beats):
     """Invoke doctor with the runtime seams wired; return (rc, stdout)."""
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
     rc = doctor.run(
@@ -354,11 +308,8 @@ def _run_runtime(
         agents_dir=agents_dir,
         client_factory=_factory(_resp_ok),
         home=home,
-        server_urls="localhost:9092",
         now=_NOW,
         read_beat_fn=_reader(beats),
-        probe_fn=probe_fn,
-        pc_client=_StubPCClient(processes if processes is not None else []),
     )
     return rc, monkeypatch  # caller reads capsys separately
 
@@ -367,23 +318,16 @@ def test_daemon_down_skips_runtime_section(monkeypatch, tmp_path, capsys):
     # No bridge heartbeat at all -> the daemon is not running. doctor reports the
     # STATIC checks and explicitly notes the runtime section was skipped; it must
     # NOT fail solely because the workspace is closed (read-only, closed is valid).
-    env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
-    rc = doctor.run(
-        env_path=env_path,
-        agents_dir=agents_dir,
-        client_factory=_factory(_resp_ok),
-        home=home,
-        server_urls="localhost:9092",
-        now=_NOW,
-        read_beat_fn=_reader({}),  # no beats -> daemon down
-        probe_fn=_probe_err(AssertionError("probe must not run when daemon is down")),
-        pc_client=_StubPCClient([]),
+    rc, _ = _run_runtime(
+        monkeypatch,
+        tmp_path,
+        beats={},  # no beats -> daemon down
     )
     out = capsys.readouterr().out
     assert rc == 0
     assert "calfcord start" in out  # the next-step hint for a closed workspace
-    # The deep-probe / drift lines never render when the daemon is down.
-    assert "registered agent" not in out.lower()
+    # The runtime roster line never renders when the daemon is down.
+    assert "roster" not in out.lower()
 
 
 def test_no_home_skips_runtime_section(monkeypatch, tmp_path, capsys):
@@ -408,7 +352,6 @@ def test_stale_heartbeat_fails_as_zombie(monkeypatch, tmp_path, capsys):
         monkeypatch,
         tmp_path,
         beats={"bridge": _beat(age_s=600)},  # well past the 10s TTL
-        probe_fn=_probe_err(AssertionError("probe must not run on a stale daemon")),
     )
     out = capsys.readouterr().out
     assert rc == 1
@@ -416,132 +359,19 @@ def test_stale_heartbeat_fails_as_zombie(monkeypatch, tmp_path, capsys):
     assert "calfcord" in out  # a fix is named (restart)
 
 
-def test_deep_probe_lists_registered_agents(monkeypatch, tmp_path, capsys):
-    # Daemon fresh + the deep probe answers with two agents -> the runtime section
-    # is all-green and the registered agents are named.
-    async def probe(server_urls):
-        return [_agent("scribe"), _agent("aksel")]
-
+def test_fresh_daemon_reports_roster_hint(monkeypatch, tmp_path, capsys):
+    # Daemon fresh -> the runtime section is all-green: the daemon-alive line names
+    # the bridge identity and the roster line points at the native mesh view.
     rc, _ = _run_runtime(
         monkeypatch,
         tmp_path,
         beats={"bridge": _beat(identity="MyBot")},
-        probe_fn=probe,
-        processes=[
-            {"name": "bridge", "status": "Running"},
-            {"name": "scribe", "status": "Running"},
-            {"name": "aksel", "status": "Running"},
-        ],
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "scribe" in out and "aksel" in out
     assert "MyBot" in out  # the bridge identity is surfaced
-
-
-def test_deep_probe_empty_warns_no_agents_answering(monkeypatch, tmp_path, capsys):
-    # Daemon up but zero agents answer the ping -> warn (the "green but no replies"
-    # symptom only the deep probe can see). A warning never fails the run.
-    async def probe(server_urls):
-        return []
-
-    rc, _ = _run_runtime(
-        monkeypatch,
-        tmp_path,
-        beats={"bridge": _beat()},
-        probe_fn=probe,
-    )
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "⚠" in out
-    assert "agent start" in out  # the fix: bring an agent online
-
-
-def test_deep_probe_error_warns_not_crashes(monkeypatch, tmp_path, capsys):
-    # The bridge is alive (fresh beat) but the deep probe cannot reach the broker.
-    # doctor must degrade to a warning, never crash, and never fail the run on it.
-    rc, _ = _run_runtime(
-        monkeypatch,
-        tmp_path,
-        beats={"bridge": _beat()},
-        probe_fn=_probe_err(RuntimeError("broker unreachable")),
-    )
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "⚠" in out
-
-
-def test_drift_process_up_but_not_registered_warns(monkeypatch, tmp_path, capsys):
-    # `scribe` is Running in Process Compose but does NOT answer the probe -> drift
-    # (process up but never joined / wedged). Surfaced as a warn naming the agent.
-    async def probe(server_urls):
-        return [_agent("aksel")]  # only aksel answers
-
-    rc, _ = _run_runtime(
-        monkeypatch,
-        tmp_path,
-        beats={"bridge": _beat()},
-        probe_fn=probe,
-        processes=[
-            {"name": "bridge", "status": "Running"},
-            {"name": "scribe", "status": "Running"},  # up locally, not registered
-            {"name": "aksel", "status": "Running"},
-        ],
-    )
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "⚠" in out
-    assert "scribe" in out  # the drifting process is named
-
-
-def test_no_drift_when_running_matches_registered(monkeypatch, tmp_path, capsys):
-    # Physical roster == logical roster -> no drift finding (ok).
-    async def probe(server_urls):
-        return [_agent("scribe")]
-
-    rc, _ = _run_runtime(
-        monkeypatch,
-        tmp_path,
-        beats={"bridge": _beat()},
-        probe_fn=probe,
-        processes=[
-            {"name": "bridge", "status": "Running"},
-            {"name": "scribe", "status": "Running"},
-        ],
-    )
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "drift" in out.lower()  # the drift check renders, and is ok
+    assert "calfcord status" in out  # the roster hint points at the mesh view
     assert "✗" not in out
-
-
-def test_drift_supervisor_unreachable_warns_not_crashes(monkeypatch, tmp_path, capsys):
-    # Fix #6: the bridge is alive (fresh beat) and the deep probe answers, but the
-    # supervisor (Process Compose) is a SEPARATE failure domain — its
-    # `list_processes` can miss (REST down / wrong port). That read is NOT wrapped
-    # like the deep-probe above it, so an unhandled raise would crash a READ-ONLY
-    # doctor. doctor must degrade the drift check to a warn instead.
-    async def probe(server_urls):
-        return [_agent("scribe")]
-
-    env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
-    rc = doctor.run(
-        env_path=env_path,
-        agents_dir=agents_dir,
-        client_factory=_factory(_resp_ok),
-        home=home,
-        server_urls="localhost:9092",
-        now=_NOW,
-        read_beat_fn=_reader({"bridge": _beat()}),
-        probe_fn=probe,
-        pc_client=_StubPCClient([], raises=RuntimeError("supervisor REST down")),
-    )
-    out = capsys.readouterr().out
-    assert rc == 0  # a warn never fails a read-only doctor
-    assert "⚠" in out
-    assert "drift" in out.lower()
-    # The deep probe still rendered its result (the supervisor miss is isolated).
-    assert "scribe" in out
 
 
 def test_runtime_section_keeps_static_checks(monkeypatch, tmp_path, capsys):
@@ -550,19 +380,13 @@ def test_runtime_section_keeps_static_checks(monkeypatch, tmp_path, capsys):
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
     monkeypatch.delenv("DISCORD_APPLICATION_ID", raising=False)
 
-    async def probe(server_urls):
-        return [_agent("scribe")]
-
     rc = doctor.run(
         env_path=env_path,
         agents_dir=agents_dir,
         client_factory=_factory(_resp_ok),
         home=home,
-        server_urls="localhost:9092",
         now=_NOW,
         read_beat_fn=_reader({"bridge": _beat()}),
-        probe_fn=probe,
-        pc_client=_StubPCClient([{"name": "scribe", "status": "Running"}]),
     )
     out = capsys.readouterr().out
     assert rc == 1  # the static app-id failure still fails the whole run
@@ -570,16 +394,11 @@ def test_runtime_section_keeps_static_checks(monkeypatch, tmp_path, capsys):
 
 
 def test_runtime_token_never_leaks(monkeypatch, tmp_path, capsys):
-    # The token must not leak through the new runtime paths either.
-    async def probe(server_urls):
-        return [_agent("scribe")]
-
+    # The token must not leak through the runtime paths either.
     _run_runtime(
         monkeypatch,
         tmp_path,
         beats={"bridge": _beat()},
-        probe_fn=probe,
-        processes=[{"name": "scribe", "status": "Running"}],
     )
     captured = capsys.readouterr()
     assert TOKEN not in captured.out
@@ -588,18 +407,17 @@ def test_runtime_token_never_leaks(monkeypatch, tmp_path, capsys):
 
 # --------------------------------------------------------- production seam defaults
 #
-# The tests above inject every runtime seam; these two exercise the production
-# *defaults* (the real heartbeat reader plus the now / server_urls resolution)
-# without a real broker — so a wiring regression in the default-resolution path is
-# caught, not silently un-covered. The deep probe is no longer defaulted (calfkit
-# 0.12), so the default runtime section stops at the daemon-alive + roster-hint lines.
+# The tests above inject the runtime seams; these two exercise the production
+# *defaults* (the real heartbeat reader plus the ``now`` resolution) — so a wiring
+# regression in the default-resolution path is caught, not silently un-covered. The
+# deep probe was removed in the calfkit 0.12 migration, so the default runtime
+# section stops at the daemon-alive + roster-hint lines.
 
 
 def test_default_read_beat_resolves_from_disk_daemon_down(monkeypatch, tmp_path, capsys):
     # With `home` set but no seams injected, doctor must default to the real
     # `read_beat` and (finding no on-disk beat) report the workspace closed. This
-    # covers the `now`/`server_urls`/`read_beat` default-resolution branches with no
-    # broker — the probe/PC defaults never construct because the daemon is down.
+    # covers the `now` / `read_beat` default-resolution branches.
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
     rc = doctor.run(
         env_path=env_path,
@@ -613,12 +431,10 @@ def test_default_read_beat_resolves_from_disk_daemon_down(monkeypatch, tmp_path,
 
 
 def test_default_seams_report_roster_hint_from_disk_beat(monkeypatch, tmp_path, capsys):
-    # A real fresh on-disk beat + the default seams: with `probe_fn` left at its
-    # production default (None — the deep control-plane probe was removed in the
-    # calfkit 0.12 migration, roster liveness rides the native mesh now), doctor
-    # still defaults `now` / `server_urls` / `read_beat_fn`, reads the real beat,
-    # and — because no probe is wired — emits the single informational "roster"
-    # line pointing at `calfcord status` instead of running the deep probe / drift.
+    # A real fresh on-disk beat + the default seams: the deep control-plane probe
+    # was removed in the calfkit 0.12 migration (roster liveness rides the native
+    # mesh now), so doctor defaults `now` / `read_beat_fn`, reads the real beat, and
+    # emits the single informational "roster" line pointing at `calfcord status`.
     from calfcord.health.heartbeat import write_beat
 
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
@@ -632,8 +448,7 @@ def test_default_seams_report_roster_hint_from_disk_beat(monkeypatch, tmp_path, 
         agents_dir=agents_dir,
         client_factory=_factory(_resp_ok),
         home=home,
-        server_urls=None,  # exercises the CALF_HOST_URL default-resolution branch
-        # now / read_beat_fn / probe_fn / pc_client all default
+        # now / read_beat_fn all default
     )
     out = capsys.readouterr().out
     assert rc == 0
