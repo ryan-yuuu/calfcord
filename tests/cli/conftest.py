@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import webbrowser
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may ever open a real browser tab on the developer's machine.
+
+    ``init``'s invite step pops the OAuth page via ``webbrowser.open`` as a
+    best-effort default; any test that drives the wizard without injecting
+    ``open_url_fn`` would otherwise open Discord for the fake app id. Tests
+    that assert open behavior re-patch this seam themselves.
+    """
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: False)
 
 
 @pytest.fixture(autouse=True)

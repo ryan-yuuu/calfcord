@@ -335,10 +335,13 @@ def _try_open_browser(url: str) -> None:
     """Best-effort browser pop for the invite link; never raises.
 
     The URL is ALWAYS printed before this runs, so a wrong guess in either
-    direction only costs the convenience, never the link (§12.6). Skipped over
-    SSH and on display-less Linux, where ``webbrowser`` may fall back to a
-    terminal browser and hijack the wizard mid-flow.
+    direction only costs the convenience, never the link (§12.6). Skipped when
+    stdout isn't a terminal (piped/captured runs — including pytest — must
+    never pop a tab), over SSH, and on display-less Linux, where
+    ``webbrowser`` may fall back to a terminal browser and hijack the wizard.
     """
+    if not sys.stdout.isatty():
+        return
     if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
         return
     if sys.platform.startswith("linux") and not (

@@ -403,9 +403,29 @@ def test_invite_step_browser_open_failure_is_swallowed(
     assert discord_discovery.invite_url("999") in capsys.readouterr().out
 
 
+def _force_tty(monkeypatch: pytest.MonkeyPatch, value: bool) -> None:
+    """Pin the TTY guard: pytest captures stdout, so isatty() is False by
+    default and every guard test must state the terminal state it assumes."""
+    monkeypatch.setattr(init.sys.stdout, "isatty", lambda: value)
+
+
+def test_try_open_browser_skips_when_stdout_is_not_a_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Piped/captured runs (pytest included) must never pop a browser tab —
+    this is the guard that keeps the test suite itself side-effect free."""
+    calls: list[str] = []
+    monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    _force_tty(monkeypatch, False)
+    monkeypatch.setattr(init.sys, "platform", "darwin")
+    init._try_open_browser("https://example.test")
+    assert calls == []
+
+
 def test_try_open_browser_skips_over_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    _force_tty(monkeypatch, True)
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22")
     init._try_open_browser("https://example.test")
     assert calls == []
@@ -414,6 +434,7 @@ def test_try_open_browser_skips_over_ssh(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_try_open_browser_skips_headless_linux(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    _force_tty(monkeypatch, True)
     for var in ("SSH_CONNECTION", "SSH_TTY", "DISPLAY", "WAYLAND_DISPLAY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(init.sys, "platform", "linux")
@@ -424,6 +445,7 @@ def test_try_open_browser_skips_headless_linux(monkeypatch: pytest.MonkeyPatch) 
 def test_try_open_browser_opens_on_desktop(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(init.webbrowser, "open", calls.append)
+    _force_tty(monkeypatch, True)
     for var in ("SSH_CONNECTION", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(init.sys, "platform", "darwin")
@@ -436,6 +458,7 @@ def test_try_open_browser_swallows_webbrowser_errors(monkeypatch: pytest.MonkeyP
         raise RuntimeError("webbrowser exploded")
 
     monkeypatch.setattr(init.webbrowser, "open", boom)
+    _force_tty(monkeypatch, True)
     for var in ("SSH_CONNECTION", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(init.sys, "platform", "darwin")
