@@ -82,13 +82,13 @@
 | src/calfcord/supervisor/\_workspace.py        |       21 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/supervisor/client.py             |       59 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/supervisor/component.py          |       44 |        0 |       12 |        1 |     98% |   73-\>72 |
-| src/calfcord/supervisor/compose.py            |       61 |        0 |       14 |        0 |    100% |           |
-| src/calfcord/supervisor/lifecycle.py          |      194 |        0 |       38 |        1 |     99% | 115-\>120 |
+| src/calfcord/supervisor/compose.py            |       81 |        0 |       24 |        1 |     99% | 125-\>127 |
+| src/calfcord/supervisor/lifecycle.py          |      196 |        0 |       40 |        1 |     99% | 119-\>124 |
 | src/calfcord/supervisor/mcp\_roster.py        |      110 |        2 |       34 |        2 |     97% |  160, 187 |
 | src/calfcord/supervisor/roster.py             |      195 |        0 |       56 |        0 |    100% |           |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **6730** |  **492** | **1762** |   **91** | **92%** |           |
+| **TOTAL**                                     | **6752** |  **492** | **1774** |   **92** | **92%** |           |
 
 
 ## Setup coverage badge
