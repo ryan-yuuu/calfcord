@@ -19,6 +19,7 @@ import pytest
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import _agents, agent_create
+from calfcord.cli._agents import STARTER_AGENT_NAME
 from calfcord.cli._prompts import Choice, Prompter
 
 _FIXED_PROVIDER = ("anthropic", "claude-haiku-4-5")
@@ -119,7 +120,7 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     prompter = _prompter(name="scribe", description="Takes notes", checkboxes=[["read_file", "web_search"]])
 
-    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=env_path, name=None)
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=env_path, name=None, home=None)
     assert rc == 0
 
     md = agents_dir / "scribe.md"
@@ -133,18 +134,18 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
 
 
 def test_run_prints_created_and_next_step(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Success names the agent, then gives the EXACT terse next-step block
-    (behavior #3): a colon sentence, a blank line, the indented command — steering
-    a brand-new agent into the live org via the roster verb (NOT the old
-    runner-restart banner)."""
+    """Success names the agent, then (on a dev run with no supervisor home) degrades to
+    the honest manual bring-online sequence — a brand-new agent needs the workspace to
+    (re)render with its ``.md`` declared, so ``disco start`` + ``disco agent start``."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe")
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
 
     out = capsys.readouterr().out
     assert "Created agent 'scribe'." in out
-    # The exact next-step shape: sentence:, blank line, two-space-indented command.
-    assert "Bring scribe online:\n\n  disco agent start scribe" in out
+    assert "Bring scribe online:" in out
+    assert "disco start" in out
+    assert "disco agent start scribe" in out
 
 
 def test_run_passes_name_default_through(tmp_path: Path) -> None:
@@ -152,7 +153,7 @@ def test_run_passes_name_default_through(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     # The name prompt returns the default that ``run`` passed as name_default.
     prompter = FakePrompter(texts=["scout", "d"], confirms=[False])
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name="scout") == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name="scout", home=None) == 0
     assert (agents_dir / "scout.md").is_file()
 
 
@@ -160,7 +161,7 @@ def test_run_slugifies_typed_name(tmp_path: Path) -> None:
     """A typed friendly name is slugified into a valid stem before write."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="My Helper!")
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
     assert (agents_dir / "my_helper.md").is_file()
     assert parse_agent_md(agents_dir / "my_helper.md").agent_id == "my_helper"
 
@@ -169,7 +170,7 @@ def test_run_blank_description_uses_default(tmp_path: Path) -> None:
     """A blank description falls back to the seed default."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe", description="")
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
     assert parse_agent_md(agents_dir / "scribe.md").description == _agents.DEFAULT_DESCRIPTION
 
 
@@ -177,7 +178,7 @@ def test_run_tricky_description_roundtrips(tmp_path: Path) -> None:
     """A YAML-significant description ('Has: colon') survives the create path verbatim."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe", description="Has: colon")
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
     assert parse_agent_md(agents_dir / "scribe.md").description == "Has: colon"
 
 
@@ -196,7 +197,7 @@ def test_run_offers_prompt_edit_when_confirmed(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(agent_edit, "edit_system_prompt", _spy)
 
     prompter = _prompter(name="scribe", confirms=[True])
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
     assert seen == [agents_dir / "scribe.md"]
 
 
@@ -212,7 +213,7 @@ def test_run_declining_prompt_edit_does_not_launch_editor(tmp_path: Path, monkey
     monkeypatch.setattr(agent_edit, "edit_system_prompt", _boom)
 
     prompter = _prompter(name="scribe", confirms=[False])
-    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None) == 0
+    assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
 
 
 def test_run_write_failure_returns_1_without_banner(
@@ -232,7 +233,7 @@ def test_run_write_failure_returns_1_without_banner(
 
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe")
-    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name="scribe")
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name="scribe", home=None)
 
     out = capsys.readouterr().out
     assert rc == 1
@@ -387,3 +388,303 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
     assert by_value["mcp/github/search"].checked is False
     # Builtins are still the pre-checked default.
     assert by_value["terminal"].checked is True
+
+
+# ---------------------------------------------------------------------------
+# Change B — standalone create requires an explicit name (no silent default,
+# no silent overwrite of an existing agent).
+# ---------------------------------------------------------------------------
+
+
+def _seed_agent(agents_dir: Path, name: str, *, description: str = "old") -> None:
+    """Write a minimal valid ``<name>.md`` so existing-name gating has a target."""
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / f"{name}.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "provider: openai\n"
+        "model: gpt-5\n"
+        "tools: [read_file]\n"
+        "---\n\n"
+        f"You are {name}.\n",
+        encoding="utf-8",
+    )
+
+
+def test_run_blank_name_reprompts_no_silent_default(tmp_path: Path) -> None:
+    """Standalone create has NO name default: a blank answer re-prompts (keep-asking)
+    rather than silently falling back to an existing agent or the starter name."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "assistant", description="lone-existing")
+    # First name answer is blank (must re-ask), then a real name is supplied.
+    prompter = FakePrompter(texts=["", "scribe", "d"], confirms=[False])
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None)
+    assert rc == 0
+    # The blank was NOT taken as "edit the lone existing agent": a fresh scribe
+    # landed and the pre-existing assistant is untouched.
+    assert (agents_dir / "scribe.md").is_file()
+    assert parse_agent_md(agents_dir / "assistant.md").description == "lone-existing"
+
+
+def test_run_existing_name_gate_declined_reprompts_for_different_name(tmp_path: Path) -> None:
+    """Naming an existing agent triggers the explicit 'update it?' gate; declining
+    (default No) re-prompts for a different name — never a silent overwrite."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe", description="original")
+    # Type the existing name -> gate confirm=False -> re-prompt -> type a new name.
+    prompter = FakePrompter(texts=["scribe", "scout", "d"], confirms=[False, False])
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None)
+    assert rc == 0
+    # The declined existing agent is untouched; the fresh different-named one exists.
+    assert parse_agent_md(agents_dir / "scribe.md").description == "original"
+    assert (agents_dir / "scout.md").is_file()
+
+
+def test_run_existing_name_gate_accepted_updates_in_place(tmp_path: Path) -> None:
+    """Accepting the 'update it?' gate edits the existing agent in place."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe", description="original")
+    # Type the existing name -> gate confirm=True -> proceed to update; new desc.
+    prompter = FakePrompter(texts=["scribe", "updated desc"], confirms=[True, False])
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None)
+    assert rc == 0
+    assert parse_agent_md(agents_dir / "scribe.md").description == "updated desc"
+    assert {p.stem for p in agents_dir.glob("*.md")} == {"scribe"}
+
+
+def test_run_positional_name_pre_answers_the_prompt(tmp_path: Path) -> None:
+    """A positional ``disco agent create scribe`` pre-answers the name prompt even
+    under the required-name policy (no blank re-ask when the CLI supplied a name)."""
+    agents_dir = tmp_path / "agents"
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False])
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name="scribe", home=None)
+    assert rc == 0
+    assert (agents_dir / "scribe.md").is_file()
+
+
+def test_create_agent_init_path_keeps_starter_default(tmp_path: Path) -> None:
+    """``init``'s path (``require_name=False``, ``name_default=None``) is UNCHANGED:
+    a blank name enter-through still defaults to the seeded 'assistant'."""
+    agents_dir = tmp_path / "agents"
+    # Blank name -> init path keeps the STARTER default ('assistant'); no gate confirm.
+    prompter = FakePrompter(texts=["", "d"], confirms=[False])
+    created = agent_create.create_agent(
+        prompter,
+        agents_dir=agents_dir,
+        env_path=tmp_path / ".env",
+        name_default=None,
+        prune_seed=True,
+        offer_prompt=False,
+        require_name=False,
+    )
+    assert created.name == STARTER_AGENT_NAME
+    assert (agents_dir / f"{STARTER_AGENT_NAME}.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Change A — standalone create ends LIVE: offer to start the agent, opening or
+# reloading the workspace as its brand-new-slot status requires, then confirming
+# presence on the mesh. All world-touching calls are injected seams.
+# ---------------------------------------------------------------------------
+
+
+class _FinishRecorder:
+    """Records the live-finish orchestration seams so tests assert what ran.
+
+    Every seam is an async stub returning a scripted exit code / presence result;
+    ``pc_binary`` reports the supervisor as available so the native path (not the
+    dev degrade) is exercised.
+    """
+
+    def __init__(
+        self,
+        *,
+        running: bool = False,
+        start_rc: int = 0,
+        stop_rc: int = 0,
+        agent_rc: int = 0,
+        present: bool = True,
+    ) -> None:
+        self._running = running
+        self._start_rc = start_rc
+        self._stop_rc = stop_rc
+        self._agent_rc = agent_rc
+        self._present = present
+        self.calls: list[str] = []
+        self.start_kwargs: list[dict] = []
+        self.agent_kwargs: list[dict] = []
+        self.presence_kwargs: list[dict] = []
+
+    async def workspace_running(self, home: Path) -> bool:
+        self.calls.append("workspace_running")
+        return self._running
+
+    async def start(self, home, **kwargs) -> int:
+        self.calls.append("start")
+        self.start_kwargs.append({"home": home, **kwargs})
+        return self._start_rc
+
+    async def stop(self, home, **kwargs) -> int:
+        self.calls.append("stop")
+        return self._stop_rc
+
+    async def agent_start(self, home, **kwargs) -> int:
+        self.calls.append("agent_start")
+        self.agent_kwargs.append({"home": home, **kwargs})
+        return self._agent_rc
+
+    async def presence(self, server_urls, **kwargs) -> bool:
+        self.calls.append("presence")
+        self.presence_kwargs.append({"server_urls": server_urls, **kwargs})
+        return self._present
+
+    def pc_binary(self) -> str:
+        return "process-compose"
+
+
+def _run_live(
+    prompter: FakePrompter,
+    tmp_path: Path,
+    finish: _FinishRecorder,
+    *,
+    name: str | None = None,
+) -> int:
+    """Drive ``agent_create.run`` with every orchestration seam stubbed."""
+    return agent_create.run(
+        prompter,
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        name=name,
+        home=tmp_path,
+        server_urls="localhost:9092",
+        start_fn=finish.start,
+        stop_fn=finish.stop,
+        agent_start_fn=finish.agent_start,
+        presence_fn=finish.presence,
+        workspace_running_fn=finish.workspace_running,
+        pc_binary_fn=finish.pc_binary,
+    )
+
+
+def test_run_start_now_yes_workspace_not_running_opens_and_starts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Start-now yes with the workspace DOWN: open the workspace (no reload), then
+    bring the agent online; presence seen prints the exact online line."""
+    finish = _FinishRecorder(running=False, present=True)
+    # confirms: [edit-prompt=No, Start now?=Yes]
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    # No stop (workspace wasn't running) — just start -> agent_start -> presence.
+    assert finish.calls == ["workspace_running", "start", "agent_start", "presence"]
+    assert finish.agent_kwargs[0]["name"] == "scribe"
+    out = capsys.readouterr().out
+    assert "scribe is online — say @scribe hello in Discord" in out
+
+
+def test_run_start_now_yes_presence_timeout_degrades(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Agent starts but presence is not seen in time: the honest 'try it yourself /
+    disco doctor' downgrade prints instead of a green light that lies."""
+    finish = _FinishRecorder(running=False, present=False)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "scribe is online — say" not in out
+    assert "disco doctor" in out
+
+
+def test_run_start_now_yes_workspace_running_reload_confirmed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Start-now yes with the workspace UP: the brand-new agent needs the one-time
+    reload — confirmed, it stops then restarts the workspace before agent_start."""
+    finish = _FinishRecorder(running=True, present=True)
+    # confirms: [edit-prompt=No, Start now?=Yes, reload?=Yes]
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert finish.calls == ["workspace_running", "stop", "start", "agent_start", "presence"]
+
+
+def test_run_start_now_yes_workspace_running_reload_declined(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Declining the reload does NOT touch the running workspace; it prints the
+    manual reload sequence (disco stop / start / agent start) and stops."""
+    finish = _FinishRecorder(running=True)
+    # confirms: [edit-prompt=No, Start now?=Yes, reload?=No]
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True, False])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    # Probed state, then bailed — no stop/start/agent_start.
+    assert finish.calls == ["workspace_running"]
+    out = capsys.readouterr().out
+    assert "disco stop" in out
+    assert "disco agent start scribe" in out
+
+
+def test_run_start_now_no_running_prints_reload_manual(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Declining 'Start now?' with the workspace UP prints the reload manual (stop
+    first), and orchestrates nothing."""
+    finish = _FinishRecorder(running=True)
+    # confirms: [edit-prompt=No, Start now?=No]
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, False])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert finish.calls == ["workspace_running"]
+    out = capsys.readouterr().out
+    assert "disco stop" in out
+    assert "disco agent start scribe" in out
+
+
+def test_run_start_now_no_not_running_prints_plain_manual(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Declining 'Start now?' with the workspace DOWN prints the plain manual (no
+    stop line), and orchestrates nothing."""
+    finish = _FinishRecorder(running=False)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, False])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert finish.calls == ["workspace_running"]
+    out = capsys.readouterr().out
+    assert "disco stop" not in out
+    assert "disco start" in out
+    assert "disco agent start scribe" in out
+
+
+def test_run_start_now_workspace_open_failure_propagates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If opening the workspace fails, the non-zero code propagates and the agent is
+    never started (no false 'online')."""
+    finish = _FinishRecorder(running=False, start_rc=1)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 1
+    assert "agent_start" not in finish.calls
+    assert "presence" not in finish.calls
+
+
+def test_run_dev_run_degrades_without_prompting_start(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dev run (home=None) never prompts 'Start now?' (it can't orchestrate the
+    install-scoped supervisor); it prints the honest manual next-steps instead."""
+    # Only the edit-prompt confirm is scripted; a 'Start now?' prompt here would
+    # dequeue-empty and raise, proving the degrade path never prompts to start.
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False])
+    rc = agent_create.run(
+        prompter, agents_dir=tmp_path / "agents", env_path=tmp_path / ".env", name="scribe", home=None
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Bring scribe online:" in out
+    assert "disco start" in out
