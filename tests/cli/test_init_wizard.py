@@ -17,11 +17,14 @@ provider SDK / network / key.
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from calfkit.exceptions import MeshUnavailableError
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import agent_create, discord_discovery, init, setup_state
@@ -1094,3 +1097,94 @@ def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, ca
     assert rc == 0
     assert finish.start_calls[0]["mcp_servers"] == []
     assert "mcp.json" in capsys.readouterr().out
+
+
+# --- _wait_for_agent_online body (the mesh presence-poll; previously monkeypatched away) ---
+
+
+class _WaitFakeClient:
+    """Scriptable Client for ``_wait_for_agent_online``: a sequence of get_agents()
+    results (each a dict to return or an Exception to raise), a controllable
+    events() start, and aclose() tracking so cleanup is asserted on every path."""
+
+    def __init__(self, *, get_agents_seq=None, events_error=None) -> None:
+        self._seq = list(get_agents_seq or [])
+        self._events_error = events_error
+        self.mesh = self  # client.mesh.get_agents() resolves back here
+        self.aclosed = False
+
+    def events(self, *, terminal_only: bool = False):
+        outer = self
+
+        class _CM:
+            async def __aenter__(self):
+                if outer._events_error is not None:
+                    raise outer._events_error
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _CM()
+
+    async def get_agents(self):
+        item = self._seq.pop(0) if self._seq else {}
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+
+
+def _patch_wait_client(monkeypatch, fake: _WaitFakeClient) -> None:
+    # _wait_for_agent_online imports Client from calfkit.client locally and patches
+    # the poll interval to 0 so the retry loop doesn't actually sleep.
+    import calfkit.client
+
+    monkeypatch.setattr(calfkit.client.Client, "connect", lambda *a, **k: fake)
+    monkeypatch.setattr(init, "_ONLINE_POLL_INTERVAL_S", 0)
+
+
+async def test_wait_returns_true_when_present_and_sets_ready(monkeypatch):
+    fake = _WaitFakeClient(get_agents_seq=[{"assistant": SimpleNamespace(name="assistant")}])
+    _patch_wait_client(monkeypatch, fake)
+    ready = asyncio.Event()
+    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0, ready=ready)
+    assert ok is True
+    assert ready.is_set()  # the watcher-joined signal fired
+    assert fake.aclosed is True
+
+
+async def test_wait_retries_until_agent_appears(monkeypatch):
+    # topic-absent, then empty, then present — the poll loop must keep going.
+    fake = _WaitFakeClient(
+        get_agents_seq=[
+            MeshUnavailableError("no topic", reason="open_failed"),
+            {},
+            {"assistant": SimpleNamespace(name="assistant")},
+        ]
+    )
+    _patch_wait_client(monkeypatch, fake)
+    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0)
+    assert ok is True
+    assert fake.aclosed is True
+
+
+async def test_wait_times_out_returns_false(monkeypatch):
+    # agent never appears; a zero window returns False after the first poll.
+    fake = _WaitFakeClient(get_agents_seq=[])
+    _patch_wait_client(monkeypatch, fake)
+    ok = await init._wait_for_agent_online("localhost", agent_id="ghost", timeout_s=0.0)
+    assert ok is False
+    assert fake.aclosed is True
+
+
+async def test_wait_closes_client_when_broker_down(monkeypatch):
+    # A down broker raises out of the events() start; it propagates, but the client
+    # is still closed (the finally).
+    fake = _WaitFakeClient(events_error=ConnectionError("broker down"))
+    _patch_wait_client(monkeypatch, fake)
+    with pytest.raises(ConnectionError):
+        await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=1.0)
+    assert fake.aclosed is True

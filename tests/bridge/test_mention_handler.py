@@ -10,8 +10,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from calfkit.client import AgentMessageEvent, ToolCallEvent, ToolResultEvent
+from calfkit.client import AgentMessageEvent, RunCompleted, RunFailed, ToolCallEvent, ToolResultEvent
 from calfkit.exceptions import NodeFaultError
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import InvocationResult
 from calfkit.models.payload import TextPart
 from calfkit.models.state import State
@@ -44,6 +45,17 @@ class _FakeHandle:
     async def stream(self) -> Any:
         for s in self._steps:
             yield s
+        # The real calfkit stream() is terminal-bearing: it yields the terminal
+        # (RunCompleted / RunFailed) as its LAST event. normalize_run_event maps
+        # those to None, so the handler drain must skip them (`if step is None:
+        # continue`). Yield one here so that skip is exercised at the integration
+        # level — a refactor to direct `event.kind` access would crash the drain.
+        if self._fault is not None:
+            report = getattr(self._fault, "report", None) or ErrorReport(error_type="calf.test.fault")
+            yield RunFailed(report=report, correlation_id=self.correlation_id)
+        else:
+            output = getattr(self._result, "output", "") if self._result is not None else ""
+            yield RunCompleted(output=output, correlation_id=self.correlation_id, agent="scribe", _envelope=None)
 
     async def result(self, *, timeout: float | None = None) -> Any:
         if self._fault is not None:
@@ -138,6 +150,10 @@ class _FakeReply:
         self.replies: list[tuple[Any, str]] = []
         self.chunked: list[tuple[Any, str]] = []
         self.notices: list[str] = []
+        # Every correlation_id the handler passed, across retries + chunk fallback.
+        # Pins the D-13 guarantee that retries reuse the ORIGINAL run's id (one
+        # transcript row), not each retry handle's id.
+        self.correlation_ids: list[str] = []
         # Scripted per-post_reply outcomes; defaults to "ok" once exhausted.
         self._outcomes = list(outcomes or [])
         # Whether post_chunked reports a successful delivery (False => fully lost).
@@ -147,12 +163,14 @@ class _FakeReply:
         self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
     ) -> ReplyOutcome:
         self.replies.append((persona, result.output))
+        self.correlation_ids.append(correlation_id)
         return self._outcomes.pop(0) if self._outcomes else ReplyOutcome("ok")
 
     async def post_chunked(
         self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
     ) -> bool:
         self.chunked.append((persona, result.output))
+        self.correlation_ids.append(correlation_id)
         return self._chunked_ok
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
@@ -400,6 +418,22 @@ class TestRetryWithFeedback:
         assert len(faults) == 1
         assert "error_type=billing.quota_exceeded" in faults[0].message
         assert "message=boom" in faults[0].message
+
+    async def test_all_attempts_reuse_original_correlation_id(self) -> None:
+        # D-13: retries (and the chunk fallback) must key the transcript on the
+        # ORIGINAL run's correlation_id so they UPSERT one row, not orphan a fresh
+        # row per attempt. Give the retry handles a DIFFERENT id so a regression to
+        # retry_handle.correlation_id would be caught.
+        original = _FakeHandle(result=_result("x", "scribe"), correlation_id="c1")
+        retry1 = _FakeHandle(result=_result("x", "scribe"), correlation_id="c2")
+        retry2 = _FakeHandle(result=_result("x", "scribe"), correlation_id="c2")
+        handler, _client, fakes = _make(
+            handles=[original, retry1, retry2],
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
+        )
+        await handler.handle(_req())
+        # 3 post_reply + 1 post_chunked, every one under the original run's id.
+        assert fakes["reply"].correlation_ids == ["c1", "c1", "c1", "c1"]
 
     async def test_retry_reinvocation_fault_posts_notice(self) -> None:
         # The retry re-invocation itself faults → user-facing notice, no crash.
