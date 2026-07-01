@@ -118,16 +118,15 @@ for sub in start stop restart; do
     && pass "dispatch tools $sub -> calfcord-cli" || fail "dispatch tools $sub: $out"
 done
 
-# `agent` is a calfcord-cli verb group too, so its `restart` subverb rides the
-# same top-level alternation arm (the `--all` flag forwards verbatim too). Pin
-# that the roster `restart` (and `restart --all`) reach the argparse entry point
-# unchanged. (The `router` group was removed in the calfkit-012 migration.)
-for grp in agent; do
-  out="$("$B" "$C" "$grp" restart assistant 2>&1)"
-  printf '%s' "$out" | grep -Fq \
-    "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli $grp restart assistant" \
-    && pass "dispatch $grp restart -> calfcord-cli" || fail "dispatch $grp restart: $out"
-done
+# `agent` is a calfcord-cli verb group, so its `restart` subverb rides the same
+# top-level alternation arm (the `--all` flag forwards verbatim too). Pin that
+# the roster `restart` reaches the argparse entry point unchanged. (The `router`
+# group was removed in the calfkit-012 migration, leaving `agent` the sole roster
+# group — hence a direct assertion rather than a loop.)
+out="$("$B" "$C" agent restart assistant 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli agent restart assistant" \
+  && pass "dispatch agent restart -> calfcord-cli" || fail "dispatch agent restart: $out"
 out="$("$B" "$C" agent start --all 2>&1)"
 printf '%s' "$out" | grep -Fq \
   "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli agent start --all" \
