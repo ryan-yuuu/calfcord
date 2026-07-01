@@ -1,7 +1,7 @@
 # Release workflow: triggered on ``v*`` tag pushes (e.g. ``v0.1.0``).
 #
 # Builds a multi-arch (linux/amd64 + linux/arm64) image and pushes to
-# GHCR at ``ghcr.io/ryan-yuuu/calfcord``. amd64 covers Intel Macs and
+# GHCR at ``ghcr.io/ryan-yuuu/agent-disco``. amd64 covers Intel Macs and
 # most Linux servers / cloud VMs; arm64 covers Apple Silicon Macs
 # running Docker Desktop. arm64 builds via QEMU emulation (~5-10 min);
 # amd64 is native (~2 min). No other architectures are targeted in v1.
@@ -57,7 +57,7 @@ jobs:
         # ``X.Y`` minor stream. ``:latest`` is gated on STABLE releases
         # only — ``v1.0.0`` updates ``:latest`` but ``v1.0.0-rc1``
         # does not. Without this predicate a pre-release would
-        # silently downgrade ``docker pull ghcr.io/.../calfcord:latest``
+        # silently downgrade ``docker pull ghcr.io/.../agent-disco:latest``
         # for every consumer.
         id: meta
         uses: docker/metadata-action@v6

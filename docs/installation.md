@@ -10,7 +10,7 @@ itself instead? Don't use the installer — see
 ## 1. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 ```
 
 You don't need Python, Docker, or git installed first — the installer handles

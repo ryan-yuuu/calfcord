@@ -43,7 +43,7 @@ ln -sfn "$TD/versions/$Bsha" "$TD/current"
 
 marker(){ # $1=commit  $2=previous(optional)
   { printf 'CALFCORD_COMMIT=%s\nCALFCORD_INSTALLED_AT=2026-01-01T00:00:00Z\n' "$1"
-    printf 'CALFCORD_REPO=ryan-yuuu/calfcord\nCALFCORD_REF=main\n'
+    printf 'CALFCORD_REPO=ryan-yuuu/agent-disco\nCALFCORD_REF=main\n'
     [ -n "${2:-}" ] && printf 'CALFCORD_PREVIOUS_COMMIT=%s\n' "$2"; } > "$TD/version"
 }
 marker "$Bsha" "$A"
@@ -59,7 +59,7 @@ PWN="$BASE/PWNED"
 # the literal backticks are the point of this test — they must NOT be executed
 # shellcheck disable=SC2016
 { printf 'CALFCORD_COMMIT=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
-  printf 'CALFCORD_REF=main`touch %s`\nCALFCORD_REPO=ryan-yuuu/calfcord\n' "$PWN"; } > "$TD/version"
+  printf 'CALFCORD_REF=main`touch %s`\nCALFCORD_REPO=ryan-yuuu/agent-disco\n' "$PWN"; } > "$TD/version"
 "$B" "$CS" version >/dev/null 2>&1
 [ ! -e "$PWN" ] && pass "metacharacter ref not executed" || fail "ref code-exec!"
 marker "$Bsha" "$A"
