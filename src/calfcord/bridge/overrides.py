@@ -16,12 +16,15 @@ the :class:`~calfcord.bridge.mention_handler.MentionHandler` consults per turn; 
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from calfcord.bridge.transcripts import TranscriptStoreLike
 
 if TYPE_CHECKING:
     from calfcord.agents.definition import ThinkingEffort
+
+logger = logging.getLogger(__name__)
 
 
 class EffortOverrides:
@@ -36,8 +39,17 @@ class EffortOverrides:
 
         Idempotent: replaces the in-memory map with the table's current contents, so
         overrides set before the last restart are honored on the first turn after it.
+
+        Best-effort: a store read failure must NOT crash bridge boot (which would
+        take down all Discord routing) just to restore non-essential thinking-effort
+        overrides — mirroring the sibling startup step ``_prune_on_startup``. On
+        failure the map degrades to empty (no overrides) and the error is logged.
         """
-        self._map = await self._store.all_agent_overrides()
+        try:
+            self._map = await self._store.all_agent_overrides()
+        except Exception:
+            logger.exception("failed to hydrate thinking-effort overrides at startup; continuing with none")
+            self._map = {}
 
     def effort_for(self, agent_id: str) -> str | None:
         """Return the override tier for ``agent_id``, or ``None`` if unset.

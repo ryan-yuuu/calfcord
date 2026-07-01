@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from calfcord.bridge.overrides import EffortOverrides
 
 
@@ -68,3 +70,18 @@ async def test_hydrate_replaces_map_with_current_table() -> None:
     await overrides.hydrate()
     assert overrides.effort_for("scribe") is None
     assert overrides.effort_for("conan") == "low"
+
+
+async def test_hydrate_degrades_to_empty_on_store_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """A store read failure at boot must not raise (that would crash all Discord
+    routing to restore non-essential overrides); it degrades to an empty map."""
+
+    class _BoomStore(_FakeStore):
+        async def all_agent_overrides(self) -> dict[str, str]:
+            raise RuntimeError("db locked")
+
+    overrides = EffortOverrides(_BoomStore())  # type: ignore[arg-type]
+    with caplog.at_level("ERROR"):
+        await overrides.hydrate()  # must not raise
+    assert overrides.effort_for("anyone") is None
+    assert any("hydrate" in r.message for r in caplog.records)
