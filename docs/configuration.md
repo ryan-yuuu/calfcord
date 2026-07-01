@@ -1,7 +1,7 @@
 # Configuration
 
 Every calfcord component — the substrate (broker + bridge) and the roster (agents,
-tools, router) — is configured through environment variables, read from a
+tools, and MCP servers) — is configured through environment variables, read from a
 `.env` file (loaded via `python-dotenv`). On a native install the `calfcord` shim
 reads `$CALFCORD_HOME/config/.env`; `calfcord init` writes most of this for you.
 This page is the complete reference, including variables `init` doesn't set.
@@ -28,7 +28,7 @@ so the ID variables below are normally written for you, not copied from Discord.
 | `DISCORD_APPLICATION_ID` | **yes** (all deployments) | Numeric application ID from *General Information*. |
 | `DISCORD_GUILD_ID` | recommended | Server ID for guild-scoped slash-command sync (instant; blank = global sync, ~1 h propagation). `calfcord init` auto-discovers it — set it by hand only when not using the wizard. |
 | `DISCORD_OWNER_USER_ID` | optional | Your numeric user ID. Tags inbound messages from the owner and unlocks owner-only commands (`/clear`, `/thinking-effort`). |
-| `DISCORD_DEFAULT_CHANNEL_ID` | optional | Channel ID used to seed the first agent's channel subscription on boot (fallback when its `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` is unset). Auto-discovered by `calfcord init`. |
+| `DISCORD_DEFAULT_CHANNEL_ID` | optional (legacy) | Auto-discovered by `calfcord init` and written to `.env`, but **no longer consumed**: per-agent channel subscriptions were removed in the calfkit 0.12 migration, so an agent answers `@mention`s in any channel the bot can see. |
 
 ## Models / providers
 
@@ -45,19 +45,6 @@ LLM).
 The `openai-codex` provider routes through a ChatGPT Plus/Pro subscription
 instead of API credits and needs a one-time OAuth login on the host — see
 [`codex-auth.md`](./codex-auth.md).
-
-## Ambient router
-
-Needed on the **router host only** (the optional ambient-message router — see
-[`ambient-routing.md`](./ambient-routing.md)). The easiest way to set both is
-`calfcord router edit`, which picks a fast/cheap model, ensures the provider's
-credentials, and writes these two vars for you (`calfcord router set` does the
-same non-interactively). Bring it online with `calfcord router start`.
-
-| Variable | Required | Description |
-|---|---|---|
-| `CALFKIT_ROUTER_PROVIDER` | optional | Overrides the router's provider. Resolution is `this var → router.md frontmatter → in-code default`. The bundled `router.md` pins `openai-codex`, so out of the box the router needs Codex (ChatGPT-subscription) auth (`codex-auth.md`); set this to `anthropic`/`openai` to retarget without replacing `router.md`. |
-| `CALFKIT_ROUTER_MODEL` | optional | Overrides the router's model. Same `this var → router.md frontmatter → in-code default` precedence; the bundled `router.md` pins `gpt-5.4-mini`. An invalid value fails loudly at boot, not silently. |
 
 ## Broker (Kafka)
 
@@ -77,12 +64,10 @@ another host (see [`distributed-deployment.md`](./distributed-deployment.md)).
 
 | Variable | Required | Description |
 |---|---|---|
-| `CALFKIT_AGENTS_DIR` | optional | Directory the bridge/agent processes scan for agent `.md` files. On a native install the `calfcord` shim defaults it to `~/.calfcord/agents` (so definitions survive `calfcord self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
-| `CALFKIT_STATE_DIR` | optional | Directory holding per-agent channel-subscription JSON. On a native install the shim defaults it to `~/.calfcord/state/agents` (so it persists regardless of launch directory); dev and Docker keep the CWD-relative `state/agents/`. |
-| `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` | optional | Comma-separated channel IDs seeded on an agent's **first** boot (e.g. `CALFKIT_AGENT_SCRIBE_BOOTSTRAP_CHANNELS`). Falls back to `DISCORD_DEFAULT_CHANNEL_ID`. After first boot, subscriptions live in `state/agents/<name>.json`. |
-| `CALFKIT_TOOLS_TIMEOUT_SECONDS` | optional | Per-call timeout for `private_chat` (default `60`). Other built-in tools have no default per-call timeout at the calfkit layer. |
-| `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel. Code default is `private-a2a-chats`; the bundled `docker-compose.yml` overrides it to `private-a2a`. |
-| `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
+| `CALFKIT_AGENTS_DIR` | optional | Directory the **agent runner** (and the CLI) scan for agent `.md` files — the bridge does not read it. On a native install the `calfcord` shim defaults it to `~/.calfcord/agents` (so definitions survive `calfcord self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
+| `DISCORD_TRANSCRIPT_DB_PATH` | optional | Bridge-local SQLite store (default `state/transcripts.sqlite3`). Holds the per-turn transcripts behind the ⤵ expand toggle **and** the persisted per-agent `/thinking-effort` overrides (the `agent_overrides` table), so an override survives a bridge restart. Read only by the bridge. |
+| `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel, **read by the bridge** (the A2A projection moved from the tools process to the bridge in the calfkit 0.12 migration). Code default `private-a2a-chats`; lazy-created on the first A2A projection. |
+| `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Read by the bridge. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
 | `CALFCORD_WORKSPACE_DIR` | optional | Host path the terminal/filesystem/search tools resolve against. The tools runner resolves it once at boot and exports it as `TERMINAL_CWD`, the working directory the vendored hermes terminal starts each agent's shell session in. Native install: the `calfcord` shim defaults it to **the directory the workspace (`calfcord start`) was launched from** (`$PWD`, the Claude-Code model — not a hidden dir). Bare `uv run` keeps the CWD-relative `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md) § 3.3. |
 | `TERMINAL_CWD` | optional | Working directory the hermes terminal starts each session in, read per-call by the vendored backend. The tools runner derives it from `CALFCORD_WORKSPACE_DIR` at boot; set it explicitly only to override that derivation — an operator-set value wins and is left untouched. |
 | `CALFCORD_TOOLS_ALIAS` | optional | Per-host tool aliases (`src=dst,…`) — exposes a tool under a second wire name for multi-host routing. **Managed by `calfcord tools alias add/list/remove`** (which validates against the live tool surface and writes this key); read at boot by every role. See [`distributed-deployment.md`](./distributed-deployment.md) § 3. |
@@ -131,28 +116,20 @@ Everything the running workspace writes lives under `$CALFCORD_HOME/state/`:
 
 | Path | What's there |
 |---|---|
-| `$CALFCORD_HOME/state/logs/<name>.log` | Per-component stdout/stderr (`broker`, `bridge`, each agent, `tools`/`router`), plus the supervisor's own `process-compose.log`. Tail with `calfcord logs [component] [-f]`. |
+| `$CALFCORD_HOME/state/logs/<name>.log` | Per-component stdout/stderr (`broker`, `bridge`, each agent, `tools`, each `mcp-<server>`), plus the supervisor's own `process-compose.log`. Tail with `calfcord logs [component] [-f]`. |
 | `$CALFCORD_HOME/state/health/<component>.json` | Heartbeat files each long-lived component refreshes; `calfcord doctor` and the supervisor's readiness probes read these. |
-| `$CALFCORD_HOME/state/agents/<name>.json` | Per-agent channel-subscription state (see `CALFKIT_STATE_DIR` above and the next section). |
+| `$CALFCORD_HOME/state/transcripts.sqlite3` | Bridge-local SQLite store: per-turn transcripts (⤵ expand toggle) and persisted `/thinking-effort` overrides. See `DISCORD_TRANSCRIPT_DB_PATH` above. |
 | `$CALFCORD_HOME/state/process-compose.yaml` | The generated supervisor project — derived state, regenerated on every `start`. Don't edit it. |
-
-## Per-agent runtime state
-
-Channel subscriptions are persisted per agent in `state/agents/<name>.json`
-(atomically written). On an agent's first boot, channels are seeded from
-`CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` or `DISCORD_DEFAULT_CHANNEL_ID`;
-after that, the state file wins.
 
 ## Applying changes
 
-`.env` is read **once, at process boot** — each component (every agent, the
-router, the tools host, the bridge) loads its environment when it starts and
-holds it for its lifetime. Changing a key, URL, or override in `.env` therefore
-does **nothing** to an already-running process; you have to **restart the process
-that reads it** for the new value to take effect. (This is the same one-shot
-constraint behind the "restart to apply" note on every config-mutating command —
-`agent set`, `router set`, and the interactive editors all print the matching
-restart command on success.)
+`.env` is read **once, at process boot** — each component (every agent, the tools
+host, the bridge) loads its environment when it starts and holds it for its
+lifetime. Changing a key, URL, or override in `.env` therefore does **nothing** to
+an already-running process; you have to **restart the process that reads it** for
+the new value to take effect. (This is the same one-shot constraint behind the
+"restart to apply" note on every config-mutating command — `agent set` and the
+interactive editors all print the matching restart command on success.)
 
 Which restart depends on which process reads the value you changed:
 
@@ -160,21 +137,21 @@ Which restart depends on which process reads the value you changed:
 |---|---|
 | One agent's key, model, or provider (`agent set`/`edit`) | `calfcord agent restart <name>` |
 | A key several agents share (e.g. `ANTHROPIC_API_KEY`, `CALFKIT_AGENT_DEFAULT_MODEL`) | `calfcord agent restart --all` (every agent on this host) |
-| The router's provider/model (`CALFKIT_ROUTER_*`, `router set`/`edit`) | `calfcord router restart` |
 | Anything the tools host reads | `calfcord tools restart` |
-| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then bring the roster back up on the new value: `calfcord agent start --all` plus `calfcord tools start` / `router start` for any of those you run |
+| A bridge value (`CALFKIT_A2A_CHANNEL_*`, `DISCORD_TRANSCRIPT_DB_PATH`, the Discord token) | `calfcord stop && calfcord start` (the bridge is part of the substrate) |
+| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then bring the roster back up on the new value: `calfcord agent start --all` plus `calfcord tools start` (and `calfcord mcp start --all`) for any of those you run |
 
 > **Boot-time gotcha for workspace-wide values.** `calfcord stop` tears the
 > **whole** workspace down (broker + bridge **and** every agent and singleton),
 > and `calfcord start` brings up the **substrate only** (broker + bridge) — it
 > does *not* bring the roster back. So after changing a value the *roster* reads
-> (like `CALF_HOST_URL`, which every agent, tool, and router dials),
+> (like `CALF_HOST_URL`, which every agent, tool, and MCP server dials),
 > `calfcord stop && calfcord start` leaves you with the substrate up but **no
 > agents running**. Re-start the roster on the new value with `calfcord agent
 > start --all` (which targets every *defined* agent — `agent restart --all` would
 > be a no-op here, because nothing is running to restart) **and** `calfcord tools
-> start` / `router start` for whichever singletons you run. All of
-> these are local — they act on this host's processes.
+> start` (plus `calfcord mcp start --all` for MCP servers) for whichever roster
+> members you run. All of these are local — they act on this host's processes.
 
 ## See also
 

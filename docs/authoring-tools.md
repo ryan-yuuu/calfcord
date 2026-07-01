@@ -39,17 +39,18 @@ ALL_TOOLS: tuple[ToolNodeDef, ...] = (
     terminal, process, read_file, write_file, patch, search_files,
     todo, execute_code, web_search, web_extract,  # vendored (calfkit-tools)
     web_fetch,                                     # vendored (separate subpackage)
-    private_chat_tool,                             # first-party
 )
 ```
 
-Most of these are **vendored** from the `calfkit-tools` package (the
+All of these are **vendored** from the `calfkit-tools` package (the
 hermes terminal / process / file / search / todo / code-execution / web
-nodes, plus an SSRF-safe `web_fetch`). Only `private_chat` is
-**first-party** — it is agent-to-agent A2A over Discord and cannot be
-vendored. `apply_deploy_filters` turns `ALL_TOOLS` into the name-keyed
-`TOOL_REGISTRY` at boot, applying the operator-facing
-`CALFCORD_TOOLS_INCLUDE` / `CALFCORD_TOOLS_ALIAS` transforms (see
+nodes, plus an SSRF-safe `web_fetch`). There is **no first-party tool** in
+the default surface — agent-to-agent messaging is native to calfkit now
+(the old `private_chat` tool was removed), so nothing here needs calfcord's
+own internals. You can still add a first-party tool (§ 2.2).
+`apply_deploy_filters` turns `ALL_TOOLS` into the name-keyed `TOOL_REGISTRY`
+at boot, applying the operator-facing `CALFCORD_TOOLS_INCLUDE` /
+`CALFCORD_TOOLS_ALIAS` transforms (see
 [`distributed-deployment.md`](./distributed-deployment.md)).
 
 This list is the **security boundary**: `terminal` and `execute_code`
@@ -86,9 +87,10 @@ edit.
 
 ### 2.2 Adding a first-party calfcord tool
 
-Some tools cannot be vendored because they need calfcord's own internals
-— `private_chat`, for instance, needs the A2A client and the Discord
-guild plumbing. Those live as modules under `src/calfcord/tools/`.
+Some tools can't be vendored — they need calfcord's own internals, or they
+wrap a service specific to your deployment. Those live as modules under
+`src/calfcord/tools/`. (calfcord ships none today; the worked example below
+adds one from scratch.)
 
 The workflow is two explicit steps:
 
@@ -192,7 +194,6 @@ ALL_TOOLS: tuple[ToolNodeDef, ...] = (
     terminal, process, read_file, write_file, patch, search_files,
     todo, execute_code, web_search, web_extract,
     web_fetch,
-    private_chat_tool,
     pypi_info_tool,   # ← your new first-party tool
 )
 ```
@@ -229,18 +230,17 @@ async def name(ctx: ToolContext, **kwargs) -> str: ...
 - **The docstring is the description**. The first paragraph is what the
   LLM sees as the tool's purpose. Use the `Args:` block to document each
   argument — pydantic-ai parses it. Write for the LLM: explain *when* to
-  use the tool, not just *what* it does. `private_chat`'s docstring is
-  the canonical example of explicit "when not to use" and "writing good
-  content" guidance.
+  use the tool, not just *what* it does — the `pypi_info` example above is
+  a good shape (it says when to reach for it and when to prefer `web_fetch`).
 - **The function must be `async`**. Calfkit's tool runner is
   asyncio-only; a sync function will not be dispatchable. CPU-bound
   work belongs behind `asyncio.to_thread` or a process pool.
 
 ### Return type
 
-Always `str`. Long output is fine — calfcord's outbox handles Discord
-truncation downstream (the bridge chunk-splits and the LLM consumes the
-full text regardless). Empty `""` is legal but discouraged; an LLM
+Always `str`. Long output is fine — the bridge handles Discord truncation
+downstream (it chunk-splits the reply and the LLM consumes the full text
+regardless). Empty `""` is legal but discouraged; an LLM
 seeing an empty tool result often loops. Return a one-line "no results"
 message instead.
 
@@ -255,21 +255,19 @@ The fields that matter to tool authors:
 - **`ctx.agent_name: str | None`** — the calling agent's id, populated
   by calfkit from the inbound `x-calf-emitter` Kafka header. It is
   unspoofable (the LLM cannot set it). `None` means dispatch was
-  bypassed; that's an infra bug. `private_chat` uses it to look up the
-  caller in the phonebook, and the vendored stateful tools use it to key
+  bypassed; that's an infra bug. The vendored stateful tools use it to key
   per-agent state (§ 5).
 - **`ctx.deps: dict[str, Any]`** — the per-call deps the bridge
   populates on every publish (a bare dict; read keys as
-  `ctx.deps["discord"]`). The two it always sets are `"discord"` (the
-  originating `WireMessage` dict) and `"phonebook"` (the canonical
-  roster of registered agents); memory-enabled deployments also seed a
-  memory-prompt template, and `private_chat` forwards `"caller_agent_id"`
-  on A2A hops. Most tools don't need any of these; `private_chat` is the
-  only first-party tool that does.
+  `ctx.deps["discord"]`). It always sets `"discord"` (the originating
+  `WireMessage` dict); memory-enabled deployments also seed a memory-prompt
+  template. There is **no `"phonebook"`** anymore — A2A is native, so
+  calfkit (not a dep) resolves the peer directory. Most tools need none of
+  these.
 - **`ctx.resources: dict[str, Any]`** — node- and worker-scoped
-  lifecycle resources (calfkit 0.6.0+). This is how `private_chat`
-  reaches its Discord connection and the process-wide calfkit `Client`
-  without module globals (§ 8).
+  lifecycle resources (calfkit 0.6.0+). This is how a tool reaches a
+  managed resource (a connection pool, an HTTP client) opened at worker
+  startup without module globals (§ 8).
 - **`ctx.correlation_id: str`** — the Kafka audit-trail id (it mirrors
   `run_id`). Put it in error log lines so operators can grep across the
   trail.
@@ -307,12 +305,11 @@ if api_key is None:
     )
 ```
 
-`private_chat.py` is the canonical reference: its `_raise_infra` helper
-logs caller / target / correlation_id at ERROR level and raises
-`RuntimeError` with the chained cause. Funneling every infra-bug path
-through a single helper keeps operator triage uniform — read the
-`_raise_infra` definition in `src/calfcord/tools/private_chat.py` and
-copy the shape.
+A single infra-bug helper keeps operator triage uniform: funnel every
+infra-bug path through one function that logs `agent_name` /
+`correlation_id` at ERROR level and raises `RuntimeError` with the chained
+cause (`raise RuntimeError(...) from exc`). That way an operator greps one
+shape across the tools log.
 
 The boundary rule: if a competent human operator could fix the
 condition by editing config / re-deploying / restoring a service, it's
@@ -417,10 +414,10 @@ Tests live under `tests/tools/` — one module per tool, e.g. a tool at
 `src/calfcord/tools/pypi.py` gets tests at `tests/tools/test_pypi.py`.
 Canonical references already in the tree:
 
-- **`tests/tools/test_private_chat.py`** — exercises the first-party
-  `private_chat` tool by calling its bare async function with a
-  hand-built `ToolContext`, mocking the Discord/A2A resources. Use this
-  shape when your tool reads `ctx` fields or resources.
+- **A first-party tool's tests** call the tool's bare async function with a
+  hand-built `ToolContext` (mocking any resources it reads) — the
+  `pypi_info` example below is the canonical shape. Use it when your tool
+  reads `ctx` fields or resources.
 - **`tests/tools/test_multitenancy.py`** — drives the *composed registry*
   node's tool body to prove per-agent isolation. Use this shape when
   your tool holds session state (§ 5).
@@ -534,15 +531,13 @@ than at boot.
 
 ### Node-scoped `@resource` brackets (managed lifecycle)
 
-For a resource that must be opened *and closed* — a Discord connection,
-a connection pool — use calfkit's node-scoped `@resource` lifecycle
-bracket instead. `private_chat` does this: `_a2a_resource` opens its
-Discord connection at worker startup **only when the node is hosted**
-and closes it at drain, and the tool body reaches it via `ctx.resources`
-rather than a module global. This is the right pattern when the resource
-has a lifecycle the worker should own; read `_a2a_resource` and
-`_resources_from_ctx` in `src/calfcord/tools/private_chat.py` for the
-shape.
+For a resource that must be opened *and closed* — a connection pool, a
+client with a session — use calfkit's node-scoped `@resource` lifecycle
+bracket instead of a module global. A `@resource`-decorated setup opens the
+resource at worker startup **only when the node is hosted** and closes it at
+drain, and the tool body reaches it via `ctx.resources`. This is the right
+pattern when the resource has a lifecycle the worker should own; the
+`calfkit-tools` hermes nodes use it for their session-backed tools.
 
 ## 9. Why not entry-point / third-party plugin discovery?
 

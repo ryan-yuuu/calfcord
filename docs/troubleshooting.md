@@ -26,7 +26,7 @@ For the lifecycle model these entries assume (substrate vs. roster), see
 ## Lifecycle & daemon
 
 calfcord runs as two layers: a **substrate** (broker + bridge) that `calfcord
-start` brings up in the background, and a **roster** (agents, tools, router)
+start` brings up in the background, and a **roster** (agents, tools, MCP servers)
 that you clock in on demand with `calfcord agent start <name>` and friends.
 Most "it's running but quiet" reports come from confusing the two — the office
 is open, but no teammate has clocked in yet. The entries below are ordered the
@@ -36,8 +36,9 @@ to multi-host drift.
 Your first two tools for any of these are `calfcord status` (the glanceable org
 board — substrate + roster health) and `calfcord logs [component] [-f]` (per-
 component supervisor logs, also on disk at `$CALFCORD_HOME/state/logs/<name>.log`).
-When `status` looks green but behavior is still wrong, escalate to `calfcord
-doctor`, which is the only check that probes the broker + agents end-to-end.
+When `status` looks green but behavior is still wrong, `calfcord doctor` confirms
+the config and that the bridge daemon is truly alive (not a wedged zombie), and
+`calfcord agent ps` shows which agents the live mesh sees.
 
 ### Substrate is up but nothing replies in Discord
 
@@ -139,28 +140,27 @@ its PID is alive.
 the agent shows online in the roster — yet `@assistant hello` still gets no
 reply.
 
-**What it means.** `status` is cheap and glanceable: it reads per-component
-**heartbeats**, which prove each process is alive and (for the bridge) connected
-to Discord. It does *not* prove the pieces actually talk to each other over the
-broker. A green board can still hide a broken path — wrong broker for one
-component, a topic that isn't flowing, an agent wedged after boot.
+**What it means.** `status` and `agent ps` read **heartbeats and the live mesh**:
+they prove each process is alive and that the agent is registered/online. They do
+*not* prove that a specific `@mention` turn ran to completion — a run can still
+fault, time out, or hit a broker path that isn't flowing (e.g. the agent points
+at a different broker than the bridge).
 
-**Resolution — escalate to the deep probe:**
+**Resolution.** There is no end-to-end control-plane probe anymore (it was
+removed in the calfkit 0.12 migration). Diagnose from the logs of the specific
+turn:
 
 ```bash
-calfcord doctor
+calfcord doctor                   # confirm config + that the bridge daemon is truly alive (not a zombie)
+calfcord logs bridge -f           # watch the bridge accept the @mention and start the run
+calfcord logs <agent> -f          # watch the agent receive the call and reply
 ```
 
-`doctor` is the authoritative check: beyond the static config checks it runs an
-**end-to-end control-plane probe** — it publishes a discovery ping over the
-broker and waits for live agents to answer. A non-empty result proves the
-broker + bridge + agents function together, end to end; an empty or partial
-result pinpoints the broken hop that `status` can't see. This deep probe is the
-*only* check that can diagnose the "green but no replies" symptom — `status`
-structurally cannot.
-
-If `doctor` shows the agent not answering the probe, see the next entry (drift)
-and `calfcord logs <agent> -f`.
+The bridge logs each `@mention` with a `correlation_id`; the agent logs the LLM
+call under the same id. If the bridge starts the run but the agent never logs it,
+the two are on different brokers or the agent is wedged (see the next entry). If
+the agent replies but nothing reaches Discord, check the bridge's reply-post log
+for a Discord permission / rate-limit error.
 
 ### `status` says an agent's process is up, but it isn't registered
 
@@ -171,13 +171,13 @@ locally, but the agent never joined the live org and doesn't answer.
 **What it means.** `agent ps` reconciles two independent views:
 
 - the **physical** view — the local supervisor's process list (this host only);
-- the **logical** view — the live roster reconstructed over the broker (a
-  discovery ping; only agents that actually answer appear).
+- the **logical** view — the live agent **mesh** (calfkit's `calf.agents`
+  heartbeat view; only agents currently beating appear).
 
-When a process is up *physically* but absent from the *logical* roster, the
+When a process is up *physically* but absent from the *logical* mesh, the
 agent booted but never successfully registered/connected to the broker — it's
-running but not participating. That's drift, and it's why a bare process check
-would lie.
+running but not participating (`agent ps` shows it as "started, not yet
+registered"). That's drift, and it's why a bare process check would lie.
 
 **Resolution.**
 
@@ -198,23 +198,22 @@ agent's `.md`, `agent restart <agent>` is also how you reload it.
 
 ### I changed my API key / `.env` but nothing changed
 
-**Symptom.** You edited a value in `.env` (or ran `calfcord agent set` /
-`calfcord router set`) — a new API key, a different model, a changed broker URL —
-but the running component still behaves the old way: the same key is rejected, the
-old model still answers, the agent still points at the old broker.
+**Symptom.** You edited a value in `.env` (or ran `calfcord agent set`) — a new
+API key, a different model, a changed broker URL — but the running component still
+behaves the old way: the same key is rejected, the old model still answers, the
+agent still points at the old broker.
 
 **What it means.** `.env` is read **once, at process boot**. Each component (every
-agent, the router, the tools host, the bridge) loads its environment when it
-starts and holds it for its lifetime, so editing `.env` does nothing to a process
-that's *already running*. You have to **restart the process that reads the value**
-for the new setting to take effect.
+agent, the tools host, the bridge) loads its environment when it starts and holds
+it for its lifetime, so editing `.env` does nothing to a process that's *already
+running*. You have to **restart the process that reads the value** for the new
+setting to take effect.
 
 **Resolution.** Restart only what reads the value you changed:
 
 ```bash
 calfcord agent restart <name>     # one agent's key / model / provider changed
 calfcord agent restart --all      # a key SEVERAL agents share (e.g. ANTHROPIC_API_KEY) — this host's agents
-calfcord router restart           # the router's provider/model changed
 calfcord tools restart            # something the tools host reads changed
 ```
 
@@ -231,9 +230,9 @@ calfcord agent start --all        # ...then bring every defined agent back up on
 > only** — it does not bring the roster back. So `stop && start` leaves you with
 > the substrate up but **no agents running**: use `agent start --all` (every
 > *defined* agent), not `agent restart --all` (which would be a no-op, since
-> nothing is running to restart). Add `calfcord tools start` / `router start`
-> for whichever singletons you run. That's the boot-time gotcha to
-> watch for. The full change → command mapping lives in
+> nothing is running to restart). Add `calfcord tools start` for the tools host
+> (and `calfcord mcp start --all` for MCP servers). That's the boot-time gotcha
+> to watch for. The full change → command mapping lives in
 > [configuration.md](./configuration.md#applying-changes).
 
 ### Nothing survives a reboot
@@ -271,12 +270,13 @@ hidden persistence; reboot non-survival is honest, and `status` reflects reality
 on *this* host.
 
 **What it means.** This is the **cross-host duplicate guard**, and it fired
-correctly. Before starting a teammate, `agent start` runs a broker-wide
-discovery probe and refuses if an agent with that name is already live
-**anywhere in the org — including another host**. Two same-named agents would
-both reply (double-reply) and split agent-to-agent RPC, so the guard prevents
-it. The check is broker-wide on purpose: it's distributed-correct, catching a
-duplicate on a second host without the bridge having to reject anything.
+correctly. Before starting a teammate, `agent start` reads the live agent
+**mesh** (`client.mesh`, calfkit's `calf.agents` heartbeat view) and refuses if
+an agent with that name is already online **anywhere in the org — including
+another host**. Two same-named agents would both reply (double-reply) and split
+agent-to-agent messaging, so the guard prevents it. The check is broker-wide on
+purpose: it's distributed-correct, catching a duplicate on a second host without
+the bridge having to reject anything.
 
 **Resolution.** Decide where the agent should actually run.
 
@@ -289,10 +289,13 @@ duplicate on a second host without the bridge having to reject anything.
   across hosts — give the second one a distinct name (`calfcord agent rename` /
   create a new agent) so each has its own identity in the org.
 
-> **Known limitation.** The probe is point-in-time, so two *simultaneous*
+> **Known limitation.** The mesh read is point-in-time, so two *simultaneous*
 > `agent start X` on different hosts could both see nothing and both start (a
-> TOCTOU race). The guard covers the common case — X is already running and you
-> try to start another. For the design rationale see
+> TOCTOU race). Liveness is also passive heartbeat-staleness: a *crashed* agent
+> stays "online" for up to ~90s until its heartbeat lapses, so a fast restart of
+> a crashed agent can be briefly refused (a graceful `agent stop` tombstones
+> immediately, so it isn't). The guard covers the common case — X is already
+> running and you try to start another. For the design rationale see
 > [architecture.md](./architecture.md).
 
 ---
@@ -341,9 +344,9 @@ every request re-sends the dead bearer and fails with `401 token_revoked`. The
 error surfaces as an uncaught `ModelHTTPError` — nothing in the Codex path
 catches it — so the agent's response is aborted instead of recovered.
 
-> The retry-with-feedback machinery in `bridge/outbox.py` only handles
-> Discord-side HTTP errors on the *reply-send* path. It does not cover
-> model-request failures like this one.
+> The retry-with-feedback machinery (`discord/retry_feedback.py`, used by the
+> bridge's reply poster) only handles Discord-side HTTP errors on the
+> *reply-send* path. It does not cover model-request failures like this one.
 
 **Common triggers** (anything that revokes the grant server-side while the
 service holds a still-"fresh" token):
