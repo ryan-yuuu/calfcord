@@ -753,6 +753,13 @@ async def _finish_live(
         print(
             f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `disco doctor`."
         )
+    # The next step nobody teaches: a one-agent org is step one, not the finish
+    # line. Both the celebrate and the presence-timeout degrade converge here, so
+    # the "add a teammate" signpost (and where to learn more) shows on either.
+    print()
+    print("Add a teammate any time:")
+    print("    disco agent create <name>")
+    print("Learn more:  disco explain topology  ·  docs/using-disco.md")
     print()
     print(f"({_REBOOT_NOTE} `disco start` reopens it; `disco status` shows who's online.)")
     return 0
@@ -769,6 +776,7 @@ def _print_manual_finish(name: str) -> None:
     print("    disco start")
     print(f"    disco agent start {name}")
     print(f"Then in Discord, say: @{name} hello")
+    print("Add more teammates any time: disco agent create <name>")
     print(f"({_REBOOT_NOTE} Re-run `disco start` after a reboot.)")
 
 

@@ -798,6 +798,31 @@ def test_live_finish_reply_timeout_downgrades_to_try_yourself(
     assert "disco doctor" in out
 
 
+def test_live_finish_success_signposts_adding_a_teammate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The live finish teaches the next step nobody teaches: add a second agent.
+    The celebrate path must name ``disco agent create`` and point at the docs."""
+    finish = _FinishStub(reply=True)
+    assert _run(_prompter(), tmp_path, home=tmp_path, finish=finish) == 0
+    out = capsys.readouterr().out
+    assert "disco agent create <name>" in out
+    assert "disco explain topology" in out
+    assert "docs/using-disco.md" in out
+
+
+def test_live_finish_timeout_signposts_adding_a_teammate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same add-a-teammate signpost is shown on the presence-timeout degrade
+    (both paths converge to it), so the operator is never stranded post-onboarding."""
+    finish = _FinishStub(reply=False)
+    assert _run(_prompter(), tmp_path, home=tmp_path, finish=finish) == 0
+    out = capsys.readouterr().out
+    assert "disco agent create <name>" in out
+    assert "docs/using-disco.md" in out
+
+
 def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1000,6 +1025,17 @@ def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.
     assert rc == 0
     assert finish.start_calls == []
     assert "disco start" in out
+
+
+def test_manual_finish_signposts_adding_a_teammate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The honest manual-degrade path also names how to add more teammates so the
+    next step is signposted regardless of whether the live finish ran (§12.6)."""
+    rc = _run(_prompter(), tmp_path, home=None, finish=_FinishStub())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "disco agent create <name>" in out
 
 
 def test_dev_mode_states_reboot_non_survival(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -461,6 +461,10 @@ async def start(
     spawn_blocking = spawn_blocking or _default_spawn_blocking
     clock = clock or time.monotonic
     sleep = sleep or asyncio.sleep
+    # Materialize the roster once (it may be a one-shot iterable) so the success
+    # banners can tell an empty org from a defined one — an org with zero agents
+    # is steered to `agent create`, not the pointless `agent start`.
+    agent_ids = list(agent_ids)
 
     with lifecycle_lock(home):
         # Idempotency (§12.4): if the office is already open, do NOT launch a
@@ -480,10 +484,16 @@ async def start(
                     "`disco start`."
                 )
                 return 1
-            print(
-                "workspace already open (broker + bridge). "
-                "Next: disco agent start <name>"
-            )
+            if agent_ids:
+                print(
+                    "workspace already open (broker + bridge). "
+                    "Next: disco agent start <name>"
+                )
+            else:
+                print(
+                    "workspace already open (broker + bridge). "
+                    "No agents defined yet -> disco agent create <name>"
+                )
             return 0
 
         # One predicate governs both the pre-launch probe and the manifest's broker
@@ -597,10 +607,16 @@ async def start(
                 )
             return 1
 
-    print(
-        "workspace open (broker + bridge). No agents running yet "
-        "-> disco agent start <name>"
-    )
+    if agent_ids:
+        print(
+            "workspace open (broker + bridge). No agents running yet "
+            "-> disco agent start <name>"
+        )
+    else:
+        print(
+            "workspace open (broker + bridge). "
+            "No agents defined yet -> disco agent create <name>"
+        )
     return 0
 
 
@@ -665,7 +681,7 @@ async def status(
         for row in roster:
             print(_format_row(row))
     else:
-        print("  (none running)")
+        print("  (none running -> disco agent start <name>, or disco agent create <name> to add one)")
     # Reboot non-survival, stated honestly (§12.6): the daemon is session-scoped.
     print("note: the workspace does not survive a reboot; re-run `disco start`.")
     return 0

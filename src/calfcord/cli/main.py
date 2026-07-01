@@ -45,6 +45,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="disco",
         description="Manage an Agent Disco install (configure, inspect).",
+        # Raw formatter so the getting-started epilog's indentation + column
+        # alignment survive verbatim (argparse's default reflows/collapses it).
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Getting started:\n"
+            "  disco init                  guided setup — your first agent live in Discord\n"
+            "  disco agent create <name>   add another teammate\n"
+            "  disco status                the org board\n"
+            "\n"
+            "Concepts: disco explain topology   ·   Docs: docs/using-disco.md"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Guided first-run configuration of the install's .env.")

@@ -36,6 +36,30 @@ def test_main_help_exits_zero() -> None:
     assert exc.value.code == 0
 
 
+def test_main_help_epilog_signposts_getting_started(capsys: pytest.CaptureFixture[str]) -> None:
+    """Top-level ``--help`` teaches the getting-started arc: init → add a teammate →
+    the org board, plus where concepts + docs live. The epilog must survive the raw
+    formatter (its indentation/newlines are load-bearing)."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "Getting started:" in out
+    assert "disco init" in out
+    assert "disco agent create <name>" in out
+    assert "disco status" in out
+    assert "disco explain topology" in out
+    assert "docs/using-disco.md" in out
+
+
+def test_main_agent_help_unaffected_by_top_level_epilog(capsys: pytest.CaptureFixture[str]) -> None:
+    """The getting-started epilog is scoped to the TOP-LEVEL parser; subparsers
+    (e.g. ``disco agent --help``) must not inherit it."""
+    with pytest.raises(SystemExit):
+        main(["agent", "--help"])
+    out = capsys.readouterr().out
+    assert "Getting started:" not in out
+
+
 def test_main_init_help_exits_zero() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["init", "--help"])

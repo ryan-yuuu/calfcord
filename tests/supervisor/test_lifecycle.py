@@ -462,6 +462,64 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
     assert "agent start" in out
 
 
+async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fake_pc_bin) -> None:
+    """When no agents are DEFINED yet, the fresh-start success must point at
+    ``disco agent create`` (there is nothing to ``agent start``) rather than the
+    unconditional ``agent start`` steer — the empty-roster teaching moment."""
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        agent_ids=[],
+        client=client,
+        spawn=spawn,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "disco agent create <name>" in out
+    assert "agent start" not in out
+
+
+async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys) -> None:
+    """The idempotent already-open path also steers to ``disco agent create`` when
+    no agents are defined, instead of the ``agent start`` next-step."""
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        agent_ids=[],
+        client=client,
+        spawn=spawn,
+        clock=_FakeClock(),
+    )
+
+    assert code == 0
+    assert spawn.calls == []
+    out = capsys.readouterr().out
+    assert "already open" in out.lower()
+    assert "disco agent create <name>" in out
+    assert "agent start" not in out
+
+
 async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
     home = _home(tmp_path)
     clock = _FakeClock()
@@ -1123,6 +1181,23 @@ async def test_status_running_empty_roster(tmp_path, capsys) -> None:
     assert code == 0
     out = capsys.readouterr().out.lower()
     assert "none running" in out
+
+
+async def test_status_empty_roster_signposts_start_and_create(tmp_path, capsys) -> None:
+    """An empty roster is a teaching moment: the board must point at BOTH
+    ``disco agent start`` (bring a defined agent online) and ``disco agent create``
+    (add one), so a fresh org with no agents is never a dead end."""
+    home = _home(tmp_path)
+    processes = [{"name": "broker", "status": "Running", "is_ready": "Ready"}]
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=processes,
+    )
+    code = await lifecycle.status(home, client=client)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "disco agent start <name>" in out
+    assert "disco agent create <name>" in out
 
 
 def test_process_rows_skips_non_dict_items() -> None:
