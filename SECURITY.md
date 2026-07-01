@@ -13,7 +13,7 @@ network egress posture, recommended `.env` handling — see
 ## How to report
 
 **Primary path: GitHub Security Advisories.** Open a private advisory at
-<https://github.com/ryan-yuuu/calfcord/security/advisories/new>. This
+<https://github.com/ryan-yuuu/agent-disco/security/advisories/new>. This
 keeps the report off the public issue tracker until there's a fix to
 disclose.
 

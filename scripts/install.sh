@@ -2,7 +2,7 @@
 #
 # Agent Disco installer — native, no-prerequisites, reproducible one-line install.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 #
 # What it does, making NO assumptions about the box (no git, no system Python):
 #   1. bootstraps `uv` (a static binary) privately under ~/.calfcord
@@ -19,13 +19,13 @@
 # Env knobs:
 #   CALFCORD_HOME   install root          (default: ~/.calfcord)
 #   CALFCORD_REF    branch or commit SHA  (default: main)
-#   CALFCORD_REPO   owner/repo            (default: ryan-yuuu/calfcord)
+#   CALFCORD_REPO   owner/repo            (default: ryan-yuuu/agent-disco)
 #   GITHUB_TOKEN    optional, for API rate limits / private mirrors
 #
 set -Eeuo pipefail
 
 # ------------------------------------------------------------------ config ---
-REPO="${CALFCORD_REPO:-ryan-yuuu/calfcord}"
+REPO="${CALFCORD_REPO:-ryan-yuuu/agent-disco}"
 REF="${CALFCORD_REF:-main}"
 CALFCORD_HOME="${CALFCORD_HOME:-$HOME/.calfcord}"
 
@@ -557,7 +557,7 @@ CALFCORD_INSTALLED_AT="$(meta CALFCORD_INSTALLED_AT)"
 CALFCORD_REPO="$(meta CALFCORD_REPO)"
 CALFCORD_REF="$(meta CALFCORD_REF)"
 CALFCORD_PREVIOUS_COMMIT="$(meta CALFCORD_PREVIOUS_COMMIT)"
-REPO="${CALFCORD_REPO:-ryan-yuuu/calfcord}"
+REPO="${CALFCORD_REPO:-ryan-yuuu/agent-disco}"
 
 short() { printf '%s' "${1:0:12}"; }
 

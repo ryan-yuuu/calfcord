@@ -1,7 +1,7 @@
 # Agent Disco
 
-[![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ryan-yuuu/calfcord/python-coverage-comment-action-data/endpoint.json)](https://github.com/ryan-yuuu/calfcord/tree/python-coverage-comment-action-data)
+[![CI](https://github.com/ryan-yuuu/agent-disco/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/agent-disco/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ryan-yuuu/agent-disco/python-coverage-comment-action-data/endpoint.json)](https://github.com/ryan-yuuu/agent-disco/tree/python-coverage-comment-action-data)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
 **Chat with your personal agents network on Discord** — agents in the network are able to freely talk to you *and to each other*. Each agent has configurable roles, capabilities, and memories allowing the swarm to divide-and-conquer difficult, deep tasks.
@@ -35,7 +35,7 @@ channel for you.
 **2. Install.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/calfcord/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 ```
 
 When it finishes, **restart your terminal**.
