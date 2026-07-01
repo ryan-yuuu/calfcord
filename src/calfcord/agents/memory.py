@@ -7,8 +7,8 @@ prompts. Instead:
 * the **bridge** reads the template (:func:`load_memory_prompt`) and ships it
   in ``deps`` under :data:`MEMORY_PROMPT_DEPS_KEY` on every invocation (only
   when the deployment has at least one memory-enabled agent);
-* ``private_chat`` projects ``deps`` forward, so the template survives the
-  A2A hop without per-key plumbing;
+* native A2A (``message_agent`` / handoff) projects ``deps`` forward, so the
+  template survives the A2A hop without per-key plumbing;
 * each memory-enabled agent carries a dynamic-instructions hook
   (:func:`memory_instructions`, registered by the factory) that, at runtime,
   reads the template from ``deps``, localizes it to that agent's
@@ -27,13 +27,14 @@ example survive untouched.
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 
 from calfkit._vendor.pydantic_ai import RunContext
 
-from calfcord.agents.definition import AgentDefinition
+logger = logging.getLogger(__name__)
 
 _PROMPT_PATH_ENV = "CALFCORD_MEMORY_PROMPT_PATH"
 _DEFAULT_PROMPT_PATH = Path(__file__).with_name("memory_prompt.md")
@@ -41,8 +42,9 @@ _MEMORY_DIR_PLACEHOLDER = "{{MEMORY_DIR}}"
 
 MEMORY_PROMPT_DEPS_KEY = "memory_prompt"
 """``deps`` key under which the bridge ships the raw (un-localized) template
-and the agent hook reads it. ``private_chat`` forwards ``deps`` wholesale, so
-this key propagates through A2A chains with no per-key handling."""
+and the agent hook reads it. Native A2A (``message_agent`` / handoff) forwards
+``deps`` wholesale, so this key propagates through A2A chains with no per-key
+handling."""
 
 _cached_prompt: str | None = None
 
@@ -73,9 +75,7 @@ def load_memory_prompt() -> str:
         # ``UnicodeError`` (covers ``UnicodeDecodeError``) is a ``ValueError``
         # subclass, not an ``OSError`` — a readable-but-non-UTF-8 override file
         # would otherwise escape as a bare, context-less ``ValueError``.
-        raise ValueError(
-            f"cannot read memory prompt at {path} ({_PROMPT_PATH_ENV}={override!r}): {e}"
-        ) from e
+        raise ValueError(f"cannot read memory prompt at {path} ({_PROMPT_PATH_ENV}={override!r}): {e}") from e
     if not text.strip():
         raise ValueError(f"memory prompt at {path} is empty")
     _cached_prompt = text
@@ -98,12 +98,12 @@ def memory_instructions(agent_id: str) -> Callable[[RunContext[dict]], str | Non
     The factory registers the returned callable on memory-enabled agent nodes
     via ``Agent.instructions``. calfkit invokes it per-run with a
     :class:`RunContext` whose ``.deps`` is the deps dict the invoker passed
-    (the bridge injects the template; ``private_chat`` forwards it). It returns
+    (the bridge injects the template; native A2A forwards it). It returns
     the localized memory block, or ``None`` when no template is present (a
     non-memory deployment, or an invocation path that didn't carry it), so the
     agent degrades gracefully instead of erroring. calfkit appends the result
-    to the agent's instructions alongside its system prompt and the per-call
-    peer roster.
+    to the agent's instructions alongside its system prompt and calfkit's
+    native AgentCard peer directory.
     """
 
     def _hook(ctx: RunContext[dict]) -> str | None:
@@ -116,31 +116,43 @@ def memory_instructions(agent_id: str) -> Callable[[RunContext[dict]], str | Non
     return _hook
 
 
-def memory_prompt_deps_for_registry(specs: Iterable[AgentDefinition]) -> dict[str, str]:
-    """Build the ``deps`` entry that ships the memory-prompt template, or ``{}``.
+class MemoryPromptDeps:
+    """Always-ship memory-prompt ``deps`` provider for the pure-``Client`` bridge (R-A4).
 
-    The bridge is the single reader of the template (:func:`load_memory_prompt`).
-    It ships the raw (un-localized) text under :data:`MEMORY_PROMPT_DEPS_KEY` on
-    every agent invocation it originates **whenever the deployment has at least
-    one memory-enabled agent** — so the template reaches every agent and, because
-    ``private_chat`` forwards ``deps`` wholesale, propagates through A2A chains;
-    each memory-enabled agent's instructions hook then localizes it.
+    The bridge no longer holds a registry, so the old ``any(spec.memory)`` gate
+    is gone: the template is shipped on
+    **every** bridge-originated call. Non-memory agents ignore the key (their
+    instructions hook returns ``None``), so the only cost is a small constant wire
+    payload — and ``deps`` propagate to native ``message_agent`` peers and handoff
+    targets, so A2A memory still works.
 
-    Returns ``{}`` when no agent in ``specs`` opted into memory (existing
-    deployments stay byte-identical — no template read, no wire cost). Raises
-    :class:`ValueError` (propagated from :func:`load_memory_prompt`) when a memory
-    agent exists but the template can't be loaded; the **caller** decides how to
-    log and degrade — the high-frequency bridge-ingress path dedups the error to a
-    single log, while rarer call sites (e.g. the outbox retry) log per occurrence.
-
-    Shared by every bridge path that originates an agent invocation
-    (:meth:`~calfcord.bridge.ingress.BridgeIngress._memory_prompt_deps`
-    and the outbox retry-with-feedback publish) so the "is memory enabled +
-    load the template" decision lives in exactly one place.
+    Callable so the ``MentionHandler`` invokes it per turn as ``memory_deps()``.
+    Holds one-shot load-error state: a bad ``CALFCORD_MEMORY_PROMPT_PATH`` logs
+    once (not once-per-turn) and degrades to ``{}``; because
+    :func:`load_memory_prompt` re-reads on failure, a fixed path self-heals on the
+    next turn and the recovery is logged once as the error log re-arms.
     """
-    if not any(spec.memory for spec in specs):
-        return {}
-    return {MEMORY_PROMPT_DEPS_KEY: load_memory_prompt()}
+
+    def __init__(self) -> None:
+        self._load_failed = False
+
+    def __call__(self) -> dict[str, str]:
+        try:
+            template = load_memory_prompt()
+        except ValueError as exc:
+            if not self._load_failed:
+                self._load_failed = True
+                logger.error(
+                    "failed to load the memory prompt (%s); memory-enabled agents will "
+                    "run without their memory instructions until it loads successfully",
+                    exc,
+                    exc_info=True,
+                )
+            return {}
+        if self._load_failed:
+            self._load_failed = False
+            logger.info("memory prompt loaded successfully; memory instructions restored")
+        return {MEMORY_PROMPT_DEPS_KEY: template}
 
 
 def _reset_cache_for_tests() -> None:

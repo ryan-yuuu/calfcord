@@ -1,14 +1,16 @@
 """Tests for calfcord's opt-in topic-provisioning policy + blind-spot helpers.
 
-calfkit 0.6.0 auto-provisions the client reply topic on EVERY broker-start path
-(a connect-time pre-start hook) and the worker's node topics on the managed
-``Worker.run()``/``start()``/``async with`` paths. What it still cannot see are
-calfcord's cross-process topics that are raw FastStream broker subscribers,
-boot-time publish targets, or no-subscriber callback topics — and, on the
-hand-rolled ``register_handlers()`` + bare ``broker.start()`` paths (bridge,
-probe), the node topics too (no managed lifecycle fires the ensurer). These
-tests pin the exact extra-topic sets each runner must provision, plus the shared
-policy and the provision-before-bare-start ordering.
+calfkit auto-provisions the client reply topic on EVERY broker-start path (a
+connect-time pre-start hook) and a Worker's node topics on the managed
+``Worker.run()``/``start()``/``async with`` paths. After the calfkit 0.12
+migration removed the bespoke control plane, calfcord has no blind-spot topics
+left to declare of its own — agent presence rides calfkit's native mesh and A2A
+is native node dispatch — so :data:`PROVISIONING` is the only piece every runner
+still needs. :func:`provision_extra_topics` / :func:`provision_and_start_broker`
+survive as general-purpose helpers for any future caller that hand-rolls a raw
+broker subscriber outside the managed Worker lifecycle. These tests pin the
+shared policy, those helpers' behavior, and the provision-before-bare-start
+ordering.
 """
 
 from __future__ import annotations
@@ -19,14 +21,7 @@ import pytest
 
 from calfcord._provisioning import (
     PROVISIONING,
-    agent_infra_topics,
-    bridge_infra_topics,
     provision_extra_topics,
-)
-from calfcord.control_plane.topics import (
-    AGENT_STATE_TOPIC,
-    BRIDGE_DISCOVERY_TOPIC,
-    control_topic_for,
 )
 
 _SERVERS = "h:9092"
@@ -35,27 +30,11 @@ _SERVERS = "h:9092"
 def test_provisioning_policy_enabled_single_partition() -> None:
     # Enabled so calfkit creates referenced topics on a no-auto-create broker.
     assert PROVISIONING.enabled is True
-    # agent.steps REQUIRES a single partition (ordering); nothing local needs more.
+    # Single-partition local/dev default: keeps per-key ordering trivially intact
+    # and nothing calfcord runs locally benefits from more.
     assert PROVISIONING.num_partitions == 1
+    # Single-broker local/dev default (NOT durable — raise for a real cluster).
     assert PROVISIONING.replication_factor == 1
-
-
-def test_bridge_infra_topics_are_the_control_plane_subscriber_and_boot_publish() -> None:
-    # agent.state: raw state-consumer subscriber. bridge.discovery: published at
-    # boot (discovery ping) before any agent may be up — bridge must ensure both.
-    assert set(bridge_infra_topics()) == {AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC}
-
-
-def test_agent_infra_topics_add_one_control_topic_per_agent() -> None:
-    topics = agent_infra_topics(["alpha", "beta"])
-    assert AGENT_STATE_TOPIC in topics
-    assert BRIDGE_DISCOVERY_TOPIC in topics
-    assert control_topic_for("alpha") in topics
-    assert control_topic_for("beta") in topics
-
-
-def test_agent_infra_topics_with_no_agents_is_just_the_shared_pair() -> None:
-    assert set(agent_infra_topics([])) == {AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC}
 
 
 async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypatch) -> None:
@@ -97,21 +76,6 @@ async def test_provision_extra_topics_dedups_and_forwards_explicit_server_urls(m
     assert captured["config"] is PROVISIONING
     assert captured["topics"] == ["a", "b"]  # de-duplicated, first-seen order
     assert captured["framework_topics"] == set()  # plain data topics
-
-
-def test_runner_reply_topics_are_pairwise_distinct() -> None:
-    """Each runner's reply dispatcher needs its OWN topic. calfkit 0.6.0
-    auto-provisions each at broker start, but a collision would still cross-wire
-    reply delivery between processes — pin distinctness so a copy-paste can't.
-    """
-    from calfcord.router.runner import _REPLY_TOPIC as ROUTER
-    from calfcord.tools.runner import _REPLY_TOPIC as TOOLS
-
-    # "discord.outbox" is the bridge's outbox topic — its agents' ``reply_to``
-    # return address and the outbox consumer's inbox. The bridge client itself no
-    # longer names it as a reply inbox (it takes its own auto-generated inbox),
-    # but the router/tools reply inboxes must still not collide with it.
-    assert len({ROUTER, TOOLS, "discord.outbox"}) == 3
 
 
 async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch) -> None:

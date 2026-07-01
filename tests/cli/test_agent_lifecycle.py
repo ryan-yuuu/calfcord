@@ -1,23 +1,20 @@
 """Tests for ``calfcord agent set`` / ``rename`` / ``delete``.
 
-These commands mutate an agent's two on-disk artifacts — its ``agents/<name>.md``
-and its per-agent ``state/agents/<name>.json`` — so the tests seed real files and
-re-parse / re-stat to assert the on-disk effect. The contracts that matter:
+These commands mutate an agent's ``agents/<name>.md``, so the tests seed real
+files and re-parse / re-stat to assert the on-disk effect. The contracts that
+matter:
 
-* ``set`` writes through the validated paths, so a bad value (out-of-range
-  ``history_turns``) fails with the file untouched.
-* ``rename`` moves BOTH artifacts and never loses the agent: the ``.md`` lands
-  under the new name, the old ``.md`` is gone, and the state JSON follows so the
-  agent keeps its channel subscriptions. Renaming onto an existing agent is a
+* ``set`` writes through the validated paths, so a bad value (a rejected
+  ``thinking_effort``) fails with the file untouched.
+* ``rename`` moves the ``.md`` and never loses the agent: the ``.md`` lands under
+  the new name and the old ``.md`` is gone. Renaming onto an existing agent is a
   hard error that does not clobber the target.
-* ``delete`` confirms first (via an injected fake prompter), removes both
-  artifacts, honors ``keep_state`` / ``yes``, and treats a declined confirm as a
-  no-op.
+* ``delete`` confirms first (via an injected fake prompter), removes the ``.md``,
+  honors ``yes``, and treats a declined confirm as a no-op.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -65,7 +62,6 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_
     lines = [
         "---",
         f"name: {name}",
-        f"display_name: {name.capitalize()}",
         f"description: Test {name}.",
         "provider: anthropic",
     ]
@@ -75,14 +71,6 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_
     md_path = agents_dir / f"{name}.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return md_path
-
-
-def _seed_state(state_dir: Path, name: str, *, channels: list[int]) -> Path:
-    """Write a per-agent state JSON (channel subscriptions) and return its path."""
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / f"{name}.json"
-    path.write_text(json.dumps({"schema_version": 1, "channels": channels}), encoding="utf-8")
-    return path
 
 
 # --- set --------------------------------------------------------------------
@@ -178,15 +166,15 @@ def test_set_system_prompt_rewrites_body(tmp_path: Path) -> None:
     assert parse_agent_md(md_path).system_prompt == "Brand new prompt body."
 
 
-def test_set_out_of_range_int_errors_and_leaves_file(tmp_path: Path, capsys) -> None:
+def test_set_invalid_value_errors_and_leaves_file(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe")
     original = md_path.read_text(encoding="utf-8")
 
-    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"history_turns": "999"})
+    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"thinking_effort": "ludicrous"})
     assert rc == 1
     out = capsys.readouterr().out
-    assert "error:" in out and "history_turns" in out
+    assert "error:" in out and "thinking_effort" in out
     # Validate-before-write: the on-disk file is untouched and no tmp leaked.
     assert md_path.read_text(encoding="utf-8") == original
     assert list(agents_dir.glob(".*.tmp")) == []
@@ -248,36 +236,34 @@ def test_set_reports_partial_apply_before_mid_loop_failure(tmp_path: Path, capsy
     operator is told which fields already landed before the offending one."""
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe")
-    # Seed an in-range history_turns so the later (out-of-range) write is the only
+    # Seed a valid thinking_effort so the later (invalid) write is the only
     # failure and the field's prior on-disk value is checkable.
-    agent_lifecycle.run_set(agents_dir, "scribe", {"history_turns": "5"})
-    assert parse_agent_md(md_path).history_turns == 5
+    agent_lifecycle.run_set(agents_dir, "scribe", {"thinking_effort": "high"})
+    assert parse_agent_md(md_path).thinking_effort == "high"
 
-    # Dict order matters: description (applies), then the out-of-range int (fails).
+    # Dict order matters: description (applies), then the invalid effort (fails).
     rc = agent_lifecycle.run_set(
-        agents_dir, "scribe", {"description": "New desc", "history_turns": "999"}
+        agents_dir, "scribe", {"description": "New desc", "thinking_effort": "ludicrous"}
     )
     assert rc == 1
     out = capsys.readouterr().out
     assert "note: already applied description before this error." in out
-    assert "error: history_turns:" in out
+    assert "error: thinking_effort:" in out
 
     # The earlier field's write stuck; the failing field's value is untouched.
     reparsed = parse_agent_md(md_path)
     assert reparsed.description == "New desc"
-    assert reparsed.history_turns == 5
+    assert reparsed.thinking_effort == "high"
 
 
 # --- rename -----------------------------------------------------------------
 
 
-def test_rename_moves_md_and_state(tmp_path: Path) -> None:
+def test_rename_moves_md(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
-    _seed_state(state_dir, "scribe", channels=[111, 222])
 
-    agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
+    agent_lifecycle.rename_agent(agents_dir, "scribe", "penny")
 
     # New .md exists, parses, and carries the new name; old .md is gone.
     new_md = agents_dir / "penny.md"
@@ -285,34 +271,16 @@ def test_rename_moves_md_and_state(tmp_path: Path) -> None:
     assert parse_agent_md(new_md).agent_id == "penny"
     assert not (agents_dir / "scribe.md").exists()
 
-    # State followed the rename so the agent keeps its channel subscriptions.
-    new_state = state_dir / "penny.json"
-    assert new_state.is_file()
-    assert not (state_dir / "scribe.json").exists()
-    assert json.loads(new_state.read_text(encoding="utf-8"))["channels"] == [111, 222]
-
-
-def test_rename_without_state_file_is_fine(tmp_path: Path) -> None:
-    """An agent that never persisted state renames without a state move error."""
-    agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
-    _seed_agent(agents_dir, "scribe")
-
-    agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
-    assert (agents_dir / "penny.md").is_file()
-    assert not (state_dir / "penny.json").exists()
-
 
 def test_rename_onto_existing_name_raises_and_keeps_both(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     src = _seed_agent(agents_dir, "scribe")
     dst = _seed_agent(agents_dir, "penny")
     src_before = src.read_text(encoding="utf-8")
     dst_before = dst.read_text(encoding="utf-8")
 
     with pytest.raises(ValueError, match="already exists"):
-        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
+        agent_lifecycle.rename_agent(agents_dir, "scribe", "penny")
 
     # Neither file is lost or clobbered — the source .md must survive a refused
     # rename so the agent can't vanish.
@@ -322,26 +290,23 @@ def test_rename_onto_existing_name_raises_and_keeps_both(tmp_path: Path) -> None
 
 def test_rename_missing_source_raises(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     agents_dir.mkdir(parents=True, exist_ok=True)
     with pytest.raises(ValueError, match="no agent"):
-        agent_lifecycle.rename_agent(agents_dir, state_dir, "ghost", "penny")
+        agent_lifecycle.rename_agent(agents_dir, "ghost", "penny")
 
 
 def test_rename_to_same_id_raises(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
     # "Scribe" slugifies back to "scribe": a no-op rename is rejected.
     with pytest.raises(ValueError, match="same agent id"):
-        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "Scribe")
+        agent_lifecycle.rename_agent(agents_dir, "scribe", "Scribe")
 
 
 def test_run_rename_success(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
-    rc = agent_lifecycle.run_rename(agents_dir, state_dir, "scribe", "penny")
+    rc = agent_lifecycle.run_rename(agents_dir, "scribe", "penny")
     assert rc == 0
     out = capsys.readouterr().out
     assert "Renamed" in out and "penny" in out
@@ -349,78 +314,24 @@ def test_run_rename_success(tmp_path: Path, capsys) -> None:
 
 def test_run_rename_existing_returns_1(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
     _seed_agent(agents_dir, "penny")
-    assert agent_lifecycle.run_rename(agents_dir, state_dir, "scribe", "penny") == 1
+    assert agent_lifecycle.run_rename(agents_dir, "scribe", "penny") == 1
     assert "error:" in capsys.readouterr().out
     # The source is still intact after a refused rename.
     assert (agents_dir / "scribe.md").is_file()
-
-
-def test_rename_onto_orphan_state_file_raises_and_clobbers_nothing(tmp_path: Path) -> None:
-    """An orphaned ``<new>.json`` (no matching ``.md``) blocks the rename: it holds
-    another agent's saved subscriptions and ``os.replace`` would silently destroy it.
-
-    Asserted at the ``rename_agent`` layer (it raises ``ValueError``) so the guard
-    is pinned independently of the ``run_*`` wrapper.
-    """
-    agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
-    _seed_agent(agents_dir, "scribe")
-    scribe_state = _seed_state(state_dir, "scribe", channels=[7])
-    # An orphan state file for the rename target, with no penny.md beside it.
-    orphan_state = _seed_state(state_dir, "penny", channels=[999])
-    scribe_before = scribe_state.read_bytes()
-    orphan_before = orphan_state.read_bytes()
-
-    with pytest.raises(ValueError, match="already exists"):
-        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
-
-    assert (agents_dir / "scribe.md").is_file()
-    assert not (agents_dir / "penny.md").exists()
-    # Neither state file moved or was overwritten — the orphan keeps its bytes.
-    assert scribe_state.read_bytes() == scribe_before
-    assert orphan_state.read_bytes() == orphan_before
-
-
-def test_run_rename_onto_orphan_state_file_returns_1(tmp_path: Path, capsys) -> None:
-    """The ``run_rename`` wrapper maps the orphan-state guard to ``error:`` + exit 1
-    and leaves both the agent and the orphan state file untouched."""
-    agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
-    _seed_agent(agents_dir, "scribe")
-    scribe_state = _seed_state(state_dir, "scribe", channels=[7])
-    orphan_state = _seed_state(state_dir, "penny", channels=[999])
-    scribe_before = scribe_state.read_bytes()
-    orphan_before = orphan_state.read_bytes()
-
-    rc = agent_lifecycle.run_rename(agents_dir, state_dir, "scribe", "penny")
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "error:" in out
-    # The error names the offending state file so the operator can act on it.
-    assert "state file" in out
-
-    assert (agents_dir / "scribe.md").is_file()
-    assert not (agents_dir / "penny.md").exists()
-    assert scribe_state.read_bytes() == scribe_before
-    assert orphan_state.read_bytes() == orphan_before
 
 
 def test_rename_rolls_back_new_md_when_old_unlink_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If removing the OLD ``.md`` fails after the NEW one is written, the rename
-    must roll the new file back so two live agents aren't left on disk — and the
-    state file must not have moved (the move runs only after a clean unlink)."""
+    must roll the new file back so two live agents aren't left on disk."""
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
-    _seed_state(state_dir, "scribe", channels=[1])
 
     # Capture the real unlink before patching so the rollback unlink (penny.md)
-    # and the state move still work; only the old-.md removal is forced to fail.
+    # still works; only the old-.md removal is forced to fail.
     real_unlink = Path.unlink
 
     def fake(self: Path, *args: object, **kwargs: object) -> None:
@@ -431,69 +342,48 @@ def test_rename_rolls_back_new_md_when_old_unlink_fails(
     monkeypatch.setattr(Path, "unlink", fake)
 
     with pytest.raises(OSError, match="cannot remove old md"):
-        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
+        agent_lifecycle.rename_agent(agents_dir, "scribe", "penny")
 
-    # Original intact, new file rolled back, state never moved.
+    # Original intact, new file rolled back.
     assert (agents_dir / "scribe.md").is_file()
     assert not (agents_dir / "penny.md").exists()
-    assert (state_dir / "scribe.json").is_file()
-    assert not (state_dir / "penny.json").exists()
 
 
 # --- delete -----------------------------------------------------------------
 
 
-def test_delete_agent_removes_md_and_state(tmp_path: Path) -> None:
+def test_delete_agent_removes_md(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
-    _seed_state(state_dir, "scribe", channels=[1])
 
-    agent_lifecycle.delete_agent(agents_dir, state_dir, "scribe", keep_state=False)
+    agent_lifecycle.delete_agent(agents_dir, "scribe")
     assert not (agents_dir / "scribe.md").exists()
-    assert not (state_dir / "scribe.json").exists()
-
-
-def test_delete_agent_keep_state_preserves_json(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
-    _seed_agent(agents_dir, "scribe")
-    state_path = _seed_state(state_dir, "scribe", channels=[1])
-
-    agent_lifecycle.delete_agent(agents_dir, state_dir, "scribe", keep_state=True)
-    assert not (agents_dir / "scribe.md").exists()
-    assert state_path.is_file()
 
 
 def test_delete_agent_missing_raises(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     agents_dir.mkdir(parents=True, exist_ok=True)
     with pytest.raises(ValueError, match="no agent"):
-        agent_lifecycle.delete_agent(agents_dir, state_dir, "ghost", keep_state=False)
+        agent_lifecycle.delete_agent(agents_dir, "ghost")
 
 
-def test_run_delete_confirmed_removes_both(tmp_path: Path) -> None:
+def test_run_delete_confirmed_removes_md(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
-    _seed_state(state_dir, "scribe", channels=[1])
 
     fake = FakePrompter(confirm_result=True)
-    rc = agent_lifecycle.run_delete(fake, agents_dir, state_dir, "scribe")
+    rc = agent_lifecycle.run_delete(fake, agents_dir, "scribe")
     assert rc == 0
     assert fake.confirm_calls  # the operator was asked
     assert not (agents_dir / "scribe.md").exists()
-    assert not (state_dir / "scribe.json").exists()
 
 
 def test_run_delete_declined_keeps_file(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     md_path = _seed_agent(agents_dir, "scribe")
 
     fake = FakePrompter(confirm_result=False)
-    rc = agent_lifecycle.run_delete(fake, agents_dir, state_dir, "scribe")
+    rc = agent_lifecycle.run_delete(fake, agents_dir, "scribe")
     assert rc == 0
     assert "cancelled" in capsys.readouterr().out
     assert md_path.is_file()
@@ -501,33 +391,19 @@ def test_run_delete_declined_keeps_file(tmp_path: Path, capsys) -> None:
 
 def test_run_delete_yes_skips_prompt(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     _seed_agent(agents_dir, "scribe")
 
     fake = FakePrompter(confirm_result=False)  # would decline if asked
-    rc = agent_lifecycle.run_delete(fake, agents_dir, state_dir, "scribe", yes=True)
+    rc = agent_lifecycle.run_delete(fake, agents_dir, "scribe", yes=True)
     assert rc == 0
     assert fake.confirm_calls == []  # --yes means no prompt
     assert not (agents_dir / "scribe.md").exists()
 
 
-def test_run_delete_keep_state_preserves_json(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
-    _seed_agent(agents_dir, "scribe")
-    state_path = _seed_state(state_dir, "scribe", channels=[1])
-
-    fake = FakePrompter(confirm_result=True)
-    rc = agent_lifecycle.run_delete(fake, agents_dir, state_dir, "scribe", keep_state=True)
-    assert rc == 0
-    assert state_path.is_file()
-
-
 def test_run_delete_missing_returns_1(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
-    state_dir = tmp_path / "state"
     agents_dir.mkdir(parents=True, exist_ok=True)
     fake = FakePrompter(confirm_result=True)
-    assert agent_lifecycle.run_delete(fake, agents_dir, state_dir, "ghost") == 1
+    assert agent_lifecycle.run_delete(fake, agents_dir, "ghost") == 1
     assert "ghost" in capsys.readouterr().out
     assert fake.confirm_calls == []  # never prompted for a nonexistent agent

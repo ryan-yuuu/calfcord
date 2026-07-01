@@ -45,7 +45,7 @@ def test_substrate_processes_are_present() -> None:
 
 def test_roster_processes_are_present() -> None:
     procs = _processes()
-    for name in ("tools", "router", "assistant", "scribe"):
+    for name in ("tools", "assistant", "scribe"):
         assert name in procs
 
 
@@ -54,8 +54,8 @@ def test_substrate_autostarts_roster_is_disabled() -> None:
     # Substrate: nothing runs that the user did not start, except the office itself.
     assert procs["broker"]["disabled"] is False
     assert procs["bridge"]["disabled"] is False
-    # Roster: present but waits for an explicit `agent/router/tools start`.
-    for name in ("tools", "router", "assistant", "scribe"):
+    # Roster: present but waits for an explicit `agent/tools start`.
+    for name in ("tools", "assistant", "scribe"):
         assert procs[name]["disabled"] is True
 
 
@@ -65,14 +65,12 @@ def test_broker_has_no_dependencies() -> None:
 
 
 def test_bridge_depends_on_broker_health() -> None:
-    assert _processes()["bridge"]["depends_on"] == {
-        "broker": {"condition": "process_healthy"}
-    }
+    assert _processes()["bridge"]["depends_on"] == {"broker": {"condition": "process_healthy"}}
 
 
 def test_every_roster_member_health_gates_on_broker() -> None:
     procs = _processes()
-    for name in ("tools", "router", "assistant", "scribe"):
+    for name in ("tools", "assistant", "scribe"):
         assert procs[name]["depends_on"] == {"broker": {"condition": "process_healthy"}}
 
 
@@ -92,19 +90,15 @@ def test_substrate_readiness_probes_are_exec_only() -> None:
 
 def test_readiness_probe_commands_invoke_the_launcher_healthcheck() -> None:
     procs = _processes()
-    assert procs["broker"]["readiness_probe"]["exec"]["command"] == (
-        f"{_LAUNCHER} _healthcheck broker"
-    )
-    assert procs["bridge"]["readiness_probe"]["exec"]["command"] == (
-        f"{_LAUNCHER} _healthcheck bridge"
-    )
+    assert procs["broker"]["readiness_probe"]["exec"]["command"] == (f"{_LAUNCHER} _healthcheck broker")
+    assert procs["bridge"]["readiness_probe"]["exec"]["command"] == (f"{_LAUNCHER} _healthcheck bridge")
 
 
 def test_roster_has_no_readiness_probe() -> None:
     # Only the substrate is health-gated; roster liveness is reconstructed over
     # the control plane, not via a readiness probe (design §3.4).
     procs = _processes()
-    for name in ("tools", "router", "assistant", "scribe"):
+    for name in ("tools", "assistant", "scribe"):
         assert "readiness_probe" not in procs[name]
 
 
@@ -120,13 +114,13 @@ def test_substrate_restart_always() -> None:
 
 
 def test_roster_restart_on_failure() -> None:
-    # The whole roster — agents *and* tools/router — now runs via
+    # The whole roster — agents *and* tools — now runs via
     # run_worker_until_signal, which forces a non-zero exit on any uncommanded
     # exit (crash or clean signal-less return), so on_failure restarts a crash
     # while an operator-commanded stop is suppressed from restart by Process
     # Compose. Backoff matches the substrate.
     procs = _processes()
-    for name in ("assistant", "scribe", "tools", "router"):
+    for name in ("assistant", "scribe", "tools"):
         availability = procs[name]["availability"]
         assert availability["restart"] == "on_failure"
         assert availability["backoff_seconds"] == 2
@@ -147,22 +141,19 @@ def test_command_strings_invoke_the_launcher() -> None:
     assert procs["assistant"]["command"] == f"{_LAUNCHER} run agent assistant"
     assert procs["scribe"]["command"] == f"{_LAUNCHER} run agent scribe"
     assert procs["tools"]["command"] == f"{_LAUNCHER} run tools"
-    assert procs["router"]["command"] == f"{_LAUNCHER} run router"
 
 
 def test_launcher_prefix_is_parameterized() -> None:
     # A different launcher (e.g. a dev `uv run calfcord-cli` shim) flows through
     # untouched — the generator never reconstructs uv-run flags.
-    procs = build_compose_project(
-        agent_ids=["assistant"], home=_HOME, launcher="uv run calfcord-cli"
-    )["processes"]
+    procs = build_compose_project(agent_ids=["assistant"], home=_HOME, launcher="uv run calfcord-cli")["processes"]
     assert procs["broker"]["command"] == "uv run calfcord-cli broker"
     assert procs["assistant"]["command"] == "uv run calfcord-cli run agent assistant"
 
 
 def test_per_process_log_locations_live_under_state_logs() -> None:
     procs = _processes(["assistant"])
-    for name in ("broker", "bridge", "assistant", "tools", "router"):
+    for name in ("broker", "bridge", "assistant", "tools"):
         assert procs[name]["log_location"] == f"{_HOME}/state/logs/{name}.log"
 
 
@@ -191,14 +182,14 @@ def test_project_level_log_rotation_block() -> None:
 
 def test_no_agents_still_yields_a_valid_substrate() -> None:
     procs = _processes([])
-    assert {"broker", "bridge", "tools", "router"} == set(procs)
+    assert {"broker", "bridge", "tools"} == set(procs)
 
 
 def test_reserved_agent_id_is_rejected() -> None:
     # An agent named like a substrate/component process would silently clobber it
     # via the shared `processes` dict key — reject it loudly instead of corrupting
     # the substrate.
-    for reserved in ("broker", "bridge", "tools", "router"):
+    for reserved in ("broker", "bridge", "tools"):
         with pytest.raises(ValueError):
             build_compose_project(agent_ids=[reserved], home=_HOME, launcher=_LAUNCHER)
 
@@ -237,9 +228,7 @@ _PC_GATE = pytest.mark.skipif(
 @_PC_GATE
 def test_rendered_compose_validates_against_the_real_binary(tmp_path: Path) -> None:
     project = tmp_path / "process-compose.yaml"
-    project.write_text(
-        render_compose(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER)
-    )
+    project.write_text(render_compose(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER))
     result = subprocess.run(
         ["process-compose", "up", "--dry-run", "-f", str(project)],
         capture_output=True,
@@ -256,9 +245,7 @@ def test_rendered_compose_validates_against_the_real_binary(tmp_path: Path) -> N
 
 
 def _mcp_project(servers: list[str]) -> dict:
-    return build_compose_project(
-        agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER, mcp_servers=servers
-    )
+    return build_compose_project(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER, mcp_servers=servers)
 
 
 def test_mcp_servers_get_per_server_slots() -> None:
@@ -287,9 +274,7 @@ def test_no_mcp_servers_yields_no_mcp_slots() -> None:
 
 
 def test_omitting_mcp_servers_param_is_backward_compatible() -> None:
-    processes = build_compose_project(
-        agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER
-    )["processes"]
+    processes = build_compose_project(agent_ids=_AGENTS, home=_HOME, launcher=_LAUNCHER)["processes"]
     assert not [name for name in processes if name.startswith("mcp-")]
 
 

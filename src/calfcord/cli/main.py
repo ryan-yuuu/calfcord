@@ -5,7 +5,7 @@ The native ``calfcord`` shim translates user-facing management subcommands
 and execs them through the same locked venv as the runners. ``prog="calfcord"``
 so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
-(``init`` / ``doctor`` / ``agent`` / ``router`` / ``tools``) to dispatch them here.
+(``init`` / ``doctor`` / ``agent`` / ``tools``) to dispatch them here.
 The ``run`` / ``auth`` verbs are translated to console scripts in the shim itself,
 not here.
 """
@@ -31,7 +31,6 @@ from calfcord.cli import (
     init,
     logs,
     mcp_admin,
-    router_config,
 )
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
@@ -88,14 +87,13 @@ def _build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("name", help="Agent name.")
     _add_set_flags(set_p)
 
-    rename_p = agent_sub.add_parser("rename", help="Rename an agent (file, slash command, and state).")
+    rename_p = agent_sub.add_parser("rename", help="Rename an agent (file and slash command).")
     rename_p.add_argument("old", help="Current agent name.")
     rename_p.add_argument("new", help="New agent name.")
 
     delete_p = agent_sub.add_parser("delete", help="Delete an agent.")
     delete_p.add_argument("name", help="Agent name.")
     delete_p.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
-    delete_p.add_argument("--keep-state", action="store_true", help="Keep the agent's channel-subscription state file.")
 
     tools_p = agent_sub.add_parser("tools", help="Interactively edit an agent's tool list.")
     tools_p.add_argument("name", nargs="?", help="Agent name (omit to pick interactively).")
@@ -126,42 +124,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     agent_sub.add_parser("ps", help="Show RUNNING agents (vs. `agent list`, which shows DEFINED agents).")
 
-    # ``router`` mirrors ``agent``: a verb group, not a leaf. ``required=True``
-    # makes a bare ``calfcord router`` print help + exit non-zero so the group
-    # can grow further commands later. The router holds an LLM connection like an
-    # agent, so it gets a first-class, *editable* config surface (show/set/edit)
-    # rather than a one-shot wizard, plus its own roster lifecycle (start/stop).
-    router_p = sub.add_parser("router", help="Manage the ambient-message router.")
-    router_sub = router_p.add_subparsers(dest="router_command", required=True)
-    router_sub.add_parser("show", help="Show the router's configured provider/model.")
-    router_set_p = router_sub.add_parser("set", help="Set the router's LLM provider/model.")
-    router_set_p.add_argument("--provider")  # validated in router_config.set_config against the Provider literal
-    router_set_p.add_argument("--model")
-    router_sub.add_parser("edit", help="Configure the OPTIONAL ambient router interactively (provider, model).")
-    # Router lifecycle mirrors the agent roster verbs (start/stop/restart). The
-    # router is one process per host, so ``--all`` is a forward-compatible SYNONYM
-    # for the bare verb (it acts on this host's single router slot); it is accepted
-    # for a uniform surface across the roster verbs and dispatches to the same
-    # singular handler.
-    for _verb, _help in (
-        ("start", "Bring the router online (needs config)."),
-        ("stop", "Take the router offline."),
-        ("restart", "Reload the running router after a config change."),
-    ):
-        _rp = router_sub.add_parser(_verb, help=_help)
-        _rp.add_argument(
-            "--all",
-            dest="all",
-            action="store_true",
-            help="Synonym for the bare verb (acts on this host's router).",
-        )
-    # ``setup`` is the pre-redesign wizard, now SUPERSEDED by ``edit``. Kept as a
-    # back-compat alias so existing muscle memory / docs / scripts keep working;
-    # it dispatches to the same one-shot ambient-router wizard it always has.
-    router_sub.add_parser("setup", help="Deprecated alias of `router edit`.")
-
     # ``tools`` is a SINGLETON roster component: one declared Process Compose slot,
-    # clocking in/out of the running office. Unlike the router it has NO config
+    # clocking in/out of the running office. It has NO config
     # surface here, so it is a ``start|stop|restart`` group whose whole veneer is
     # the dispatch to the generic ``component_start/stop`` with the slot name.
     # ``required=True`` makes a bare ``calfcord tools`` print help + exit non-zero
@@ -187,16 +151,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Tool aliases (CALFCORD_TOOLS_ALIAS) — install config the tools/agent
     # hosts read at boot; managed here, not by a launch flag (ADR-0007).
-    alias_p = tools_sub.add_parser(
-        "alias", help="Manage tool aliases (CALFCORD_TOOLS_ALIAS)."
-    )
+    alias_p = tools_sub.add_parser("alias", help="Manage tool aliases (CALFCORD_TOOLS_ALIAS).")
     alias_sub = alias_p.add_subparsers(dest="tools_alias_command", required=True)
-    _restart_help = (
-        "Restart the tools host + agents to apply now (if a workspace is running)."
-    )
-    _aadd = alias_sub.add_parser(
-        "add", help="Alias a tool under a new name (multi-host routing)."
-    )
+    _restart_help = "Restart the tools host + agents to apply now (if a workspace is running)."
+    _aadd = alias_sub.add_parser("add", help="Alias a tool under a new name (multi-host routing).")
     _aadd.add_argument("src", help="The tool to alias (e.g. terminal).")
     _aadd.add_argument("dst", help="The new name to expose it under (e.g. terminal_eu).")
     _aadd.add_argument("--restart", action="store_true", help=_restart_help)
@@ -238,11 +196,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_p.add_argument("--url", help="Streamable-HTTP endpoint URL.")
     add_p.add_argument(
-        "--env", action="append", default=[], metavar="NAME[=VALUE]",
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME[=VALUE]",
         help="stdio env entry; bare NAME passes $NAME through. Repeatable.",
     )
     add_p.add_argument(
-        "--header", action="append", default=[], metavar="KEY=VALUE",
+        "--header",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
         help="HTTP header entry. Repeatable.",
     )
     add_p.add_argument("--cwd", help="stdio working directory.")
@@ -265,7 +229,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
     # Graduation-tier surfaces (design §2 / §11). ``explain`` is a verb group (like
-    # ``router``) so its teaching catalogue can grow; ``topology`` is the only topic
+    # ``agent``) so its teaching catalogue can grow; ``topology`` is the only topic
     # today. ``logs`` and ``deploy`` are leaves with their own args.
     explain_p = sub.add_parser("explain", help="Explain calfcord's runtime topology and why it splits.")
     explain_sub = explain_p.add_subparsers(dest="explain_command", required=True)
@@ -306,7 +270,7 @@ _SUPERVISOR_HOME_DETAIL = "the supervisor has a stable home."
 def _require_home(command: str, *, detail: str = _SUPERVISOR_HOME_DETAIL) -> Path | None:
     """Resolve the install home, or print the native-install error and return ``None``.
 
-    Every supervisor-scoped verb (substrate/agent/router/component lifecycle,
+    Every supervisor-scoped verb (substrate/agent/component lifecycle,
     ``logs``, ``deploy``) is install-scoped: its lock, REST port, logs, shim, and
     manifests all live under ``$CALFCORD_HOME``. A dev run (no ``CALFCORD_HOME``)
     has no stable home, so each refuses with the SAME actionable message rather
@@ -321,26 +285,9 @@ def _require_home(command: str, *, detail: str = _SUPERVISOR_HOME_DETAIL) -> Pat
     home = _resolve_home()
     if home is None:
         print(
-            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME "
-            f"(or run the installer) so {detail}"
+            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME (or run the installer) so {detail}"
         )
     return home
-
-
-def _resolve_state_dir(home: Path | None) -> Path:
-    """Per-agent state dir (channel-subscription JSON), needed by rename/delete.
-
-    Mirrors the runner's resolution so the CLI moves/removes the exact file the
-    agent reads: ``CALFKIT_STATE_DIR`` wins (the shim sets it to
-    ``$H/state/agents``); otherwise ``$H/state/agents`` on a native install, or
-    the dev ``./state/agents`` default.
-    """
-    override = os.environ.get("CALFKIT_STATE_DIR")
-    if override:
-        return Path(override)
-    if home is not None:
-        return home / "state" / "agents"
-    return Path("state") / "agents"
 
 
 def _add_set_flags(set_p: argparse.ArgumentParser) -> None:
@@ -354,8 +301,7 @@ def _add_set_flags(set_p: argparse.ArgumentParser) -> None:
     for field in FIELDS:
         if field.kind == "provider_model":
             continue
-        suffix = f" ({field.int_min}-{field.int_max})" if field.kind == "int" else ""
-        set_p.add_argument(field.flag, dest=field.key, default=None, help=field.label + suffix)
+        set_p.add_argument(field.flag, dest=field.key, default=None, help=field.label)
     set_p.add_argument("--provider", dest="provider", default=None, help="Model provider")
     set_p.add_argument("--model", dest="model", default=None, help="Model id")
 
@@ -409,8 +355,8 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
     Like :func:`_run_lifecycle`, these drive the *install-scoped* Process Compose
     supervisor: its REST port is derived from ``$CALFCORD_HOME`` and the roster
-    ops talk to it (and, for ``start``/``ps``, to the broker-wide control-plane
-    probe). A dev run (no ``CALFCORD_HOME``) has no stable home for the supervisor,
+    ops talk to it (and, for ``start``/``ps``, to the broker-wide live-roster
+    (mesh) probe). A dev run (no ``CALFCORD_HOME``) has no stable home for the supervisor,
     so these verbs refuse to run there with the same actionable native-install
     message rather than driving a half-built invocation against the project tree.
 
@@ -459,15 +405,13 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
         return asyncio.run(roster.agent_restart(home, name=args.name))
 
     # ``start`` (and ``start --all``) additionally consult the broker-wide
-    # control-plane probe, so they need the broker URL. ``start --all`` targets
+    # live-roster (mesh) probe, so they need the broker URL. ``start --all`` targets
     # every DEFINED agent — the ids come from the agents dir here so roster.py
     # stays off the disk read.
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     if args.all:
         _, agents_dir = init.resolve_paths(home)
-        return asyncio.run(
-            roster.agent_start_all(home, agent_ids=detect_agents(agents_dir), server_urls=server_urls)
-        )
+        return asyncio.run(roster.agent_start_all(home, agent_ids=detect_agents(agents_dir), server_urls=server_urls))
     return asyncio.run(roster.agent_start(home, name=args.name, server_urls=server_urls))
 
 
@@ -499,11 +443,13 @@ def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             return 1
         return agent_lifecycle.run_set(agents_dir, args.name, updates)
     if cmd == "rename":
-        return agent_lifecycle.run_rename(agents_dir, _resolve_state_dir(home), args.old, args.new)
+        return agent_lifecycle.run_rename(agents_dir, args.old, args.new)
     if cmd == "delete":
         return agent_lifecycle.run_delete(
-            make_prompter(), agents_dir, _resolve_state_dir(home), args.name,
-            yes=args.yes, keep_state=args.keep_state,
+            make_prompter(),
+            agents_dir,
+            args.name,
+            yes=args.yes,
         )
     # ``tools`` (and any unhandled verb — argparse ``required=True`` prevents the latter)
     return agent_tools.run(make_prompter(), agents_dir=agents_dir, name=args.name)
@@ -530,13 +476,11 @@ def _run_healthcheck(component: str) -> int:
         server_urls = os.getenv("CALF_HOST_URL") or "localhost"
         broker_probe = default_broker_probe(server_urls)
     else:
+
         async def broker_probe() -> bool:
             raise AssertionError("broker probe awaited for a non-broker component")
 
-    return asyncio.run(
-        healthcheck(home, component, now=datetime.now(UTC), broker_probe=broker_probe)
-    )
-
+    return asyncio.run(healthcheck(home, component, now=datetime.now(UTC), broker_probe=broker_probe))
 
 
 def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -661,71 +605,18 @@ def _run_lifecycle(command: str) -> int:
     )
 
 
-def _run_router(args: argparse.Namespace) -> int:
-    """Dispatch a ``calfcord router <verb>`` command (design §4.3 / §12.0).
-
-    The router holds an LLM connection like an agent, so it has a first-class,
-    editable *config* surface (``show`` / ``set`` / ``edit``) plus its own roster
-    *lifecycle* (``start`` / ``stop``). The two halves resolve different seams:
-
-    * **Config** verbs only need ``env_path`` — they read/write the two
-      ``CALFKIT_ROUTER_*`` vars in the same ``config/.env`` (dev: ``./.env``) the
-      runner reads, so a change is picked up on the router's next (re)start.
-    * **Lifecycle** verbs are async and drive the *install-scoped* Process Compose
-      supervisor, whose REST port is derived from the ``$CALFCORD_HOME`` dir (via
-      :func:`~calfcord.supervisor.lifecycle.pc_port_for`). So they pass that home
-      dir itself — the SAME value ``agent start/stop`` and the substrate lifecycle
-      pass — never ``env_path``'s parent, or the port would disagree. ``start``
-      additionally needs ``env_path`` for its fail-fast unconfigured precondition.
-      No broker URL is consulted: component lifecycle does not probe the broker.
-
-    Each handler's exit code is propagated unchanged.
-    """
-    env_path, _ = init.resolve_paths(_resolve_home())
-
-    if args.router_command == "show":
-        return router_config.show(env_path=env_path)
-    if args.router_command == "set":
-        return router_config.set_config(env_path=env_path, provider=args.provider, model=args.model)
-    if args.router_command in ("edit", "setup"):
-        if args.router_command == "setup":
-            # ``setup`` is a deprecated alias kept only for muscle memory / old
-            # docs; there is now ONE wizard. Steer the operator at the new verb,
-            # then dispatch to the SAME implementation so the two can never drift.
-            print("note: `router setup` is deprecated; use `router edit`.")
-        return router_config.edit(make_prompter(), env_path=env_path)
-
-    # Lifecycle (async): the home dir is the supervisor key, identical to what
-    # agent start/stop and the substrate lifecycle pass, so pc_port_for agrees. A
-    # dev run (no CALFCORD_HOME) has no stable home for the supervisor, so these
-    # verbs refuse with the same actionable native-install message every other
-    # lifecycle surface uses — rather than crashing in os.fspath(None) downstream.
-    home = _require_home(f"router {args.router_command}")
-    if home is None:
-        return 1
-    if args.router_command == "start":
-        return asyncio.run(router_config.router_start(home, env_path=env_path))
-    if args.router_command == "restart":
-        # `router restart` is the apply mechanism after `router set` / `router edit`
-        # (the node bakes its config at construction). `--all` is a synonym here —
-        # one router per host — so it routes to the SAME singular handler.
-        return asyncio.run(router_config.router_restart(home))
-    return asyncio.run(router_config.router_stop(home))
-
-
 def _run_component(name: str, verb: str) -> int:
     """Dispatch a singleton-component lifecycle verb (``tools start|stop``).
 
-    ``tools`` is a SINGLETON roster component, so — unlike the router, which
-    carries an editable LLM config — its lifecycle is the *entire* surface and a
-    thin veneer over the generic
+    ``tools`` is a SINGLETON roster component, so its lifecycle is the *entire*
+    surface and a thin veneer over the generic
     :func:`calfcord.supervisor.component.component_start` /
     :func:`~calfcord.supervisor.component.component_stop`. The slot ``name`` is the
     component's declared Process Compose process (see
     :func:`calfcord.supervisor.compose.build_compose_project`); ``verb`` selects
     start vs stop.
 
-    Like every other lifecycle surface (substrate, agent roster, router), this
+    Like every other lifecycle surface (substrate, agent roster), this
     drives the *install-scoped* supervisor whose REST port is derived from
     ``$CALFCORD_HOME`` (:func:`~calfcord.supervisor.lifecycle.pc_port_for`), so it
     passes that home dir itself — the SAME value those siblings pass. A dev run (no
@@ -817,9 +708,7 @@ def _run_tool_alias(args: argparse.Namespace) -> int:
     # handler prints the apply-by-restart hint.
     apply_restart = _apply_alias_restart if args.restart else None
     if cmd == "remove":
-        return tool_aliases.run_alias_remove(
-            env_path=env_path, dst=args.dst, apply_restart=apply_restart
-        )
+        return tool_aliases.run_alias_remove(env_path=env_path, dst=args.dst, apply_restart=apply_restart)
 
     from calfcord.tools import ALL_TOOLS
     from calfcord.tools.deploy_filters import is_aliasable
@@ -898,18 +787,13 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         # daemon-health section when the workspace is open; it stays correctly
         # skipped on a dev run with no install heartbeats to read.
         env_path, agents_dir = init.resolve_paths(_resolve_home())
-        return doctor.run(
-            env_path=env_path, agents_dir=agents_dir, offline=args.offline, home=_resolve_home()
-        )
+        return doctor.run(env_path=env_path, agents_dir=agents_dir, offline=args.offline, home=_resolve_home())
 
     if args.command == "agent":
         return _run_agent(parser, args)
 
     if args.command == "_healthcheck":
         return _run_healthcheck(args.component)
-
-    if args.command == "router":
-        return _run_router(args)
 
     # ``tools`` is a singleton-component verb group; ``tools_command`` carries
     # the start/stop/restart verb — except ``alias``, which is its own config

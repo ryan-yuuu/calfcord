@@ -25,7 +25,6 @@ def _seed_md(
 ) -> Path:
     meta: dict[str, str] = {
         "name": agent_id,
-        "display_name": agent_id.capitalize(),
         "description": f"Test {agent_id}.",
         "provider": provider,
     }
@@ -284,7 +283,6 @@ def test_update_tools_preserves_other_frontmatter_fields(tmp_path: Path) -> None
 
     reloaded = frontmatter.load(md_path)
     assert reloaded.metadata["name"] == "scheduler"
-    assert reloaded.metadata["display_name"] == "Scheduler"
     assert reloaded.metadata["provider"] == "anthropic"
 
 

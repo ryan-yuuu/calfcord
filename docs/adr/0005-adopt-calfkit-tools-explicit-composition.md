@@ -1,6 +1,6 @@
 # Adopt vendored `calfkit-tools`; compose the surface explicitly
 
-**Status:** accepted
+**Status:** accepted (the `private_chat` retention below is superseded by ADR 0011)
 
 We replaced calfcord's hand-rolled builtin tools (`shell`, `read_file`,
 `write_file`, `edit_file`, `grep`, `glob`, `web_fetch`, `web_search`,
@@ -8,9 +8,13 @@ We replaced calfcord's hand-rolled builtin tools (`shell`, `read_file`,
 `smolagents`) with the vendored **`calfkit-tools`** package's calfkit tool
 nodes: `terminal`, `process`, `read_file`, `write_file`, `patch`,
 `search_files`, `todo`, `execute_code`, `web_search`, `web_extract`, and
-`web_fetch`. The first-party `private_chat` tool is retained — it is
-agent-to-agent A2A over Discord and cannot be vendored. This is a hard break:
-tool names and call shapes change, with no compatibility shims.
+`web_fetch`. This is a hard break: tool names and call shapes change, with no
+compatibility shims.
+
+> **Superseded (ADR 0011):** this ADR originally retained the first-party
+> `private_chat` tool for agent-to-agent A2A. The calfkit-012 migration deletes
+> `private_chat` in favour of calfkit's native `message_agent` + handoff, so the
+> `ALL_TOOLS` surface is now exactly the vendored `calfkit-tools` nodes above.
 
 ## Why
 

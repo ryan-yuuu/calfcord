@@ -23,15 +23,16 @@ What *does* travel — the contract every process agrees on regardless of
 which box it runs on — is three things:
 
 - **The Kafka wire.** Topic names are derived from agent and tool names
-  (`tool.terminal.input`, `agent.scribe.in`, …), so any process on any host
-  finds its peers by dialing the same broker. This is the seam.
+  (`tool.terminal.input`, `agent.scribe.private.input`, …), so any process on
+  any host finds its peers by dialing the same broker. This is the seam.
 - **`.env`.** The shared `CALF_HOST_URL` (broker address) plus the
   Discord credentials. Identical on every host except `CALF_HOST_URL`,
   which on the broker's own host may be `localhost:9092` and elsewhere is
   the broker's reachable address.
 - **`agents/*.md`.** An agent's identity and instructions are the same
-  file wherever it runs; the bridge learns about it from a runtime ping,
-  never from a shared filesystem.
+  file wherever it runs; the bridge learns about it from calfkit's live
+  agent mesh (the `AgentCard` each agent advertises), never from a shared
+  filesystem.
 
 Hold those three constant and the supervisor underneath is an
 implementation detail you can swap (Process Compose on a laptop, systemd
@@ -70,7 +71,7 @@ address every host can reach. On each host:
    ```bash
    calfcord agent start scribe     # this host runs the scribe agent
    calfcord tools start            # ...or this host runs the tools process
-   calfcord router start           # ...or the receptionist
+   calfcord mcp start github       # ...or an MCP server (one per mcp.json entry)
    ```
 
    A roster member started on host B joins the *same live org* as the
@@ -85,11 +86,19 @@ so you see every agent regardless of which host it clocked in from.
 ### The cross-host duplicate-name guard is CLI-side
 
 `calfcord agent start <name>` first probes the **whole organization** over
-the broker (the control-plane `probe_live_roster` call reads the
-`agent.state` topic org-wide) and refuses to start `<name>` if it is
-already live on *any* host — printing "agent 'X' is already running in the
-organization" instead of starting a duplicate. This is what stops a
-double-reply / split-brain when two hosts each try to run `scribe`.
+the broker (the live-roster probe reads calfkit's native agent mesh —
+`client.mesh.get_agents()` over `calf.agents` — org-wide) and refuses to
+start `<name>` if it is already live on *any* host — printing "agent 'X' is
+already running in the organization" instead of starting a duplicate. This
+is what stops a double-reply / split-brain when two hosts each try to run
+`scribe`.
+
+Because the mesh is **online-only and heartbeat-staleness-filtered** rather
+than an active ping, liveness is now passive: a *gracefully* stopped agent
+tombstones immediately, but a *crashed* one lingers as "online" until its
+heartbeat lapses (~90s), so a restart fired inside that window can be
+refused as a duplicate. Wait out the stale window, or restart it on the host
+that owned it.
 
 The guard is **CLI-side only** — the bridge is unchanged and treats a
 re-registration as a benign re-announce. Because the probe is broker-wide
@@ -126,8 +135,8 @@ What each target renders:
   validate before `systemctl --user enable --now`.
 - **`k8s`** — **reference** manifests (clearly annotated as such): a
   bundled broker workload + Service, a ConfigMap with the shared
-  `CALF_HOST_URL`, and one Deployment per process type (bridge / router /
-  tools) plus one per *defined* agent **and one per configured MCP server**
+  `CALF_HOST_URL`, and one Deployment per process type (bridge / tools) plus
+  one per *defined* agent **and one per configured MCP server**
   (`calfkit-mcp <server>`) — each running a `calfkit-*` console script on the
   shipped image, dialing the shared broker. This is the Altitude-3 distributed
   shape, **not** `calfcord start` (there is no in-pod supervisor; each process
@@ -142,9 +151,10 @@ What each target renders:
   `compose.override.yml` snippet that splits the single all-in-one `agent`
   service into one `calfkit-agent <name>` service per agent (crash
   isolation), each inheriting the base build/env via `extends`. The Docker
-  path does **not** yet cover MCP servers — run those on a native or systemd
-  host alongside the Docker broker, or add `calfkit-mcp <server>` services to
-  your compose file by hand.
+  path does **not** auto-generate MCP services: the shipped
+  `docker-compose.yml` carries a commented `mcp-<server>` template you
+  uncomment per server (one `calfkit-mcp <server>` process each), or run
+  those on a native / systemd host alongside the Docker broker.
 
 `deploy` reads the install off disk and never talks to the running
 supervisor, so it works whether or not the workspace is up. It does
@@ -172,7 +182,7 @@ run the canonical image narrowed to just `terminal` —
 `docker run -e CALFCORD_TOOLS_INCLUDE=terminal calfcord:latest calfkit-tools`
 (or, on a bare-metal install, `CALFCORD_TOOLS_INCLUDE=terminal uv run
 calfkit-tools`) — with that box's project bind-mounted at `/workspace`. Run
-the bridge + router + agent on your laptop. When the agent's LLM runs
+the bridge + agent on your laptop. When the agent's LLM runs
 `git log` through `terminal`, the command executes against the remote box's
 filesystem — the LLM never knew the difference, but the side effects landed
 on a different machine.
@@ -298,9 +308,9 @@ What each env var does, both applied by `deploy_filters` at boot over
   topics and race with the workstation on `tool.patch.input`.
 
 (Aliasing requires a stateless tool body. A tool that registers node-scoped
-resources or lifecycle hooks — only `todo` and `private_chat` today — can't
-be cloned under a second wire identity and `deploy_filters` raises rather
-than build a broken clone.)
+resources or lifecycle hooks — only `todo` today — can't be cloned under a
+second wire identity and `deploy_filters` raises rather than build a broken
+clone.)
 
 ### Configure the agent host
 
@@ -405,7 +415,7 @@ prevents. See [`mcp-tools.md`](./mcp-tools.md) for the full MCP story.
 
 ## 5. Worked example: remote terminal tool
 
-Two hosts: **laptop** runs broker + bridge + router + agent; **builder**
+Two hosts: **laptop** runs broker + bridge + agent; **builder**
 (a remote dev box) runs only the terminal tool against its own project
 directory.
 
@@ -424,14 +434,13 @@ excluding it from a local tools process if you keep one):
 calfcord self set-broker laptop:9092   # advertise the broker on the tailnet
 calfcord start                          # broker + bridge (substrate)
 calfcord agent start scribe             # the agent
-calfcord router start                   # the receptionist (optional)
 ```
 
 The native broker started by `calfcord start` advertises the address you
 set in `CALF_HOST_URL`, so off-box clients on the tailnet resolve
 `laptop:9092`. (If you run the broker under Docker Compose instead, the
 equivalent is `TANSU_ADVERTISE=laptop docker compose up -d tansu bridge
-router agent` — the `TANSU_ADVERTISE` override makes Tansu advertise
+agent` — the `TANSU_ADVERTISE` override makes Tansu advertise
 `laptop:9092` instead of the in-network default `tansu:9092`.)
 
 **Remote host.** On builder, with the project directory at
@@ -442,18 +451,16 @@ docker run -d \
   --name calfcord-terminal \
   --restart unless-stopped \
   -e CALF_HOST_URL=laptop:9092 \
-  -e DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN \
-  -e DISCORD_APPLICATION_ID=$DISCORD_APPLICATION_ID \
-  -e DISCORD_GUILD_ID=$DISCORD_GUILD_ID \
   -e CALFCORD_WORKSPACE_DIR=/workspace \
   -e CALFCORD_TOOLS_INCLUDE=terminal \
   -v /home/me/my-project:/workspace \
   calfcord:latest calfkit-tools
 ```
 
-The Discord env vars are required because `calfkit-tools` boots an
-`A2AChannelResolver` for the audit channel even when no A2A tool is
-hosted (see `src/calfcord/tools/runner.py`).
+The tools process needs **no Discord credentials**: since the calfkit-012
+migration it is pure compute on the Kafka wire — it opens no Discord
+connection and no longer boots an `A2AChannelResolver` (the A2A audit
+channel is bridge-hosted now; see `src/calfcord/tools/runner.py`).
 
 **Verify.** In Discord: `` @scribe please run `pwd && uname -a` via terminal ``.
 The reply should contain builder's hostname and `/workspace` — proving
@@ -539,30 +546,27 @@ Caveats:
 
 ## 8. Failure modes
 
-**Remote tool host down.** Behavior depends on which tool the agent
-invoked:
+**Remote tool host down.** Tools currently have **no default per-call
+timeout** at the calfkit layer. If a tool's host is down, the calling
+agent's tool call blocks until the broker drops the connection or the
+operator restarts the agent. Mitigation: enforce a deadline inside the call
+itself where the tool exposes one (the vendored `terminal` tool takes a
+`timeout` argument the LLM can pass), or rely on Docker / supervisor
+health-restart of the calling agent process. A future calfkit release may
+add a default per-tool-call timeout; track that upstream.
 
-- **`private_chat`** has a 60-second default A2A timeout (overridable
-  via `CALFKIT_TOOLS_TIMEOUT_SECONDS`). When the target agent is
-  unreachable, the caller's LLM gets an `error: target 'X' did not
-  reply within 60s` string and can adapt.
-- **Every other tool** (`terminal`, `read_file`, etc.) currently
-  has **no default per-call timeout** at the calfkit layer. If the
-  tool's host is down, the calling agent's `execute` RPC blocks
-  until the broker drops the connection or the operator restarts the
-  agent. Mitigation: enforce a deadline inside the call itself where the
-  tool exposes one (the vendored `terminal` tool takes a `timeout`
-  argument the LLM can pass), or rely on Docker / supervisor
-  health-restart of the calling agent process. A future calfkit release
-  may add a default per-tool-call timeout; track that upstream.
+(Agent-to-agent messaging is no longer a tool: since the calfkit-012
+migration A2A is calfkit's native `message_agent`, invoked inside the agent
+runtime and projected by the bridge — not the deleted first-party
+`private_chat` tool — so there is no `CALFKIT_TOOLS_TIMEOUT_SECONDS` knob
+any more.)
 
-In either case, the bridge and agent processes themselves stay up —
-only the in-flight call hangs.
+The bridge and agent processes themselves stay up — only the in-flight
+call hangs.
 
 **Broker partition / network blip.** Standard Kafka semantics; aiokafka
-reconnects automatically. `private_chat` calls in flight time out per
-the 60s rule above; other tool calls remain blocked until reconnect
-unless the tool body imposes its own deadline.
+reconnects automatically. In-flight tool calls remain blocked until
+reconnect unless the tool body imposes its own deadline.
 
 **Multiple tool hosts on the same `tool.<name>.input` topic.** Kafka
 consumer-group semantics: each partition delivers to exactly one
@@ -615,7 +619,7 @@ To pin `terminal` to the remote host:
 
 ```bash
 # On host A (the all-in-one), exclude terminal from the tool registry:
-docker run -e CALFCORD_TOOLS_INCLUDE=process,read_file,write_file,patch,search_files,todo,execute_code,web_search,web_extract,web_fetch,private_chat \
+docker run -e CALFCORD_TOOLS_INCLUDE=process,read_file,write_file,patch,search_files,todo,execute_code,web_search,web_extract,web_fetch \
            calfcord:latest calfkit-tools
 ```
 

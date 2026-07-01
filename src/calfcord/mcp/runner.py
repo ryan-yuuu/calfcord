@@ -1,6 +1,6 @@
 """CLI entry point for an ``mcp-<server>`` deployment: ``calfkit-mcp <server>``.
 
-Hosts exactly **one** :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` from
+Hosts exactly **one** :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` from
 ``mcp.json`` on its own calfkit :class:`Worker`. One process per server is
 deliberate: calfkit fails a toolbox's hosting worker at boot when the MCP
 server is unreachable, and server entries are operator-supplied
@@ -38,9 +38,9 @@ from calfcord.mcp.config import McpConfigError, load_one_server, resolve_config_
 logger = logging.getLogger(__name__)
 
 _REPLY_TOPIC = "calfkit.mcp.reply"
-"""Named reply topic for the MCP client. Distinct from the bridge's
-``discord.outbox`` and the tools runner's ``calfkit.tools.reply`` so nothing
-this process emits is re-projected by another consumer."""
+"""Named reply topic for the MCP client. A distinct, dedicated topic so this
+process's replies land on their own lane rather than sharing another process's
+reply topic."""
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

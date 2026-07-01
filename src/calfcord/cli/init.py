@@ -3,8 +3,8 @@
 This is the onboarding alternative to hand-editing ``.env`` *and* hand-writing an
 ``agents/<name>.md``. It walks the operator through one agent end to end, then —
 on a native install — *opens the workspace, brings the agent online, and waits
-until it sees the first real reply in Discord*. The flow is the §4.6 / §11
-"ends-live" experience: time-to-first-reply over everything.
+until the agent registers on the live mesh*. The flow is the §4.6 / §11
+"ends-live" experience: time-to-online over everything.
 
 Composition, not reinvention
 ----------------------------
@@ -24,10 +24,10 @@ reusable:
 * **Live finish** — :func:`_run_finish` composes
   :func:`calfcord.supervisor.lifecycle.start` (substrate, health-gated) →
   :func:`calfcord.supervisor.roster.agent_start` (the agent clocks in) → an
-  in-flow ``@<agent> hello`` prompt → :func:`first-reply detection
-  <calfcord.control_plane.first_reply.wait_for_first_reply>` (§4.6 / §12.6). On a
-  dev run (no install) or a missing supervisor binary it DEGRADES to honest
-  manual next-steps rather than orchestrating something it cannot.
+  in-flow ``@<agent> hello`` prompt → online-presence detection on the mesh
+  (:func:`_wait_for_agent_online`, §4.6 / §12.6). On a dev run (no install) or a
+  missing supervisor binary it DEGRADES to honest manual next-steps rather than
+  orchestrating something it cannot.
 * **Resumability** — :mod:`calfcord.cli.setup_state` records *which steps are
   done* so a crash / Ctrl-C / the unavoidable browser detour resumes ("Welcome
   back …") instead of restarting. The checkpoint is **advisory** (§12.7): every
@@ -39,7 +39,7 @@ Injected seams
 --------------
 All prompting goes through an injected :class:`Prompter`; every world-touching
 dependency — the Discord HTTP calls, the substrate/roster coroutines, the
-first-reply watcher, the process-compose binary probe, and the clock — is a
+online-presence watcher, the process-compose binary probe, and the clock — is a
 keyword-only injectable defaulting to the real thing. So the whole wizard runs in
 a unit test with no TTY, no Discord, no broker, and no supervisor.
 
@@ -48,10 +48,10 @@ Two invariants the design pins:
 * **Idempotent and non-destructive to secrets.** Re-running treats an empty
   answer as "keep what's there" for every ``.env`` secret, and defaults a re-run
   to the saved (working) guild/channel binding rather than clobbering it (§12.7).
-* **No green light that lies.** The finish only celebrates on a *detected* reply;
-  a clean timeout downgrades to an honest "try it yourself / run doctor" hint,
-  and a substrate that never reaches ready stops the flow instead of clocking an
-  agent into a workspace that isn't up (§12.6).
+* **No green light that lies.** The finish only celebrates once the agent is
+  *seen online* on the mesh; a clean timeout downgrades to an honest "try it
+  yourself / run doctor" hint, and a substrate that never reaches ready stops the
+  flow instead of clocking an agent into a workspace that isn't up (§12.6).
 """
 
 from __future__ import annotations
@@ -76,10 +76,68 @@ _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _BROKER_VAR = "CALF_HOST_URL"
 _LOCAL_BROKER_URL = "localhost:9092"
 
-# How long the live finish waits for the agent's first reply before downgrading
-# to the honest "try it yourself" hint. Bounded so init never hangs on a silent
-# bot — the §12.6 fallback is the safety net, not a failure.
+# How long the live finish waits for the agent to come online before downgrading
+# to the honest "try it yourself" hint. Bounded so init never hangs on an agent
+# that never registers — the §12.6 fallback is the safety net, not a failure.
 _FIRST_REPLY_TIMEOUT_S = 60.0
+
+# How often the online-presence watcher re-reads the mesh, and the per-read bound
+# on the mesh view's open-time catch-up. Small so a brand-new org — whose
+# ``calf.agents`` topic is not created until the first agent registers — fails a
+# read fast and retries within the window rather than blocking on a missing topic.
+_ONLINE_POLL_INTERVAL_S = 0.5
+_ONLINE_CATCHUP_TIMEOUT_S = 5.0
+
+
+async def _wait_for_agent_online(
+    server_urls: str,
+    *,
+    agent_id: str,
+    timeout_s: float,
+    ready: asyncio.Event | None = None,
+) -> bool:
+    """Poll calfkit's mesh until ``agent_id`` is online, or ``timeout_s`` elapses.
+
+    The live-finish confirmation, replacing the deleted control-plane first-reply
+    watcher. It proves the agent's PRESENCE — it registered on the ``calf.agents``
+    mesh at startup — not an end-to-end message reply; the org is already live once
+    the agent is online, so presence is the honest "it worked" signal.
+
+    Opens a short-lived observer :class:`~calfkit.client.Client`, signals ``ready``
+    once it is watching, then reads ``client.mesh.get_agents()`` on a small interval
+    until the name appears (-> ``True``) or the window elapses (-> ``False``). No
+    broker pre-flight — the read raises at call time if the mesh can't be reached; a
+    :class:`~calfkit.exceptions.MeshUnavailableError` (most often the ``calf.agents``
+    topic not existing until the first agent registers, or the broker being down) is
+    treated as "not online yet" and retried until ``timeout_s`` elapses, at which
+    point the caller downgrades a ``False`` to the honest fallback. The mesh view is
+    a compacted-topic (ktable) reader, so it catches up to the agent's registration
+    even if it opens slightly after the agent came online — ``ready`` can fire before
+    the first read without a lost-registration race.
+    """
+    from calfkit import MeshViewConfig
+    from calfkit.client import Client
+    from calfkit.exceptions import MeshUnavailableError
+
+    client = Client.connect(server_urls, mesh_config=MeshViewConfig(catchup_timeout=_ONLINE_CATCHUP_TIMEOUT_S))
+    try:
+        if ready is not None:
+            ready.set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            try:
+                agents = await client.mesh.get_agents()
+                if agent_id in agents:
+                    return True
+            except MeshUnavailableError:
+                pass  # topic absent / still establishing — the agent is still coming up
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(_ONLINE_POLL_INTERVAL_S)
+    finally:
+        await client.aclose()
+
 
 # The reboot-non-survival fact, stated honestly (§12.6: the daemon is
 # session-scoped, not init-managed). Kept as one constant so the live-finish and
@@ -336,18 +394,14 @@ def _run_discord(
         return checkpoint
     _envfile.upsert(env_path, {"DISCORD_GUILD_ID": guild_id})
 
-    channel_id = _pick_channel(
-        prompter, list_channels_fn, token, guild_id, default=checkpoint.channel_id
-    )
+    channel_id = _pick_channel(prompter, list_channels_fn, token, guild_id, default=checkpoint.channel_id)
     if channel_id is None:
         # Guild bound but no postable channel chosen (zero postable / surfaced
         # gap). Record the guild progress; the channel can be picked on a re-run.
         return checkpoint.model_copy(update={"guild_id": guild_id})
     _envfile.upsert(env_path, {"DISCORD_DEFAULT_CHANNEL_ID": channel_id})
 
-    return checkpoint.model_copy(
-        update={"discord_done": True, "guild_id": guild_id, "channel_id": channel_id}
-    )
+    return checkpoint.model_copy(update={"discord_done": True, "guild_id": guild_id, "channel_id": channel_id})
 
 
 def _capture_token(
@@ -366,9 +420,7 @@ def _capture_token(
     """
     existing = current.get("DISCORD_BOT_TOKEN", "")
     while True:
-        pasted = prompter.secret(
-            f"DISCORD_BOT_TOKEN {_set_label(existing)} — paste to set, enter to keep:"
-        )
+        pasted = prompter.secret(f"DISCORD_BOT_TOKEN {_set_label(existing)} — paste to set, enter to keep:")
         token = pasted or existing
         if not token:
             return ""
@@ -492,9 +544,7 @@ def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
     if choice == "native":
         _envfile.upsert(env_path, {_BROKER_VAR: _LOCAL_BROKER_URL})
         return
-    url = prompter.text(
-        f"{_BROKER_VAR} (e.g. broker.example.com:9092):", default=current.get(_BROKER_VAR, "")
-    )
+    url = prompter.text(f"{_BROKER_VAR} (e.g. broker.example.com:9092):", default=current.get(_BROKER_VAR, ""))
     if url:
         _envfile.upsert(env_path, {_BROKER_VAR: url})
     elif not current.get(_BROKER_VAR):
@@ -526,15 +576,15 @@ def _run_finish(
     instead of orchestrating something it cannot (no green light that lies).
 
     On the native happy path it composes :func:`lifecycle.start` →
-    :func:`roster.agent_start` → :func:`wait_for_first_reply` (started FIRST so
-    its ``latest``-offset group has joined) → an in-flow ``@<name> hello`` prompt
-    once the watcher is listening, mapping each failure to its specific hint:
+    :func:`roster.agent_start` → :func:`_wait_for_agent_online` (started FIRST so
+    it is already watching the mesh) → an in-flow ``@<name> hello`` prompt once the
+    watcher is listening, mapping each failure to its specific hint:
 
     * substrate not ready → tear-down already happened in ``start``; map to the
       "privileged intents are probably off" hint and stop (don't clock the agent
       into a workspace that isn't up);
-    * agent start failed → stop before the reply watch;
-    * reply detected → 🎉; reply timed out → the bounded "org is live — try it
+    * agent start failed → stop before the presence watch;
+    * agent seen online → 🎉; timed out → the bounded "org is live — try it
       yourself / run ``calfcord doctor``" downgrade.
     """
     pc_binary_fn = pc_binary_fn or _default_pc_binary
@@ -544,14 +594,16 @@ def _run_finish(
         return 0
 
     # Resolve the real orchestration coroutines lazily (import-light): the agent
-    # deployment path must not pull supervisor/control-plane modules at import.
+    # deployment path must not pull supervisor modules at import. The presence
+    # watcher (:func:`_wait_for_agent_online`) is a local module function whose own
+    # calfkit imports are deferred to its body, so referencing it here adds nothing
+    # to init's import graph.
     if start_fn is None or agent_start_fn is None or first_reply_fn is None:
-        from calfcord.control_plane.first_reply import wait_for_first_reply
         from calfcord.supervisor import lifecycle, roster
 
         start_fn = start_fn or lifecycle.start
         agent_start_fn = agent_start_fn or roster.agent_start
-        first_reply_fn = first_reply_fn or wait_for_first_reply
+        first_reply_fn = first_reply_fn or _wait_for_agent_online
 
     return asyncio.run(
         _finish_live(
@@ -618,21 +670,19 @@ async def _finish_live(
     if rc != 0:
         return rc
 
-    # In-flow first-reply prompt (§12.6: prompt the @mention INSIDE init, fixing
-    # the old step3/step4 contradiction). The wizard sends nothing — the human
-    # posts it; we only consume the outbox reply.
+    # In-flow "try it" prompt (§12.6: prompt the @mention INSIDE init). Presence
+    # detection is independent of the human's post — the agent registers on the
+    # mesh at startup regardless — so the prompt is a genuine "go say hi" nudge
+    # while the watcher confirms in the background that the agent came online.
     #
-    # Start the watcher FIRST and wait until its ``latest``-offset consumer group
-    # has JOINED before prompting: otherwise a fast human posts ``@<agent> hello``
-    # before the group joins, the reply lands before we are subscribed, and we
-    # wrongly downgrade on a live org. The watcher runs as a task so its
-    # ``worker.start()`` (the group join) makes progress while we await its
-    # readiness; ``_FIRST_REPLY_TIMEOUT_S`` still bounds the whole wait.
+    # Start the watcher FIRST and wait until it is watching (its ``ready`` event,
+    # set once the broker is up) before prompting, so the confirmation can fire as
+    # soon as the agent registers. The watcher runs as a task that makes progress
+    # while we await its readiness; ``_FIRST_REPLY_TIMEOUT_S`` still bounds the
+    # whole wait.
     watcher_ready = asyncio.Event()
     watch_task = asyncio.ensure_future(
-        first_reply_fn(
-            server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S, ready=watcher_ready
-        )
+        first_reply_fn(server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S, ready=watcher_ready)
     )
     # Proceed to the prompt the instant EITHER the watcher reports joined OR the
     # task finishes first. Racing against task completion means a watcher that
@@ -651,13 +701,12 @@ async def _finish_live(
         with contextlib.suppress(asyncio.CancelledError):
             await ready_wait
     prompter.confirm(f"In Discord, say:  @{name} hello   — press enter once you've sent it.", default=True)
-    print("Watching for the first reply…")
-    # The org is ALREADY live (substrate + agent both started). First-reply
-    # detection is advisory, and the watcher opens its OWN Client.connect /
-    # worker.start — a broker drop or transient connect blip mid-watch raises out
-    # of wait_for_first_reply (which only swallows TimeoutError). Don't let that
-    # crash the wizard after the org came up: degrade any non-timeout failure into
-    # the same bounded "org is live — try it yourself / run doctor" fallback below.
+    print(f"Waiting for {name} to come online…")
+    # The org is ALREADY live (substrate + agent both started). Presence detection
+    # is advisory, and the watcher opens its OWN Client.connect — a broker drop or
+    # transient connect blip mid-watch could raise out of it. Don't let that crash
+    # the wizard after the org came up: degrade any failure into the same bounded
+    # "org is live — try it yourself / run doctor" fallback below.
     # ``except Exception`` (not bare) deliberately lets asyncio.CancelledError
     # propagate — swallowing the rest is correct here: the failure is in detection,
     # not in the (already-live) org.
@@ -666,12 +715,11 @@ async def _finish_live(
     except Exception:
         detected = False
     if detected:
-        print(f"🎉 {name} replied — your organization is live!")
+        print(f"🎉 {name} is online — your organization is live!")
     else:
         # Bounded fallback (§12.6): never promise more than we detected.
         print(
-            f"  your organization is live — try `@{name} hello` in Discord. "
-            "If nothing replies, run `calfcord doctor`."
+            f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `calfcord doctor`."
         )
     print()
     print(f"({_REBOOT_NOTE} `calfcord start` reopens it; `calfcord status` shows who's online.)")

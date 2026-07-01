@@ -13,18 +13,15 @@ Both models are frozen — once normalized, a wire message is immutable.
       CHANGELOG entry. Consumers must tolerate the bump.
 
 A2A invocations:
-    The ``calfkit-tools`` ``private_chat`` tool reuses this schema when it
-    invokes another agent on ``agent.{agent_id}.in``. It forwards the
-    caller's originating wire with three fields overridden:
-    ``slash_target`` set to the target agent's id, ``kind`` set to
-    ``"slash"`` (so the existing ``addressed_to_me`` gate accepts), and
-    ``content`` set to the A2A payload. Channel id, author, and
-    message_id are preserved from the caller's original Discord context.
-    A companion deps key ``caller_agent_id: str`` names the originating
-    *agent* (distinct from ``author``, which always reflects the original
-    human or webhook that started the chain). Agents that want to
-    distinguish "human ↔ me" from "peer ↔ me" should read
-    ``deps.get("caller_agent_id")``.
+    Agent-to-agent messaging no longer touches this schema. The old
+    first-party ``private_chat`` tool — which reused this wire by forwarding
+    the caller's originating message with ``slash_target`` / ``kind="slash"``
+    overridden to satisfy a now-deleted ``addressed_to_me`` gate, plus a
+    companion ``caller_agent_id`` deps key — was removed in the calfkit 0.12
+    migration. Peer consults and handoffs now run through calfkit's native
+    A2A (``message_agent`` / ``Handoff``), which carries its own envelope. A
+    :class:`WireMessage` here is only ever the bridge's typed projection of a
+    *human* Discord event, handed to the agent via ``deps["discord"]``.
 """
 
 from __future__ import annotations
@@ -38,9 +35,12 @@ from pydantic import BaseModel, ConfigDict, model_validator
 class WireAuthor(BaseModel):
     """Resolved author identity for a Discord message.
 
-    ``agent_id`` is set when the author is a persona webhook whose display name
-    matches a registered agent. ``is_human_owner`` is set when the author is
-    the configured human owner user. ``avatar_url`` is the author's effective
+    ``agent_id`` is now unconditionally ``None`` — the display-name→agent
+    registry that once populated it was removed in the calfkit 0.12 migration.
+    A persona webhook's own turns are recognized downstream by their bot-owned
+    ``webhook_id`` (R-A3), not by resolving a name here. ``is_human_owner`` is
+    set when the author is the configured human owner user. ``avatar_url`` is
+    the author's effective
     avatar URL (per-guild member avatar, falling back to user avatar, falling
     back to Discord's default) — used by downstream consumers that want to
     render the author visually (e.g. reply-embed icons).

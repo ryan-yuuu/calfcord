@@ -2,9 +2,8 @@
 
 The write-side commands. ``set`` applies one or more ``--field value``
 edits to an agent's ``.md`` through the *validated* write paths the rest of the
-system already owns; ``rename`` and ``delete`` are file/state operations on the
-agent's two on-disk artifacts — its ``agents/<name>.md`` and its per-agent
-``state/agents/<name>.json``.
+system already owns; ``rename`` and ``delete`` are file operations on the
+agent's ``agents/<name>.md``.
 
 Two invariants shape this module:
 
@@ -17,13 +16,10 @@ Two invariants shape this module:
   build and validate a synthetic :class:`~calfcord.agents.definition.AgentDefinition`
   in memory first, so a bad value leaves the on-disk file untouched.
 
-* **Rename and delete move BOTH artifacts, ``.md`` first, and never lose the
-  agent.** Per-agent runtime state (channel subscriptions) is keyed by
-  ``agent_id`` (:mod:`calfcord.agents.state`), so a rename that moved only the
-  ``.md`` would silently drop the agent's subscriptions. :func:`rename_agent`
-  therefore moves the state file too, and orders its steps so a failure can
-  never destroy the agent: the new ``.md`` is written (and validated) *before*
-  the old one is removed.
+* **Rename never loses the agent.** :func:`rename_agent` orders its steps so a
+  failure can never destroy the agent: the new ``.md`` is written (and validated)
+  *before* the old one is removed, so a crash mid-rename leaves at worst a
+  recoverable both-files state, never a no-agent state.
 
 The ``run_*`` wrappers map every operator-recoverable failure to an ``error:``
 line + exit code 1 (per the CLI error convention — no traceback escapes); the
@@ -75,7 +71,7 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
     The agent must exist (else an ``error:`` line + return 1) and at least one
     update is required. Each field is its own validated-atomic write, so a later
     field's failure can't corrupt an earlier success: any ``ValueError``/``OSError``
-    (a bad choice, an out-of-range int, an unknown tool, an unwritable file) prints
+    (a bad choice, an invalid boolean, an unknown tool, an unwritable file) prints
     ``error: <field>: <e>``, names any fields already applied this call (they stay
     written), and returns 1. On full success it names the fields it wrote and tells
     the operator to restart. Returns 0.
@@ -176,34 +172,28 @@ def _apply_one(md_path: Path, key: str, raw: str) -> None:
         md_writer.update_system_prompt(md_path, raw)
         return
 
-    # Simple text/select/int/bool field — the one shared validated-atomic seam.
+    # Simple text/select/bool field — the one shared validated-atomic seam.
     write_simple_field(md_path, field, raw)
 
 
-def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
-    """Rename agent ``old`` to ``new``, moving its ``.md`` AND its state file.
+def rename_agent(agents_dir: Path, old: str, new: str) -> None:
+    """Rename agent ``old`` to ``new`` by moving its ``agents/<name>.md``.
 
     Reusable file-op (no prompts). Validates ``new`` to a legal agent stem,
     rewrites the old ``.md``'s frontmatter ``name`` and writes it to
-    ``agents_dir/<new>.md``, deletes the old ``.md``, then moves
-    ``state_dir/<old>.json`` to ``state_dir/<new>.json`` so the agent keeps its
-    channel subscriptions (state is keyed by ``agent_id`` —
-    :mod:`calfcord.agents.state`).
+    ``agents_dir/<new>.md``, then deletes the old ``.md``.
 
     Order of operations is chosen so a failure can never lose the agent: the new
-    ``.md`` is validated in memory and written *first*, the old ``.md`` is removed
-    *only after* the new one is durably in place, and the state move runs *last*.
-    A crash mid-rename therefore leaves at worst a recoverable both-files state,
-    never a no-agent state.
+    ``.md`` is validated in memory and written *first*, and the old ``.md`` is
+    removed *only after* the new one is durably in place. A crash mid-rename
+    therefore leaves at worst a recoverable both-files state, never a no-agent
+    state.
 
     Raises:
         ValueError: ``new`` is not a legal agent stem, equals ``old``, the source
             ``.md`` is missing/unparseable, or the target ``agents_dir/<new>.md``
-            (or an orphaned ``state_dir/<new>.json``) already exists — renaming
-            onto either would clobber a live agent or another agent's saved
-            subscriptions.
-        OSError: a filesystem error writing the new ``.md``, deleting the old, or
-            moving the state file.
+            already exists — renaming onto it would clobber a live agent.
+        OSError: a filesystem error writing the new ``.md`` or deleting the old.
     """
     new_stem = slug_stem(new)
     if new_stem == old:
@@ -215,16 +205,6 @@ def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
         raise ValueError(f"no agent {old!r} in {agents_dir} (expected {old_md})")
     if new_md.exists():
         raise ValueError(f"target agent {new_stem!r} already exists ({new_md}); pick a different name")
-    # Guard the target state file too, symmetrically with the ``.md`` guard: an
-    # orphaned ``<new>.json`` (e.g. left by an earlier ``delete --keep-state``)
-    # would be silently overwritten by the ``os.replace`` below, destroying its
-    # saved subscriptions. Refuse rather than clobber.
-    new_state = state_dir / f"{new_stem}.json"
-    if new_state.exists():
-        raise ValueError(
-            f"a saved state file for {new_stem!r} already exists ({new_state}); "
-            f"renaming would overwrite it — remove it or pick a different name"
-        )
 
     payload = _rewritten_md(old_md, new_stem, new_md)
 
@@ -239,14 +219,6 @@ def rename_agent(agents_dir: Path, state_dir: Path, old: str, new: str) -> None:
         # so the rename fails cleanly to the original single-agent state.
         new_md.unlink(missing_ok=True)
         raise
-
-    # Move per-agent state LAST: the agent is already renamed at this point, so a
-    # failure here costs only the channel subscriptions (recoverable), never the
-    # agent itself. ``os.replace`` is atomic; the guard avoids a spurious error
-    # for an agent that simply never persisted state.
-    old_state = state_dir / f"{old}.json"
-    if old_state.exists():
-        old_state.replace(new_state)
 
 
 def _rewritten_md(old_md: Path, new_stem: str, new_md: Path) -> str:
@@ -287,8 +259,8 @@ def _rewritten_md(old_md: Path, new_stem: str, new_md: Path) -> str:
     return payload
 
 
-def run_rename(agents_dir: Path, state_dir: Path, old: str, new: str) -> int:
-    """``calfcord agent rename <old> <new>``: rename an agent and its state.
+def run_rename(agents_dir: Path, old: str, new: str) -> int:
+    """``calfcord agent rename <old> <new>``: rename an agent.
 
     Thin wrapper over :func:`rename_agent` that maps any ``ValueError``/``OSError``
     to an ``error:`` line + return 1 (per the CLI convention — no traceback
@@ -297,7 +269,7 @@ def run_rename(agents_dir: Path, state_dir: Path, old: str, new: str) -> int:
     ``/<name>`` slash command and Kafka identity) changed. Returns 0.
     """
     try:
-        rename_agent(agents_dir, state_dir, old, new)
+        rename_agent(agents_dir, old, new)
     except (ValueError, OSError) as e:
         print(f"error: {e}")
         return 1
@@ -308,36 +280,28 @@ def run_rename(agents_dir: Path, state_dir: Path, old: str, new: str) -> int:
     return 0
 
 
-def delete_agent(agents_dir: Path, state_dir: Path, name: str, *, keep_state: bool) -> None:
-    """Delete agent ``name``'s ``.md`` and (unless ``keep_state``) its state file.
+def delete_agent(agents_dir: Path, name: str) -> None:
+    """Delete agent ``name``'s ``agents/<name>.md``.
 
-    Reusable file-op (no prompts). The ``.md`` must exist; its per-agent state
-    file is removed too unless ``keep_state`` is set (``missing_ok`` — an agent
-    that never persisted state simply has none to remove). ``keep_state`` exists
-    for the rare case of deleting the ``.md`` while intending to recreate the same
-    ``agent_id`` later and preserve its channel subscriptions.
+    Reusable file-op (no prompts). The ``.md`` must exist.
 
     Raises:
         ValueError: ``agents_dir/<name>.md`` does not exist (nothing to delete).
-        OSError: a filesystem error removing either file.
+        OSError: a filesystem error removing the file.
     """
     md_path = agents_dir / f"{name}.md"
     if not md_path.is_file():
         raise ValueError(f"no agent {name!r} in {agents_dir} (expected {md_path})")
 
     md_path.unlink()
-    if not keep_state:
-        (state_dir / f"{name}.json").unlink(missing_ok=True)
 
 
 def run_delete(
     prompter: Prompter,
     agents_dir: Path,
-    state_dir: Path,
     name: str,
     *,
     yes: bool = False,
-    keep_state: bool = False,
 ) -> int:
     """``calfcord agent delete <name>``: confirm, then delete the agent.
 
@@ -360,6 +324,6 @@ def run_delete(
         print("cancelled")
         return 0
 
-    delete_agent(agents_dir, state_dir, name, keep_state=keep_state)
+    delete_agent(agents_dir, name)
     print(f"Deleted {name!r}. Restart `calfcord calfkit-agent` (and `calfcord calfkit-bridge`).")
     return 0

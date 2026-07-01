@@ -1,9 +1,15 @@
 """Shared fixtures for bridge tests.
 
-Hand-built fakes for ``discord.Message`` / ``discord.Interaction`` etc. Each
-fake is a plain ``SimpleNamespace`` carrying only the attributes the
-normalizer reads. The normalizer uses duck-typing (``getattr`` / attribute
-access) rather than ``isinstance``, so this is sufficient.
+Hand-built fakes for ``discord.Message``. Each fake is a plain
+``SimpleNamespace`` carrying only the attributes the normalizer / gateway
+read. Production code duck-types (``getattr`` / attribute access) rather than
+``isinstance``, so a namespace is sufficient and keeps these tests offline —
+no live discord.py connection or Kafka broker.
+
+Post-0.12 the bridge holds no ``AgentRegistry`` (mention targeting resolves
+against the live mesh at dispatch time), so the old ``agent_registry`` /
+``fake_interaction`` fixtures are gone with the registry- and
+``SlashNormalizer``-based tests that used them.
 """
 
 from __future__ import annotations
@@ -13,29 +19,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-from calfcord.agents.definition import AgentDefinition
-from calfcord.bridge.registry import AgentRegistry
-
-
-@pytest.fixture
-def agent_registry() -> AgentRegistry:
-    return AgentRegistry(
-        [
-            AgentDefinition(
-                agent_id="scheduler",
-                display_name="Aksel (Scheduler)",
-                description="Calendar.",
-                system_prompt="Test scheduler.",
-            ),
-            AgentDefinition(
-                agent_id="finance",
-                display_name="Finn (Finance)",
-                description="Bookkeeping.",
-                system_prompt="Test finance.",
-            ),
-        ]
-    )
 
 
 @pytest.fixture
@@ -76,46 +59,6 @@ def fake_message():
             author=author,
             webhook_id=webhook_id,
             content=content,
-            created_at=created_at or datetime.now(UTC),
-        )
-
-    return _build
-
-
-@pytest.fixture
-def fake_interaction():
-    """Factory: build a ``SimpleNamespace`` that quacks like ``discord.Interaction``."""
-
-    def _build(
-        *,
-        interaction_id: int = 5000,
-        channel_id: int = 2000,
-        thread_parent_id: int | None = None,
-        guild_id: int = 3000,
-        user_id: int = 4000,
-        user_name: str = "alice",
-        user_display_name: str | None = None,
-        user_is_bot: bool = False,
-        user_avatar_url: str = "https://cdn.discordapp.com/embed/avatars/0.png",
-        created_at: datetime | None = None,
-    ) -> Any:
-        if thread_parent_id is not None:
-            channel = SimpleNamespace(id=channel_id, parent_id=thread_parent_id)
-        else:
-            channel = SimpleNamespace(id=channel_id)
-        user = SimpleNamespace(
-            id=user_id,
-            name=user_name,
-            display_name=user_display_name or user_name,
-            bot=user_is_bot,
-            display_avatar=SimpleNamespace(url=user_avatar_url),
-        )
-        return SimpleNamespace(
-            id=interaction_id,
-            channel=channel,
-            guild_id=guild_id,
-            guild=SimpleNamespace(id=guild_id),
-            user=user,
             created_at=created_at or datetime.now(UTC),
         )
 

@@ -91,7 +91,6 @@ def _seed_agent(agents_dir: Path, name: str = "scribe", **meta: object) -> Path:
     agents_dir.mkdir(parents=True, exist_ok=True)
     metadata: dict[str, object] = {
         "name": name,
-        "display_name": name.capitalize(),
         "description": "Takes notes.",
         "provider": "anthropic",
         "model": "claude-sonnet-4-5",
@@ -122,38 +121,30 @@ def test_edit_thinking_effort_select_writes(tmp_path: Path) -> None:
     assert parse_agent_md(md).thinking_effort == "xhigh"
 
 
-def test_edit_history_turns_int_writes(tmp_path: Path) -> None:
-    md = _seed_agent(tmp_path)
-    prompter = FakePrompter(selects=["history_turns", _DONE], texts=["50"])
-    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
-    assert parse_agent_md(md).history_turns == 50
-
-
-def test_edit_out_of_range_int_reports_error_and_keeps_file(
+def test_edit_rejected_value_reports_error_and_keeps_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An out-of-range value prints 'error:', leaves the file untouched, and the menu continues."""
+    """A rejected value prints 'error:', leaves the file untouched, and the menu continues."""
     md = _seed_agent(tmp_path)
-    original = md.read_text(encoding="utf-8")
-    # Bad int first (rejected, menu continues), then a good description, then done.
+    # Bad thinking_effort first (rejected, menu continues), then a good
+    # description, then done. The menu ``select`` queue answers both the menu
+    # pick and the select-field value, in call order.
     prompter = FakePrompter(
-        selects=["history_turns", "description", _DONE],
-        texts=["101", "Still editable."],
+        selects=["thinking_effort", "ludicrous", "description", _DONE],
+        texts=["Still editable."],
     )
     rc = agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe")
     assert rc == 0
 
     out = capsys.readouterr().out
     assert "error:" in out
-    # The bad write left history_turns at its default and never wrote a tmp file.
     agent = parse_agent_md(md)
-    assert agent.history_turns == 30
+    # The bad write never applied (the seed omitted thinking_effort → still unset).
+    assert agent.thinking_effort is None
     # ...but the *subsequent* edit in the same session still applied — the menu
     # survived the bad value.
     assert agent.description == "Still editable."
     assert list(tmp_path.glob(".*.tmp")) == []
-    # The original-on-the-bad-field invariant: history_turns line never changed.
-    assert "history_turns" not in original  # seed omitted it; default applies
 
 
 def test_unchanged_text_value_writes_nothing(tmp_path: Path) -> None:

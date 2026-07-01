@@ -6,8 +6,8 @@ thing you might want to do, paired with the one command that does it. Run `calfc
 live list.
 
 > Mental model: your **workspace** is the always-on substrate — a local message bus (the broker) and the
-> Discord bridge — that `calfcord init` started in the background. Everything else is the **roster**: agents,
-> the tools host, and the ambient router. Roster members clock in and out on demand while the
+> Discord bridge — that `calfcord init` started in the background. Everything else is the **roster**: your
+> agents, the tools host, and any MCP servers. Roster members clock in and out on demand while the
 > workspace stays open. `calfcord start` opens the workspace; `calfcord ... start` brings each teammate online.
 
 ## Check that it will actually start
@@ -62,9 +62,11 @@ To see just the agents — including any running on another machine — use the 
 calfcord agent ps          # RUNNING agents (vs. `agent list`, which shows DEFINED agents)
 ```
 
-`agent ps` unions two views: agents answering across the whole org (true liveness, host-agnostic) and the
-agents running locally. An agent answering from another host shows as `running on another host` — that's
-expected in a [distributed setup](distributed-deployment.md), not an error.
+`agent ps` unions two views: the agents online across the whole org (read from calfkit's live **mesh**,
+host-agnostic) and the agents running locally on this host. An agent online on another host shows as
+`running on another host` — that's expected in a [distributed setup](distributed-deployment.md), not an
+error. (Liveness is heartbeat-based, so a crashed agent can linger as "online" for up to ~90s before it
+lapses.)
 
 ## Watch the logs
 
@@ -140,24 +142,17 @@ calfcord agent delete scribe        # --yes to skip the confirmation
 
 → Every frontmatter field explained: [authoring-agents.md](authoring-agents.md).
 
-## Let agents reply without an @-mention
+## How agents get invoked
 
-Want an agent to answer ambient chatter (no `@name`)? Configure the optional router once, then bring it
-online:
-
-```bash
-calfcord router edit                # configure provider + model interactively
-calfcord router start               # bring the router online (needs config)
-```
-
-`router show` prints the current config and `router set` changes it non-interactively (for scripts/CI);
-`router stop` takes it offline. Routing is optional — without it, `@mentions` still work and un-mentioned
-messages just go unanswered.
-→ How routing picks who answers: [ambient-routing.md](ambient-routing.md).
+Agents reply when you **`@mention`** them (`@scribe summarize this`). There is no
+ambient auto-answering — a message with no `@mention` goes unanswered by design,
+and there is no router to configure. A mentioned agent can also consult or hand
+off to a peer; that agent-to-agent traffic is projected to an audit channel (see
+[a2a-threads.md](a2a-threads.md)).
 
 ## Run the built-in tools host
 
-The terminal, filesystem, search, code-execution, web, and todo tools — plus the agent-to-agent `private_chat` channel — run in
+The terminal, filesystem, search, code-execution, web, and todo tools run in
 their own host. Bring it online when an agent needs them:
 
 ```bash
@@ -265,7 +260,6 @@ a low-level escape hatch:
 ```bash
 calfcord run bridge        # the Discord gateway
 calfcord run agent <name>  # one agent in the foreground
-calfcord run router        # the ambient router
 calfcord run tools         # the built-in tools host
 calfcord run mcp <server>  # one MCP server's toolbox (from mcp.json)
 calfcord broker            # the bundled native broker, standalone

@@ -149,9 +149,7 @@ class TestResolveIncludeFilter:
         monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "")
         assert _resolve_include_filter() is None
 
-    def test_whitespace_only_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_whitespace_only_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "   ")
         assert _resolve_include_filter() is None
 
@@ -207,9 +205,7 @@ class TestResolveAliasMap:
         with pytest.raises(ValueError):
             _resolve_alias_map()
 
-    def test_trailing_comma_empty_chunk_skipped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_trailing_comma_empty_chunk_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A trailing/double comma yields empty chunks that are skipped,
         # not errored — operators shouldn't trip over a stray comma.
         monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "a=b,,c=d,")
@@ -231,8 +227,8 @@ class TestCloneWithName:
 
     def test_aliasing_node_with_resource_bracket_raises(self) -> None:
         # A node-scoped @resource can't be safely shared under a second wire
-        # identity, so aliasing it fails loud (the only bracketed tools —
-        # todo, private_chat — are single-host and never aliased).
+        # identity, so aliasing it fails loud (bracketed tools like todo hold
+        # per-session state and are single-host, never aliased).
         node = _make_node("alpha")
 
         @node.resource("thing")
@@ -252,9 +248,7 @@ class TestCloneWithName:
         with pytest.raises(ValueError, match="node-scoped resources"):
             _clone_with_name(node, "alpha_eu")
 
-    def test_non_dataclass_tool_schema_raises_runtime_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_dataclass_tool_schema_raises_runtime_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If a future calfkit makes ToolNodeDef.tool_schema non-dataclass,
         ``dataclasses.replace`` raises TypeError; the helper must re-raise a
         RuntimeError naming the version-mismatch cause."""
@@ -362,7 +356,7 @@ class TestIsAliasable:
         assert is_aliasable(node) is False
 
     def test_lifecycle_hook_node_is_not_aliasable(self) -> None:
-        node = _make_node("private_chat")
+        node = _make_node("alpha")
 
         @node.on_startup
         async def _boot(setup_ctx):  # pragma: no cover - body not run
@@ -382,57 +376,79 @@ _ALIASABLE = {"terminal", "read_file"}  # todo holds per-session state
 class TestValidateAlias:
     def test_valid_passes(self) -> None:
         validate_alias(
-            "terminal", "terminal_eu",
-            tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+            "terminal",
+            "terminal_eu",
+            tool_names=_TOOLS,
+            aliasable_names=_ALIASABLE,
+            existing={},
         )
 
     def test_unknown_src_raises(self) -> None:
         with pytest.raises(ValueError, match="not a known tool"):
             validate_alias(
-                "ghost", "ghost_eu",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+                "ghost",
+                "ghost_eu",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
+                existing={},
             )
 
     def test_non_aliasable_src_raises(self) -> None:
         with pytest.raises(ValueError, match="can't be aliased"):
             validate_alias(
-                "todo", "todo_eu",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+                "todo",
+                "todo_eu",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
+                existing={},
             )
 
     def test_invalid_dst_regex_raises(self) -> None:
         with pytest.raises(ValueError, match="valid tool name"):
             validate_alias(
-                "terminal", "bad name",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+                "terminal",
+                "bad name",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
+                existing={},
             )
 
     def test_self_alias_raises(self) -> None:
         with pytest.raises(ValueError, match="itself"):
             validate_alias(
-                "terminal", "terminal",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+                "terminal",
+                "terminal",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
+                existing={},
             )
 
     def test_dst_collides_with_real_tool_raises(self) -> None:
         with pytest.raises(ValueError, match="already a tool"):
             validate_alias(
-                "terminal", "read_file",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE, existing={},
+                "terminal",
+                "read_file",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
+                existing={},
             )
 
     def test_dst_collides_with_existing_alias_target_raises(self) -> None:
         with pytest.raises(ValueError, match="already used"):
             validate_alias(
-                "read_file", "terminal_eu",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE,
+                "read_file",
+                "terminal_eu",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
                 existing={"terminal": "terminal_eu"},
             )
 
     def test_src_already_aliased_raises(self) -> None:
         with pytest.raises(ValueError, match="already aliased"):
             validate_alias(
-                "terminal", "terminal_2",
-                tool_names=_TOOLS, aliasable_names=_ALIASABLE,
+                "terminal",
+                "terminal_2",
+                tool_names=_TOOLS,
+                aliasable_names=_ALIASABLE,
                 existing={"terminal": "terminal_eu"},
             )

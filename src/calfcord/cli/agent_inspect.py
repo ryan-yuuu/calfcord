@@ -88,7 +88,6 @@ def _list_row(defn: AgentDefinition) -> dict[str, Any]:
     """
     return {
         "name": defn.agent_id,
-        "display_name": defn.display_name,
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
@@ -218,14 +217,11 @@ def _show_object(defn: AgentDefinition) -> dict[str, Any]:
     """
     return {
         "name": defn.agent_id,
-        "display_name": defn.display_name,
         "description": defn.description,
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
         "thinking_effort": defn.thinking_effort,
-        "history_turns": defn.history_turns,
         "memory": defn.memory,
-        "avatar_url": defn.avatar_url,
         "system_prompt": defn.system_prompt,
     }

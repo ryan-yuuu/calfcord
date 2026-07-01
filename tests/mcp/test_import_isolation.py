@@ -24,7 +24,6 @@ import sys
 
 import calfcord.agents.definition
 import calfcord.agents.factory
-import calfcord.agents.phonebook
 import calfcord.agents.runner
 import calfcord.mcp.agent_select
 

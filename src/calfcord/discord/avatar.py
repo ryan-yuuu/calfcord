@@ -2,8 +2,8 @@
 
 Kept in its own module — separate from :mod:`calfcord.discord.persona` —
 so callers that need only the URL string (notably
-:func:`calfcord.agents.definition.parse_agent_md`, which fills
-the default at .md-load time) don't pull in the ``discord.py`` library
+:func:`calfcord.bridge.persona_resolve.persona_for`, which derives the
+avatar at persona-resolution time) don't pull in the ``discord.py`` library
 import surface of ``persona.py``.
 """
 

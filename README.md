@@ -79,7 +79,7 @@ calfcord start                  #   ...and reopen it later (substrate only)
 ```
 
 `calfcord start` brings up just the **workspace** (broker + bridge); teammates
-(agents, tools, the router) clock in on demand with `... start`. The full
+(agents, tools) clock in on demand with `... start`. The full
 task-by-task guide is [`docs/using-calfcord.md`](./docs/using-calfcord.md).
 
 ## Going further — I want to…
@@ -90,7 +90,6 @@ Pick your next move by goal:
 |---|---|
 | Create or customize an agent (fields, models, tools) | [`docs/authoring-agents.md`](./docs/authoring-agents.md) |
 | Give agents more tools | [`docs/authoring-tools.md`](./docs/authoring-tools.md) |
-| Let agents answer messages without an `@mention` | [`docs/ambient-routing.md`](./docs/ambient-routing.md) |
 | Use my ChatGPT Plus/Pro subscription (Codex) | [`docs/codex-auth.md`](./docs/codex-auth.md) |
 | Have agents talk to each other (A2A) | [`docs/a2a-threads.md`](./docs/a2a-threads.md) |
 | Run agents across machines / go to production | [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) |
@@ -110,12 +109,10 @@ An agent is one Markdown file. Drop a new one into `~/.calfcord/agents/`:
 ```markdown
 ---
 name: scribe
-display_name: Scribe
 description: Friendly assistant that answers concisely.
-avatar_url: https://api.dicebear.com/9.x/glass/png?seed=scribe
 provider: openai
 model: gpt-5-mini
-tools: [private_chat]
+tools: [read_file, web_search]
 thinking_effort: medium
 ---
 
@@ -123,9 +120,10 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sente
 ```
 
 The frontmatter declares identity and runtime hints; the body is the system
-prompt. The filename must match `name`, and the slash command is always
-`/<name>`. Drop the file in, then bring it online with `calfcord agent start
-scribe`.
+prompt. The persona (Discord name + avatar) is derived from `name`, and the
+filename must match it. Agents can consult and hand off to each other by default
+(`a2a`/`handoff`). Drop the file in, bring it online with `calfcord agent start
+scribe`, then talk to it by `@`-mentioning it in a channel.
 
 Prefer not to hand-write the file? The full lifecycle is on the CLI:
 `calfcord agent create | list | show | edit | set | rename | delete` (plus
@@ -149,8 +147,6 @@ wiring:
 - **The agent roster** — teammates that chat in the running workspace.
   Each maps to one of calfcord's worker process types:
   - **`calfkit-agent`** — runs the agent(s). `calfcord agent start <name>`.
-  - **`calfkit-router`** — decides who answers un-mentioned ambient messages.
-    `calfcord router start`.
   - **`calfkit-tools`** — runs the tool(s). `calfcord tools start`.
   - **`calfkit-mcp`** — hosts one MCP server from `mcp.json` and advertises its
     tools on the bus, one process per server. `calfcord mcp start <server>`.
@@ -180,8 +176,7 @@ environment-variable reference.
 - [`docs/configuration.md`](./docs/configuration.md) — full environment-variable reference.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
 - [`docs/codex-auth.md`](./docs/codex-auth.md) — use a ChatGPT Plus/Pro subscription via Codex.
-- [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
-- [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
+- [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent messaging + handoff (native `message_agent`).
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
 - [`docs/troubleshooting.md`](./docs/troubleshooting.md) — diagnose and fix common problems.
 - [`docs/installation.md`](./docs/installation.md) — install, configure (`calfcord init`), and run calfcord; the `calfcord` CLI, updates/rollback.

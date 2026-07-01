@@ -1,379 +1,360 @@
-"""Unit tests for the gateway's user-facing error replies and lifecycle.
+"""Unit tests for the gateway's ``_on_message`` intake and handler-task lifecycle.
 
-The gateway runs Discord I/O so a true end-to-end test would need a
-mock discord.py connection. These tests focus on the reply-helper
-contract: given a triggering condition, the right text is sent via
-``message.reply`` and Discord HTTPException is logged + swallowed
-(matching the existing ``_reply_unknown_mention`` shape).
+Post-0.12 the gateway is a pure caller surface: for each ``@mention`` it builds a
+:class:`MentionRequest` and runs :meth:`MentionHandler.handle` as a tracked
+asyncio task. There is no ingress/outbox/Worker anymore. These tests pin the
+intake seam and the task machinery, all offline (no Discord, no broker):
 
-Also covers the ``_on_ready`` lifecycle: it must inject a
-:class:`ChannelHistoryFetcher` into the ingress so the slash + ambient
-paths can fetch history. A regression that drops the injection would
-leave the bridge running in the pre-ready degradation mode forever
-(empty history fleet-wide) — silent quality loss with no operator
-signal beyond DEBUG logs. The injection test is a regression alarm.
+* **Filtering** — DMs, wrong-guild, pre-ready, the bot's own non-webhook posts
+  (e.g. ``/clear`` markers, notices), and ambient (non-``@mention``) messages are
+  dropped before a handler task is ever spawned (C2). A webhook post carrying the
+  bot's user id (an agent persona) is NOT self-filtered.
+* **Dedupe** — a redelivered ``MESSAGE_CREATE`` (same ``message.id``) spawns the
+  handler only once.
+* **Spawn** — a real ``@mention`` reaches ``handler.handle`` with a correctly
+  populated :class:`MentionRequest` (mention ids, author label, channel flattening,
+  reply target, the serialized wire).
+* **Crash isolation** — an *unexpected* handler exception posts a generic notice
+  via the reply poster; ``CancelledError`` (shutdown) propagates untouched.
+* **Drain** — ``drain_inflight`` cancels in-flight handler tasks at shutdown.
+
+The gateway is built with mocked collaborators; ``_handler`` is swapped for a
+recording/failing fake so a mention only has to REACH ``handler.handle``. The
+``_GatewayClient`` constructor is sync + offline, so no network is touched.
 """
 
 from __future__ import annotations
 
-import logging
-from types import SimpleNamespace
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import discord
 import pytest
 from pydantic import SecretStr
 
 from calfcord.bridge.gateway import DiscordIngressGateway
-from calfcord.bridge.history import CLEAR_MARKER_TEXT, ChannelHistoryFetcher
+from calfcord.bridge.mention_handler import MentionRequest
+from calfcord.bridge.normalizer import MessageNormalizer
+from calfcord.bridge.steps_toggle import StepsToggleView
+from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.settings import DiscordSettings
+
+_GUILD_ID = 5678
+_BOT_USER_ID = 555
+_OWNER_USER_ID = 9999
 
 
 def _settings() -> DiscordSettings:
     return DiscordSettings(
         bot_token=SecretStr("test-bot-token"),
         application_id=1234,
-        guild_id=5678,
-        owner_user_id=9999,
+        guild_id=_GUILD_ID,
+        owner_user_id=_OWNER_USER_ID,
     )
 
 
 def _gateway() -> DiscordIngressGateway:
-    """Construct a gateway with mocked ingress + registry.
-
-    Note: ``DiscordIngressGateway.__init__`` instantiates a
-    ``_GatewayClient`` (discord.Client subclass). The discord.Client
-    constructor is sync and offline, so this is safe without
-    network. We do not call ``.start()``.
-
-    The calfkit client is mocked — its only use in non-``_on_ready``
-    paths is being passed to the :class:`SlashCommandManager` (which
-    stores it but doesn't invoke it during constructor wiring).
-
-    The gateway does not fire typing indicators — that lives entirely in
-    the steps consumer — so there is no typing notifier to inject here.
-    """
-    return DiscordIngressGateway(
-        settings=_settings(),
-        ingress=MagicMock(),
-        registry=MagicMock(),
+    """A real gateway with mocked collaborators and a stubbed ``add_view``."""
+    gateway = DiscordIngressGateway(
+        _settings(),
         calfkit_client=MagicMock(),
+        persona_sender=MagicMock(),
         transcript_store=MagicMock(),
+        roster=MagicMock(),
+        overrides=MagicMock(),
+        a2a=MagicMock(),
+        progress=MagicMock(),
+        reply=MagicMock(),
+        memory_deps=MagicMock(),
+    )
+    gateway._client.add_view = MagicMock()  # type: ignore[method-assign]
+    return gateway
+
+
+def _ready(gateway: DiscordIngressGateway) -> None:
+    """Put the gateway into its post-``on_ready`` state without a live handshake.
+
+    ``_on_message`` no-ops until the normalizer + bot user id are set on ready;
+    setting them directly is how we exercise intake in isolation (no client.user).
+    """
+    gateway._message_normalizer = MessageNormalizer(_OWNER_USER_ID)
+    gateway._bot_user_id = _BOT_USER_ID
+
+
+class _RecordingHandler:
+    """A ``MentionHandler`` stand-in that records the requests handed to it."""
+
+    def __init__(self) -> None:
+        self.calls: list[MentionRequest] = []
+
+    async def handle(self, req: MentionRequest) -> None:
+        self.calls.append(req)
+
+
+async def _settle(gateway: DiscordIngressGateway) -> None:
+    """Await any spawned handler tasks so their effects are observable."""
+    tasks = list(gateway._inflight)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _req() -> MentionRequest:
+    """A minimal request for driving ``_run_handler`` / ``_spawn_handle`` directly."""
+    return MentionRequest(
+        content="@scribe hi",
+        mention_ids=("scribe",),
+        author_label="alice",
+        message_id=1,
+        source_channel_id=10,
+        channel_id=10,
+        wire=WireMessage(
+            event_id="e1",
+            kind="message",
+            message_id=1,
+            channel_id=10,
+            source_channel_id=10,
+            guild_id=1,
+            content="@scribe hi",
+            author=WireAuthor(discord_user_id=1, display_name="alice", is_bot=False, is_webhook=False),
+            created_at=datetime.now(UTC),
+        ),
+        reply_target=object(),
     )
 
 
-def _fake_message() -> MagicMock:
-    """A stand-in for ``discord.Message`` with the surface
-    ``_reply_empty_roster`` touches."""
-    msg = MagicMock(spec=discord.Message)
-    msg.id = 12345
-    msg.reply = AsyncMock()
-    return msg
+class _FakeBotUser:
+    """A ``discord.Client.user`` stand-in: ``str()`` → name, ``.id`` → id."""
+
+    def __init__(self, *, name: str = "Calfbot#1234", user_id: int = 42) -> None:
+        self.id = user_id
+        self._name = name
+
+    def __str__(self) -> str:
+        return self._name
 
 
-class TestReplyEmptyRoster:
-    """The gateway's empty-roster reply makes the deployment
-    misconfiguration visible to the user via an inline reply, instead
-    of silently dropping the ambient message."""
+class TestOnMessageSpawnsHandler:
+    """A real ``@mention`` reaches ``handler.handle`` with a correct request."""
 
-    async def test_reply_called_with_operator_actionable_text(self) -> None:
+    async def test_mention_spawns_handler_with_populated_request(self, fake_message) -> None:
         gateway = _gateway()
-        message = _fake_message()
-        await gateway._reply_empty_roster(message)
-        message.reply.assert_awaited_once()
-        text = message.reply.await_args.args[0]
-        # The message must convey three things: the cause (no agents),
-        # the action (contact operator), and that this specific
-        # message wasn't routed. Pin the substantive phrases rather
-        # than the full string so wording can evolve.
-        assert "No assistant agents" in text
-        assert "contact an operator" in text.lower()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
 
-    async def test_logs_info_on_rejection(self, caplog: pytest.LogCaptureFixture) -> None:
-        """INFO log with the message_id makes the rejection
-        correlatable to a user-reported "no reply"."""
-        gateway = _gateway()
-        message = _fake_message()
-        with caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"):
-            await gateway._reply_empty_roster(message)
-        assert any(
-            "rejected ambient publish" in r.message and "empty roster" in r.message and "12345" in r.message
-            for r in caplog.records
+        msg = fake_message(
+            message_id=42,
+            channel_id=200,
+            guild_id=_GUILD_ID,
+            author_display_name="Alice",
+            content="@scribe help me",
         )
+        await gateway._on_message(msg)
+        await _settle(gateway)
 
-    async def test_swallows_http_exception(self, caplog: pytest.LogCaptureFixture) -> None:
-        """If Discord rejects the reply (rate-limit, deleted channel,
-        etc.), the gateway logs and continues — matching the
-        ``_reply_unknown_mention`` pattern. The caller is already in
-        an error-recovery path; bubbling further has nowhere useful
-        to go."""
+        assert len(handler.calls) == 1
+        req = handler.calls[0]
+        assert req.mention_ids == ("scribe",)
+        assert req.content == "@scribe help me"
+        assert req.author_label == "Alice"
+        assert req.message_id == 42
+        assert req.channel_id == 200
+        assert req.source_channel_id == 200
+        assert req.reply_target is msg
+        # The typed WireMessage rides along (the handler serializes it into
+        # ``deps["discord"]``; the reply poster reads its typed fields).
+        assert req.wire.content == "@scribe help me"
+        assert req.wire.slash_target == "scribe"
+
+    async def test_thread_message_flattens_parent_but_keeps_thread_source(self, fake_message) -> None:
         gateway = _gateway()
-        message = _fake_message()
-        # Construct an HTTPException without standing up a real
-        # aiohttp.ClientResponse — pass MagicMock for response and a
-        # short error string. discord.HTTPException's __init__ pulls
-        # status/code/text from the response object via getattr.
-        fake_response = MagicMock()
-        fake_response.status = 429
-        fake_response.reason = "Too Many Requests"
-        message.reply = AsyncMock(side_effect=discord.HTTPException(fake_response, "rate limited"))
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
 
-        with caplog.at_level(logging.ERROR, logger="calfcord.bridge.gateway"):
-            # Must not raise — gateway swallows.
-            await gateway._reply_empty_roster(message)
-        assert any("failed to send empty-roster reply" in r.message for r in caplog.records)
+        msg = fake_message(channel_id=500, thread_parent_id=200, guild_id=_GUILD_ID, content="@scribe hi")
+        await gateway._on_message(msg)
+        await _settle(gateway)
 
+        req = handler.calls[0]
+        assert req.channel_id == 200, "parent channel hosts the persona webhook"
+        assert req.source_channel_id == 500, "thread id drives history fetching"
 
-class TestOnMessageEmptyRosterWiring:
-    """The gateway's ``_on_message`` MUST catch
-    :class:`AmbientRosterEmptyError` from ``ingress.handle`` and
-    route it to ``_reply_empty_roster``. Without this wiring, the
-    user-facing reply would never fire and the documented feature
-    ("ambient with no assistants → inline reply") silently regresses
-    — every other test would still pass."""
-
-    async def test_on_message_routes_roster_empty_to_reply_helper(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """End-to-end: ingress raises ``AmbientRosterEmptyError``;
-        ``_on_message`` must drive ``_reply_empty_roster`` with the
-        triggering message."""
-        from calfcord.bridge.ingress import (
-            AmbientRosterEmptyError,
-        )
-
+    async def test_first_of_multiple_mentions_carried_in_order(self, fake_message) -> None:
         gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
 
-        # ``_on_message`` flows through normalize → ingress.handle.
-        # We bypass normalize by stubbing ``_message_normalizer``
-        # with a normalizer that returns a fake wire, then make
-        # ingress.handle raise our specific exception.
-        fake_wire = MagicMock()
-        fake_wire.event_id = "evt-test"
-        fake_wire.channel_id = 6789
+        msg = fake_message(guild_id=_GUILD_ID, content="@scribe loop in @echo")
+        await gateway._on_message(msg)
+        await _settle(gateway)
 
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=fake_wire)
-        gateway._bot_user_id = 0  # unique enough to bypass the self-message filter
+        assert handler.calls[0].mention_ids == ("scribe", "echo")
 
-        gateway._ingress.handle = AsyncMock(side_effect=AmbientRosterEmptyError(event_id="evt-test", channel_id=6789))
 
-        # Spy on _reply_empty_roster so we don't actually touch
-        # Discord — but call the real _on_message control flow.
-        reply_spy = AsyncMock()
-        monkeypatch.setattr(gateway, "_reply_empty_roster", reply_spy)
+class TestOnMessageFilters:
+    """Messages that must never spawn a handler task."""
 
-        # Build a minimal Discord message stand-in that survives
-        # _on_message's filters.
-        message = MagicMock(spec=discord.Message)
-        message.id = 42
-        message.content = "hello there"
-        message.guild = MagicMock()
-        message.guild.id = 5678  # matches settings.guild_id
-        message.author = MagicMock()
-        message.author.id = 99999  # not the bot user
-        message.webhook_id = None
+    async def _dropped(self, gateway: DiscordIngressGateway, msg: Any) -> _RecordingHandler:
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        await gateway._on_message(msg)
+        await _settle(gateway)
+        return handler
 
-        await gateway._on_message(message)
-
-        reply_spy.assert_awaited_once_with(message)
-
-    async def test_on_message_does_not_call_reply_helper_on_success(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Regression positive: a successful ingress.handle must
-        NOT trigger the empty-roster reply path."""
+    async def test_ambient_message_without_mention_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
+        _ready(gateway)
+        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="just chatting"))
+        assert handler.calls == []
 
-        fake_wire = MagicMock()
-        fake_wire.event_id = "evt-ok"
-        fake_wire.channel_id = 6789
-
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=fake_wire)
-        gateway._bot_user_id = 0
-
-        gateway._ingress.handle = AsyncMock(return_value=None)
-        reply_spy = AsyncMock()
-        monkeypatch.setattr(gateway, "_reply_empty_roster", reply_spy)
-
-        message = MagicMock(spec=discord.Message)
-        message.id = 43
-        message.content = "hello there"
-        message.guild = MagicMock()
-        message.guild.id = 5678
-        message.author = MagicMock()
-        message.author.id = 99999
-        message.webhook_id = None
-
-        await gateway._on_message(message)
-
-        reply_spy.assert_not_called()
-
-
-class TestOnMessageIngressFailureWiring:
-    """The broad ``except Exception`` in ``_on_message`` MUST drive
-    a generic user-facing reply so the silence after an unexpected
-    ingress failure (broker hiccup, registry mid-write, etc.) isn't
-    unexplained. Without this wiring the user has no signal at all."""
-
-    async def test_on_message_routes_unexpected_failure_to_reply_helper(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    async def test_own_non_webhook_message_is_ignored(self, fake_message) -> None:
+        # The /clear marker and operator notices are the bot's own non-webhook
+        # posts; re-ingesting them would fan the bot's own text back out to agents.
         gateway = _gateway()
+        _ready(gateway)
+        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=None, guild_id=_GUILD_ID, content="@scribe hi")
+        handler = await self._dropped(gateway, msg)
+        assert handler.calls == []
 
-        fake_wire = MagicMock()
-        fake_wire.event_id = "evt-broker-fail"
-        fake_wire.channel_id = 6789
-
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=fake_wire)
-        gateway._bot_user_id = 0
-
-        # Simulate a broker-level failure that isn't
-        # AmbientRosterEmptyError.
-        gateway._ingress.handle = AsyncMock(side_effect=RuntimeError("kafka broker unreachable"))
-
-        reply_spy = AsyncMock()
-        monkeypatch.setattr(gateway, "_reply_ingress_failure", reply_spy)
-
-        message = MagicMock(spec=discord.Message)
-        message.id = 44
-        message.content = "hello there"
-        message.guild = MagicMock()
-        message.guild.id = 5678
-        message.author = MagicMock()
-        message.author.id = 99999
-        message.webhook_id = None
-
-        await gateway._on_message(message)
-
-        reply_spy.assert_awaited_once_with(message)
-
-    async def test_reply_ingress_failure_text_is_generic_not_internal(
-        self,
-    ) -> None:
-        """The user-facing text must not leak internal detail
-        (stack-trace fragments, internal class names) — the
-        operator-actionable signal is the ingress's ERROR log."""
+    async def test_webhook_post_with_bot_id_passes_through(self, fake_message) -> None:
+        # A webhook post (an agent persona) is NOT self-filtered even though it
+        # carries the bot's user id — which is exactly why /clear posts its marker
+        # as a plain, non-webhook message so the seam above can drop it.
         gateway = _gateway()
-        message = _fake_message()
-        await gateway._reply_ingress_failure(message)
-        message.reply.assert_awaited_once()
-        text = message.reply.await_args.args[0]
-        # The reply should be generic enough that an internal
-        # rename doesn't leak.
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=777, guild_id=_GUILD_ID, content="@scribe hi")
+        await gateway._on_message(msg)
+        await _settle(gateway)
+        assert len(handler.calls) == 1
+
+    async def test_dm_is_ignored(self, fake_message) -> None:
+        gateway = _gateway()
+        _ready(gateway)
+        handler = await self._dropped(gateway, fake_message(guild_id=None, content="@scribe hi"))
+        assert handler.calls == []
+
+    async def test_wrong_guild_is_ignored(self, fake_message) -> None:
+        gateway = _gateway()
+        _ready(gateway)
+        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID + 1, content="@scribe hi"))
+        assert handler.calls == []
+
+    async def test_pre_ready_message_is_ignored(self, fake_message) -> None:
+        # Before on_ready there is no normalizer; intake must no-op defensively.
+        gateway = _gateway()
+        gateway._message_normalizer = None
+        gateway._bot_user_id = None
+        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="@scribe hi"))
+        assert handler.calls == []
+
+
+class TestOnMessageDedup:
+    async def test_redelivered_message_spawns_handler_once(self, fake_message) -> None:
+        # discord.py can replay MESSAGE_CREATE on gateway reconnect; the bounded
+        # LRU of message ids must collapse the duplicate.
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        msg = fake_message(message_id=42, guild_id=_GUILD_ID, content="@scribe hi")
+        await gateway._on_message(msg)
+        await gateway._on_message(msg)  # redelivery of the SAME id
+        await _settle(gateway)
+
+        assert len(handler.calls) == 1
+
+
+class TestRunHandlerErrorHandling:
+    """``_run_handler`` isolates handler crashes from the Discord event loop."""
+
+    async def test_unexpected_crash_posts_generic_notice(self) -> None:
+        gateway = _gateway()
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+
+        class _Crash:
+            async def handle(self, req: MentionRequest) -> None:
+                raise RuntimeError("boom")
+
+        gateway._handler = _Crash()  # type: ignore[assignment]
+        req = _req()
+        await gateway._run_handler(req)
+
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req is req
         assert "Something went wrong" in text
-        # Sanity: no Python type names or implementation references.
+        # The notice must not leak internal detail.
         assert "RuntimeError" not in text
-        assert "ingress" not in text.lower() or "operator" in text.lower()
 
-
-class TestOnMessageFiltersClearMarker:
-    """The ``/clear`` marker is the bot's own non-webhook message, so the
-    gateway self-message filter in ``_on_message`` must drop it. Without
-    this, the bridge would re-ingest its own marker and fan it out to
-    agents on every ``/clear`` — a token-burning loop. The marker depends
-    on this seam; these tests pin that dependency."""
-
-    def _ready_gateway(self) -> DiscordIngressGateway:
+    async def test_cancelled_error_propagates_without_notice(self) -> None:
+        # Shutdown cancellation must propagate so drain sees the task as cancelled;
+        # it is NOT an "unexpected crash", so no user-facing notice is posted.
         gateway = _gateway()
-        gateway._bot_user_id = 555
-        gateway._message_normalizer = MagicMock()
-        gateway._message_normalizer.normalize = MagicMock(return_value=MagicMock())
-        gateway._ingress.handle = AsyncMock()
-        return gateway
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
 
-    @staticmethod
-    def _message(*, author_id: int, webhook_id: int | None) -> MagicMock:
-        message = MagicMock(spec=discord.Message)
-        message.id = 1
-        message.guild = MagicMock()
-        message.guild.id = 5678  # matches settings.guild_id
-        message.author = MagicMock()
-        message.author.id = author_id
-        message.webhook_id = webhook_id
-        message.content = CLEAR_MARKER_TEXT
-        return message
+        class _Cancels:
+            async def handle(self, req: MentionRequest) -> None:
+                raise asyncio.CancelledError
 
-    async def test_own_non_webhook_marker_is_not_ingested(self) -> None:
-        gateway = self._ready_gateway()
-        message = self._message(author_id=555, webhook_id=None)  # the bot itself
+        gateway._handler = _Cancels()  # type: ignore[assignment]
+        with pytest.raises(asyncio.CancelledError):
+            await gateway._run_handler(_req())
+        gateway._reply.post_notice.assert_not_awaited()
 
-        await gateway._on_message(message)
+    async def test_notice_failure_is_swallowed(self) -> None:
+        # Even the best-effort notice can fail (Discord down); that must not escape.
+        gateway = _gateway()
+        gateway._reply.post_notice = AsyncMock(side_effect=RuntimeError("discord down"))  # type: ignore[method-assign]
 
-        gateway._message_normalizer.normalize.assert_not_called()
-        gateway._ingress.handle.assert_not_awaited()
+        class _Crash:
+            async def handle(self, req: MentionRequest) -> None:
+                raise RuntimeError("boom")
 
-    async def test_webhook_message_with_bot_id_passes_through(self) -> None:
-        """A webhook post (e.g. an agent persona) is NOT self-filtered —
-        which is exactly why ``/clear`` posts the marker as a plain
-        (non-webhook) message so this seam can drop it."""
-        gateway = self._ready_gateway()
-        message = self._message(author_id=555, webhook_id=777)
-
-        await gateway._on_message(message)
-
-        gateway._message_normalizer.normalize.assert_called_once()
+        gateway._handler = _Crash()  # type: ignore[assignment]
+        await gateway._run_handler(_req())  # must not raise
 
 
-class TestOnReadyInjectsFetcher:
-    """The ``_on_ready`` hook must construct a
-    :class:`ChannelHistoryFetcher` and inject it into the ingress via
-    :meth:`BridgeIngress.set_fetcher`. Without this, the bridge would
-    run in pre-ready degradation mode forever — every slash and
-    ambient invocation would skip history fetching and produce
-    silently-lower-quality replies.
+class TestDrainInflight:
+    async def test_drain_cancels_running_handler_tasks(self) -> None:
+        gateway = _gateway()
+        started = asyncio.Event()
 
-    The test stubs out the slash command sync (which requires a live
-    Discord connection) and just asserts the injection happens.
-    """
+        class _Blocks:
+            async def handle(self, req: MentionRequest) -> None:
+                started.set()
+                await asyncio.Event().wait()  # block until cancelled
 
-    async def test_on_ready_injects_channel_history_fetcher(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # _on_ready now also writes the first bridge heartbeat (§12.1); point
-        # CALFCORD_HOME at a tmp dir so that beat lands there instead of
-        # littering the repo's working directory.
+        gateway._handler = _Blocks()  # type: ignore[assignment]
+        gateway._spawn_handle(_req())
+        await started.wait()
+        assert len(gateway._inflight) == 1
+        task = next(iter(gateway._inflight))
+
+        await gateway.drain_inflight()
+        assert task.cancelled()
+
+    async def test_drain_is_a_noop_when_idle(self) -> None:
+        gateway = _gateway()
+        await gateway.drain_inflight()  # must not raise
+
+
+class TestOnReadyRegistersStepsToggleView:
+    async def test_on_ready_adds_persistent_steps_toggle_view(self, tmp_path, monkeypatch) -> None:
+        # _on_ready writes the first heartbeat too (§12.1); contain it in a tmp home.
         monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-        gateway = _gateway()
-        # Patch the client.user attribute (populated by Discord after
-        # handshake) so _on_ready's assertion holds.
-        fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
+        gateway = _gateway()  # add_view is stubbed to a MagicMock
         with (
-            patch.object(type(gateway._client), "user", new=fake_user, create=True),
+            patch.object(type(gateway._client), "user", new=_FakeBotUser(), create=True),
             patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
-            patch(
-                "calfcord.bridge.gateway.publish_discovery_ping",
-                new=AsyncMock(return_value=None),
-            ),
         ):
             await gateway._on_ready()
 
-        # The ingress must have received the fetcher.
-        gateway._ingress.set_fetcher.assert_called_once()
-        injected = gateway._ingress.set_fetcher.call_args.args[0]
-        assert isinstance(injected, ChannelHistoryFetcher)
-
-    async def test_on_ready_logs_history_injection(
-        self, caplog: pytest.LogCaptureFixture, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # _on_ready now writes the first bridge heartbeat (§12.1); contain it in
-        # a tmp CALFCORD_HOME so the test stays hermetic.
-        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-        gateway = _gateway()
-        fake_user = SimpleNamespace(id=42, __str__=lambda self: "bot#1234")
-        with (
-            patch.object(type(gateway._client), "user", new=fake_user, create=True),
-            patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
-            patch(
-                "calfcord.bridge.gateway.publish_discovery_ping",
-                new=AsyncMock(return_value=None),
-            ),
-            caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"),
-        ):
-            await gateway._on_ready()
-        assert any("history fetcher injected" in r.message for r in caplog.records)
+        gateway._client.add_view.assert_called_once()
+        view = gateway._client.add_view.call_args.args[0]
+        assert isinstance(view, StepsToggleView)

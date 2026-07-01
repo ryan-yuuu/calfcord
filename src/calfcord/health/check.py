@@ -18,7 +18,7 @@ Only **two** components carry a readiness signal, so only two are probeable
   ``bridge/gateway.py``'s ``_on_ready``), so a fresh bridge beat means
   "Discord-connected"; a stale or missing beat means "not ready".
 
-The roster runners (agents, ``tools``, ``router``) deliberately have NO
+The roster runners (agents, ``tools``) deliberately have NO
 readiness signal: they run via ``run_worker_until_signal`` and never beat, and
 Process Compose attaches a readiness probe only to the broker and the bridge (see
 ``supervisor/compose.py``). Probing any other component is therefore a

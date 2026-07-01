@@ -1,234 +1,195 @@
 # A2A Threads (Unified Audit Channel)
 
-How agent-to-agent (`private_chat`) conversations are projected to
-Discord, how operators set up the audit surface, and how agents opt
-into continuing prior conversations.
+How agent-to-agent (A2A) conversations are projected to Discord, how
+operators set up the audit surface, and how agents opt into consulting
+or handing off to peers.
 
 ## What changed
 
-**Before**: every pair of agents that ever exchanged a `private_chat`
-got their own dedicated audit channel named `a2a-{x}-{y}` (IDs sorted
-alphabetically). N agents → up to N*(N-1)/2 channels. Each invocation
-posted two flat messages into that channel: the request projection
-from the caller's persona, then the response projection from the
-target's persona. No notion of multi-turn continuity — every call was
-stateless from the callee's POV.
+**Before**: A2A was a first-party `private_chat` tool. An agent's LLM
+called `private_chat(target_agent_id=…, content=…)`; the tool ran in the
+`calfkit-tools` process, invoked the peer over a bespoke calfkit RPC,
+anchored a Discord thread itself, and returned a `<thread_id>` the caller
+could pass back to continue the conversation.
 
-**After**: a single **unified audit channel** holds all A2A traffic.
-Each `private_chat` invocation runs inside a **Discord thread** in
-that channel. The caller decides per-call whether to:
+**After**: A2A is **native to calfkit**, and the Discord projection is
+**owned by the bridge**. There is no `private_chat` tool anymore. Two
+capabilities replace it, both declared in agent frontmatter and both
+**on by default** (see [`authoring-agents.md`](./authoring-agents.md#8-agent-to-agent-a2a-consult--handoff)):
 
-- **start a new thread** (default) — the callee sees only the current
-  message, like before; OR
-- **continue an existing thread** by passing the `thread_id` it
-  received from a prior `private_chat` return value — the callee gets
-  the thread's prior turns injected as `message_history`, projected
-  from its own POV (its own messages as ModelResponse, the caller's
-  messages as ModelRequest with `<author>` prefix).
+- **Consult** (`a2a`) — calfkit injects a built-in `message_agent(name,
+  message)` tool. The agent's LLM calls a peer, the peer answers, and the
+  reply folds back into the tool result. The peer answers on a **fresh
+  conversation** — it sees only the message, with no replay of prior A2A
+  turns (consults are **stateless**).
+- **Handoff** (`handoff`) — the agent transfers the turn to a peer, which
+  answers the **original** human. The bridge posts the peer's persona
+  because the reply is emitter-stamped by the node that actually replied.
 
-The caller always retains its own context naturally (in its LLM's
-conversation history). Only the **callee** receives injected history,
-and only on opt-in. This keeps A2A symmetric in cost (you only pay
-the history-fetch tokens when continuation is wanted).
-
-A2A is the out-of-band channel an agent reaches for when an ambient or
-`/task` conversation needs a peer's input; the router itself never fans
-out (see [`docs/ambient-routing.md`](./ambient-routing.md)).
+The bridge is no longer the A2A *transport* — the consult or handoff
+already happened inside the agent runtime. Instead the bridge **observes**
+each `@mention` run's event stream, and renders the `message_agent` calls,
+peer replies, and handoffs it sees into a unified Discord audit channel.
+Kafka is the system of record; Discord is a human-readable audit log.
 
 ## Architecture at a glance
 
 ```
-caller agent LLM
-   │  private_chat(target, content, thread_id=None or N)
+human @mentions an agent
+   │
    ▼
-calfkit-tools process
+bridge  client.agent(<name>).start(...)  ──►  agent runtime
+   │                                             │  LLM calls message_agent(peer, msg)
+   │  drains handle.stream()  ◄──────────────────┤  or emits a HandoffRequest
+   │  (step events: ToolCallEvent / ToolResultEvent / HandoffEvent)
    │
-   ├─ resolve unified audit channel id (cached after first lookup;
-   │  lazy-created from CALFKIT_A2A_CHANNEL_NAME on full miss)
+   ├─ A2ADispatcher.classify(event)
+   │    pairs each message_agent ToolCallEvent with its ToolResultEvent
+   │    by tool_call_id; recognizes HandoffEvents
    │
-   ├─ NEW THREAD (thread_id=None):
-   │    1. Post caller-request as caller persona to the unified channel.
-   │    2. Anchor a public thread on that message; name is
-   │       "{caller}→{target}: {first ~40 chars of content}".
-   │    3. message_history for the callee = empty.
-   │
-   ├─ CONTINUE (thread_id=N):
-   │    1. Fetch the thread's recent history (Discord REST, no LRU cache).
-   │    2. Project to callee POV via project_history().
-   │    3. Post caller-request as caller persona INSIDE the thread.
-   │
-   ├─ execute(target.in, user_prompt=content,
-   │          message_history=<projected or empty>)
-   │
-   ├─ Post target-response as target persona INSIDE the thread.
-   │
-   └─ Return "<thread_id>{N}</thread_id>\n{response_text}" to caller.
+   └─ A2AProjector.project(...)
+        resolve/create the unified audit channel (lazy, cached)
+        anchor ONE thread per human turn (keyed by correlation_id)
+        post request (caller persona), reply (peer persona),
+        and any reject/handoff/fault notes (system "a2a" persona)
 ```
 
-## Operator setup
+The dispatcher is **stateful**: there is no `message_agent` step *kind* —
+a consult is a `ToolCallEvent` whose name is `message_agent`, and its
+reply is a `ToolResultEvent` whose emitter is the *peer*. The dispatcher
+records each `message_agent` `tool_call_id` and routes the matching result
+to A2A (reliable because a run's steps share one `correlation_id` → single
+partition → request-before-reply order, and the handle stream is
+lossless and ordered). Everything else on the stream is live progress,
+not A2A.
 
-### Environment variables
+Nested consults reach the bridge too: steps from the whole run tree
+publish to the root caller's inbox, so a B→C consult inside an A→B consult
+is observable (it carries the same `correlation_id`, `emitter=C`,
+`depth>1`) and renders in the same thread.
 
-| Var | Required | Default | Purpose |
-|---|---|---|---|
-| `CALFKIT_A2A_CHANNEL_NAME` | no | `private-a2a-chats` | Name of the unified audit channel. Lazy-created in the guild on first A2A call if absent. |
-| `CALFKIT_A2A_CHANNEL_CATEGORY` | no | unset | If set, the unified channel is placed under this category. Category is lazy-created too. |
-| `DISCORD_GUILD_ID` | yes, if `private_chat` is hosted | — | The guild that hosts the unified channel. Required only when the tools worker hosts `private_chat` — enforced by its resource bracket at startup. A worker serving only fs/terminal tools does not need it. |
+## Anchoring and personas
 
-`CALFKIT_A2A_CHANNEL_NAME` is the only new var — existing deployments
-do not need to set it to keep working (the default is fine for most
-cases).
-
-### Bot permissions
-
-On the **unified audit channel** (or its category, with channel-level
-overrides allowing inheritance):
-
-| Permission | Why |
-|---|---|
-| View Channel | Bot has to see the channel to use it. |
-| Manage Webhooks | Persona webhook is created on demand for projection. |
-| Create Public Threads | New-thread branch of `private_chat` anchors a public thread. |
-| Send Messages in Threads | All request and response projections post into threads. |
-| Read Message History | Continue-thread branch fetches the thread's prior messages. |
-
-If `Create Public Threads` or `Send Messages in Threads` is missing,
-the new-thread branch of `private_chat` will raise a `RuntimeError`
-funneled through `_raise_infra` — operators see this immediately in
-the tools log with the channel id and discord error code.
-
-If `Read Message History` is missing on a continue call, the tool
-returns a recoverable error string to the LLM (`error: thread {id}
-not accessible; start a new conversation by omitting thread_id`),
-which most agents will retry as a fresh thread.
-
-On the **guild** (server-wide): `Manage Channels` is still required
-for lazy creation of the unified channel if it doesn't exist.
-
-### Migration from per-pair channels
-
-If your guild already has `a2a-{x}-{y}` channels from the per-pair
-era, they're inert under the new design — the new resolver only knows
-the unified channel. Operators may delete them at leisure. There's no
-code-side migration step.
+- **One thread per human turn.** The projector keys threads by
+  `correlation_id` (one per top-level `@mention`), created lazily on the
+  first A2A projection for that turn — that first post is the thread's
+  starter message. Every later request / reply / reject / handoff / fault
+  for the same turn posts into that thread.
+- **Thread name** is shaped `caller→peer: <first ~40 chars>` (Discord caps
+  thread names at 100 chars; the `→` is `U+2192`).
+- **Personas are a pure function** of the agent name —
+  `persona_for(name)` → webhook username = the name, avatar = a
+  deterministic [DiceBear](https://www.dicebear.com) image seeded by the
+  name (`https://api.dicebear.com/9.x/glass/png?seed=<name>`). There is no
+  roster lookup and no configured avatar.
+- **Meta notes** (rejections, handoffs, faults) are posted under a system
+  `a2a` persona, not attributed to any agent — they are annotations, not a
+  peer's own words.
 
 ## What humans see in Discord
 
-Open the unified audit channel. The flat scrollback contains one
-message per A2A invocation: the **first request** of every
-conversation, posted as the caller persona. Each one is the starter
-message for a thread.
+Open the unified audit channel. The flat scrollback contains one starter
+message per human turn that produced A2A activity, each anchoring a thread:
 
 ```
 [#private-a2a-chats]
 ─────────────────────────────────────────
 [Conan]   please summarize the design doc for...
           ↪ Thread: "conan→scribe: please summarize the design doc..."
-                    (3 messages)
+                    (2 messages)
 
-[Scribe]  what's the typical latency on the router fan-out?
-          ↪ Thread: "scribe→conan: what's the typical latency on..."
-                    (5 messages)
-
-[Conan]   any updates on the auth migration?
-          ↪ Thread: "conan→scribe: any updates on the auth migration?"
-                    (1 message)
+[Scribe]  what's the latency budget on the ingest path?
+          ↪ Thread: "scribe→librarian: what's the latency budget..."
+                    (2 messages)
 ```
 
-Click any thread to see the full conversation: alternating
-caller-persona and target-persona messages, in order. The thread's
-auto-archive timer is whatever Discord's default for the channel is
-(typically 24h); the thread auto-unarchives the moment a new call to
-`private_chat` with that `thread_id` comes in.
+Click a thread to see the exchange in order: the caller's consult
+(caller persona), the peer's reply (peer persona), and any system notes.
 
-The active-threads sidebar at the top of the channel shows currently
-unarchived threads. Archived threads are findable via the "Archived
-Threads" UI Discord provides on every channel.
+### Reject, fault, and handoff rendering
 
-## Return-value convention (for agents)
+Not every A2A event is a peer speaking, so three cases render as system
+`a2a` notes rather than peer posts:
 
-`private_chat` returns a string that begins with `<thread_id>N</thread_id>`
-followed by a newline and the peer's reply text:
+| Case | What you see |
+|---|---|
+| **Rejected consult** (peer offline / cycle / self) | `⚠️ consult to <peer> was rejected: <reason>` |
+| **Faulted peer** (no reply came back) | `⚠️ <peer> did not reply — the consult faulted before a response.` |
+| **Handoff** | `↪ <emitter> handed off to <target>: <reason>` |
 
-```
-<thread_id>1234567890123456789</thread_id>
-sure, here's the summary you asked for: ...
-```
+The happy-path consult renders the request under the caller's persona and
+the reply under the peer's persona.
 
-To continue a conversation, the agent passes the same `N` as
-`thread_id=N` on its next call. To start a fresh conversation, it
-omits the parameter (or passes `None`).
+## Operator setup
 
-Error returns do **not** carry the tag — they're bare strings starting
-with `"error:"`. This is deliberate: a `<thread_id>` tag would
-encourage the LLM to "continue" an error, which is meaningless.
+### Environment variables
 
-The roster of peers + the thread_id convention are injected into the
-agent's `temp_instructions` on every invocation by `peer_roster.py`,
-so any A2A-enabled agent automatically learns the convention without
-needing it baked into its `.md` persona file.
+The A2A projection now runs in the **bridge**, so these are read by the
+bridge process (they moved off the tools process in the migration):
+
+| Var | Required | Default | Purpose |
+|---|---|---|---|
+| `CALFKIT_A2A_CHANNEL_NAME` | no | `private-a2a-chats` | Name of the unified audit channel. Lazy-created in the guild on the first A2A projection if absent. |
+| `CALFKIT_A2A_CHANNEL_CATEGORY` | no | unset | If set, the unified channel is placed under this category. Category is lazy-created too. Lock the category's permission overwrites once and the channel + threads inherit them. |
+| `DISCORD_GUILD_ID` | recommended | — | The guild that hosts the unified channel. The bridge already uses it for slash-command sync. |
+
+Because the bridge is now the only Discord-touching process, the tools
+process no longer needs a Discord token for A2A.
+
+### Bot permissions
+
+On the **unified audit channel** (or its category, with inheritance), the
+bridge needs:
+
+| Permission | Why |
+|---|---|
+| View Channel | The bridge has to see the channel to use it. |
+| Manage Webhooks | Persona webhooks are created on demand for the projection. |
+| Create Public Threads | Each human turn's A2A activity anchors a public thread. |
+| Send Messages in Threads | All request / reply / note projections post into threads. |
+
+On the **guild** (server-wide), `Manage Channels` is required for lazy
+creation of the unified channel or category if they don't exist yet.
+
+The projection is **best-effort**: if a post fails (missing permission,
+rate-limit, transient 5xx) the bridge logs a WARN and continues — a
+Discord failure never faults the human turn. So a missing thread
+permission shows up as an audit gap in the bridge log, not an error to the
+user.
 
 ## Lifecycle
 
 There is no explicit thread-close affordance. Threads are managed by
-Discord's auto-archive (configurable per-thread, defaulting to the
-channel's setting — typically 24 hours of inactivity). Posting via
-the API auto-unarchives, so a caller passing an old `thread_id` will
-transparently revive the thread.
+Discord's auto-archive (the channel's default, typically 24 hours of
+inactivity). Posting via the API auto-unarchives, so a thread revives the
+next time the bridge posts into it.
 
-If a thread is **manually deleted** by an operator, the next `continue`
-call against it returns the same `error: thread {id} not accessible`
-string the LLM uses for permission failures — the agent treats this
-as a signal to start a new conversation.
-
-There is no v1 affordance for the caller to validate that a
-`thread_id` it holds belongs to its current target. A malicious or
-confused caller could (in principle) pass a `thread_id` from a
-different pair and inject that unrelated history into the callee.
-For the current trust model (operator-controlled agent roster), this
-is an accepted risk. Reconsider if a real foot-gun fires.
+Because consults are stateless and threads are keyed per human turn, there
+is no cross-turn continuation and no `thread_id` for an agent to carry —
+the old return-value convention is gone. An agent that wants to consult a
+peer again simply calls `message_agent` again; the LLM keeps its own
+context in its conversation history.
 
 ## Failure modes (operator runbook)
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `_raise_infra` with `discord.Forbidden` from `create_anchored_thread` | Bot lacks `Create Public Threads` on the audit channel | Grant the permission |
-| Repeated `error: thread {id} not accessible` returned to LLM | Bot lacks `Read Message History`, OR threads being deleted aggressively | Check permissions; check if a moderation rule is auto-deleting threads |
-| Tool times out on `execute` for the target | Target agent's process down, slow, or its queue backed up | Check the target agent's runner logs |
-| Persona projection failures logged at WARN | Discord rate-limit or transient 5xx | Usually self-healing; investigate if persistent |
-| Unified channel keeps getting recreated | `CALFKIT_A2A_CHANNEL_NAME` differs between tools-process restarts, OR the channel keeps getting deleted | Pin the env var; check for moderation rules |
-
-## Cost model
-
-Per `private_chat` invocation, Discord REST calls (the cached unified-
-channel resolve is free after the first call; the discord.py client's
-in-memory channel cache typically saves the `get_channel`/`fetch_channel`
-lookup too once a channel has been seen):
-
-- **New thread**: 2 webhook sends + 1 thread anchor = **3 REST calls**.
-- **Continue thread**: 2 webhook sends + 1 history fetch + (0 or 1)
-  channel lookup = **3-4 REST calls**, depending on whether the thread
-  is in the bot's channel cache.
-
-History-fetch payload on continue is bounded by the target agent's
-`history_turns` (typically 10–20), so well under Discord's
-single-call 100-message ceiling.
-
-No new Kafka traffic — the wire surface to the agent runner is
-unchanged. The callee receives the projected history through the
-standard `message_history` channel that `Client.execute` already
-accepts.
+| A2A activity happens but nothing appears in the audit channel | Bot lacks `Create Public Threads` / `Send Messages in Threads` / `Manage Webhooks` on the channel | Grant the permissions; the render is best-effort, so the log names the failing post |
+| `⚠️ consult to X was rejected` in a thread | The peer is offline, or the consult is a self/cycle call | Bring the peer online; check the calling agent's `a2a` peer list |
+| `⚠️ X did not reply — the consult faulted` | The peer errored mid-consult | Check the peer agent's runner logs for the correlation id |
+| Unified channel keeps getting recreated | `CALFKIT_A2A_CHANNEL_NAME` differs between bridge restarts, or the channel keeps getting deleted | Pin the env var; check for moderation rules |
+| Audit-render WARNs in the bridge log | Discord rate-limit or transient 5xx | Usually self-healing; investigate if persistent |
 
 ## What's not in v1
 
-- A `list_threads(target=)` discovery tool. Callers remember their
-  own `thread_id`s.
-- Explicit thread close / pin / archive from the agent side.
-- Per-thread permission overwrites (Discord doesn't really support
-  this anyway — threads inherit from parent).
-- Validation that a passed `thread_id` belongs to this caller↔target
-  pair.
-- Token-budget-based history cap (we use turn-count via
-  `history_turns`, consistent with channel-history).
-- Migration tooling for old per-pair channels.
-- Multi-party A2A (always 1:1 caller↔target).
+- Cross-turn consult continuation (consults are stateless — a peer never
+  sees prior A2A turns replayed).
+- An agent-side `list_threads` / thread-management surface.
+- Multi-party consults (a `message_agent` call is always 1:1 caller↔peer;
+  nested consults fan out but each hop is still 1:1).
+- A per-call A2A timeout knob (the old `CALFKIT_TOOLS_TIMEOUT_SECONDS` is
+  removed; native `message_agent` has no per-call deadline). The bridge
+  bounds a parked human turn with a client-side `result()` timeout, not a
+  per-consult one.
+- A handoff-loop guard — calfkit has no cycle backstop for handoffs, so
+  keep the declared handoff graph acyclic (an A→B→A handoff ring loops).

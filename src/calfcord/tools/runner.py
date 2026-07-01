@@ -5,20 +5,18 @@ single calfkit :class:`Worker`. Standalone process — separate from the
 bridge and the agent runner — so the tool lifecycle is decoupled from
 both, matching calfkit's tool-as-deployment model.
 
-This deployment intentionally has no read access to ``agents/*.md``.
-Agent identities (display name, avatar, description, tools) arrive at
-the tool body via the phonebook the bridge places in ``deps`` on every
-invocation.
+This deployment intentionally has no read access to ``agents/*.md`` and needs
+none: the hosted tools are identity-agnostic, operating on the filesystem / shell
+/ web, never on agent personas.
 
 The runner is **resource-light by design**: it connects the process-wide
-:class:`calfkit.client.Client` (with a private reply topic distinct from the
-bridge's ``discord.outbox``, so target-agent replies route here and are NOT
-re-projected by the bridge's outbox poster) and exposes it as the worker-scoped
-``a2a_client`` resource. Any *tool-specific* live resource is owned by the tool
-itself via a node-scoped ``@resource`` bracket that calfkit builds only when
-that tool is hosted — notably ``private_chat`` opens its own Discord connection
-and enforces ``DISCORD_GUILD_ID`` there. So a host serving only non-A2A tools
-(e.g. ``terminal``/``read_file``) needs no Discord credentials.
+:class:`calfkit.client.Client` and hosts the tool nodes on a managed
+:class:`~calfkit.worker.Worker`. Tools are invoked natively — calfkit dispatches
+each ``Call`` to the hosting node and routes the ``Result`` back to the caller —
+so the process owns no reply inbox and no Discord credentials; a host serving
+only ``terminal`` / ``read_file`` is pure compute on the Kafka wire. Any
+*tool-specific* live resource is owned by the tool itself via a node-scoped
+``@resource`` bracket that calfkit builds only when that tool is hosted.
 
 Run::
 
@@ -41,14 +39,8 @@ from dotenv import load_dotenv
 from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.tools import TOOL_REGISTRY
-from calfcord.tools.private_chat import _RES_CLIENT as _A2A_CLIENT_RESOURCE
 
 logger = logging.getLogger(__name__)
-
-_REPLY_TOPIC = "calfkit.tools.reply"
-"""Named reply topic for the tools client. Must differ from the bridge's
-``discord.outbox`` so target-agent ReturnCalls route here, not to the
-bridge's outbox consumer (which would project them to Discord twice)."""
 
 _WORKSPACE_ENV = "CALFCORD_WORKSPACE_DIR"
 _TERMINAL_CWD_ENV = "TERMINAL_CWD"
@@ -78,11 +70,7 @@ def _configure_tool_workspace() -> Path:
         return Path(explicit)
 
     raw = os.environ.get(_WORKSPACE_ENV)
-    root = (
-        Path(raw).expanduser().resolve()
-        if raw
-        else (Path.cwd() / _DEFAULT_WORKSPACE).resolve()
-    )
+    root = Path(raw).expanduser().resolve() if raw else (Path.cwd() / _DEFAULT_WORKSPACE).resolve()
     root.mkdir(parents=True, exist_ok=True)
     os.environ[_TERMINAL_CWD_ENV] = str(root)
     logger.info(
@@ -92,18 +80,11 @@ def _configure_tool_workspace() -> Path:
     )
     return root
 
-# The worker-resource key under which the process-wide ``Client`` is exposed to
-# A2A tool bodies is imported from its owner/consumer (private_chat) so producer
-# and consumer cannot drift — the same single-source-of-truth posture as the
-# cross-process topic literals in ``calfcord.topics``. The runner already
-# imports private_chat (it is part of the composed TOOL_REGISTRY surface), so
-# this adds no new coupling across the (same-process) tools deployment.
-
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="calfkit-tools",
-        description="Run the calfkit tools process (private_chat etc.).",
+        description="Run the calfkit tools process.",
     )
     return parser.parse_args(argv)
 
@@ -126,10 +107,7 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
     nodes = list(registry.values())
     if not nodes:
         include_filter = os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>"
-        raise SystemExit(
-            "TOOL_REGISTRY is empty; nothing to host "
-            f"(CALFCORD_TOOLS_INCLUDE={include_filter})"
-        )
+        raise SystemExit(f"TOOL_REGISTRY is empty; nothing to host (CALFCORD_TOOLS_INCLUDE={include_filter})")
     return nodes
 
 
@@ -148,9 +126,7 @@ async def _run_worker(worker: Worker) -> None:
 async def _amain() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
-    async with Client.connect(
-        server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
-    ) as client:
+    async with Client.connect(server_urls, provisioning=PROVISIONING) as client:
         # No manual provisioning: this runner uses the managed Worker (started
         # via _run_worker below), whose _on_startup hook + the connect-time
         # pre-start hook auto-provision the worker's tool-node topics AND the
@@ -159,20 +135,15 @@ async def _amain() -> None:
         # started the broker — so no eager start is needed for the dispatcher.
         tool_nodes = _resolve_tool_nodes(TOOL_REGISTRY)
 
+        # A plain Worker hosting the tool nodes. Tools are invoked natively, so
+        # there is no Discord A2A client to expose as a worker resource and no
+        # named reply topic to claim — any per-tool live resource is built by the
+        # tool's own node-scoped ``@resource`` bracket when that tool is hosted.
         worker = Worker(client, tool_nodes)
-        # Expose the process-wide client as a worker-scoped resource so A2A tool
-        # bodies (private_chat) reach it via ``ctx.resources`` — calfkit merges
-        # worker resources under each node's own. The client's lifecycle is owned
-        # by the ``async with`` above; this only publishes the live reference.
-        # Any Discord connection a tool needs is built by that tool's own
-        # node-scoped ``@resource`` bracket, so nothing Discord-related is
-        # constructed here.
-        worker.resources[_A2A_CLIENT_RESOURCE] = client
         logger.info(
-            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s include_filter=%s",
+            "starting calfkit-tools worker tools=%s broker=%s include_filter=%s",
             sorted(TOOL_REGISTRY),
             server_urls,
-            _REPLY_TOPIC,
             os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>",
         )
         await _run_worker(worker)

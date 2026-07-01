@@ -26,7 +26,7 @@ Two reader depths, matching who needs secrets:
   generation and CLI pick-lists run on hosts where the referenced secrets
   may be unset, and a missing file just means "no MCP servers".
 * :func:`load_mcp_servers` — full parse + expansion into ready
-  :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` defs; only the runner (and
+  :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` defs; only the runner (and
   the wizard's optional start step) call this.
 """
 
@@ -39,7 +39,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters
 
 from calfcord.mcp.selector import is_valid_server_name
@@ -150,8 +150,8 @@ def list_server_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
     return _validated_entries(path)
 
 
-def load_mcp_servers(path: Path) -> dict[str, MCPToolbox]:
-    """Parse ``mcp.json`` into one ready :class:`MCPToolbox` per server.
+def load_mcp_servers(path: Path) -> dict[str, MCPToolboxNode]:
+    """Parse ``mcp.json`` into one ready :class:`MCPToolboxNode` per server.
 
     Expands ``$VAR`` references (this is the secrets-touching step), builds
     the transport params, and returns ``{name: toolbox}`` in declaration
@@ -163,13 +163,13 @@ def load_mcp_servers(path: Path) -> dict[str, MCPToolbox]:
         raise McpConfigError(
             f"MCP config not found at {path} — create it (or run 'calfcord mcp add') first"
         )
-    servers: dict[str, MCPToolbox] = {}
+    servers: dict[str, MCPToolboxNode] = {}
     for name, entry in _validated_entries(path):
-        servers[name] = MCPToolbox(name, connection_params=_build_params(name, entry))
+        servers[name] = MCPToolboxNode(name, connection_params=_build_params(name, entry))
     return servers
 
 
-def load_one_server(path: Path, name: str) -> MCPToolbox:
+def load_one_server(path: Path, name: str) -> MCPToolboxNode:
     """Parse ``mcp.json`` and build ONLY server ``name``'s toolbox.
 
     The whole file is still shape-validated (a broken sibling entry should
@@ -196,7 +196,7 @@ def load_one_server(path: Path, name: str) -> MCPToolbox:
         raise McpConfigError(
             f"no MCP server named {name!r} in {path}; configured: {configured}"
         )
-    return MCPToolbox(name, connection_params=_build_params(name, entry))
+    return MCPToolboxNode(name, connection_params=_build_params(name, entry))
 
 
 def _validated_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:

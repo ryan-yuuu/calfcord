@@ -21,16 +21,16 @@
 #       - changes to pyproject.toml or uv.lock → full image rebuild,
 #         because dependencies live in the baked /app/.venv from the
 #         Dockerfile's ``uv sync`` step.
-#   * agents/*.md hot-reload (agent service only). ./agents stays a
-#     read-WRITE bind mount from the base file — the agent rewrites its
-#     own frontmatter via md_writer.update_thinking_effort, and that
-#     write only reaches the host through the bind mount. A bind-mounted
-#     path cannot use the sync / sync+restart actions (see above), but
-#     the ``restart`` action performs no sync and IS allowed on a bind
-#     mount, so we use it: editing an agents/*.md restarts the agent,
-#     which re-parses every definition at startup (load_agents_dir in
-#     agents/runner.py caches them for the process lifetime, so a restart
-#     is what makes an edit take effect).
+#   * agents/*.md hot-reload (agent service only). ./agents is a bind mount
+#     from the base file, and a bind-mounted path cannot use the sync /
+#     sync+restart actions (see above); the ``restart`` action performs no
+#     sync and IS allowed on a bind mount, so we use it: editing an
+#     agents/*.md restarts the agent, which re-parses every definition at
+#     startup (load_agents_dir in agents/runner.py caches them for the
+#     process lifetime, so a restart is what makes an edit take effect).
+#     (The agent no longer rewrites its own frontmatter — since the
+#     calfkit-012 migration thinking-effort is a bridge-side override — so
+#     the reload is read-only from the container's side.)
 #
 # Caveats:
 #   * Compose ``watch`` requires v2.32+ for the ``sync+restart`` and
@@ -81,17 +81,6 @@ services:
         - action: rebuild
           path: ./uv.lock
 
-  router:
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./src
-          target: /app/src
-        - action: rebuild
-          path: ./pyproject.toml
-        - action: rebuild
-          path: ./uv.lock
-
   tools:
     develop:
       watch:
@@ -102,3 +91,8 @@ services:
           path: ./pyproject.toml
         - action: rebuild
           path: ./uv.lock
+
+  # MCP servers (the commented ``mcp-<server>`` template in the base file)
+  # are opt-in and per-server, so there is no default service to watch here.
+  # If you add one, copy the ``tools`` watch block above under its service
+  # name (same ./src sync+restart plus the pyproject.toml / uv.lock rebuilds).

@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 
 import pytest
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters
 
 from calfcord.mcp.config import (
@@ -69,7 +69,7 @@ class TestLoadStdio:
         servers = load_mcp_servers(path)
         assert list(servers) == ["demo"]
         toolbox = servers["demo"]
-        assert isinstance(toolbox, MCPToolbox)
+        assert isinstance(toolbox, MCPToolboxNode)
         assert toolbox.node_id == "demo"
         params = toolbox._connection_params
         assert isinstance(params, StdioServerParameters)
@@ -341,7 +341,7 @@ class TestLoadOneServer:
             {"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}},
         )
         toolbox = load_one_server(path, "b")
-        assert isinstance(toolbox, MCPToolbox)
+        assert isinstance(toolbox, MCPToolboxNode)
         assert toolbox.node_id == "b"
 
     def test_sibling_unset_var_does_not_fail_selected_server(

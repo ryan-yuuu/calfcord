@@ -14,14 +14,16 @@ fire-and-forget + swallow-Discord-errors discipline:
 
 * **Fire-and-forget.** :meth:`fire` is synchronous and returns immediately,
   scheduling the REST call on a detached :class:`asyncio.Task`. This is
-  deliberate: the bridge's steps consumer subscribes to the single-partition
-  ``agent.steps`` topic and processes hops *serially*, so an awaited
-  ``send_typing`` that hit discord.py's rate limiter (which ``asyncio.sleep``s
-  inside the request when ``max_ratelimit_timeout`` is unset — and the shared
-  REST client leaves it unset) would stall the live-progress UI for **every**
-  channel. Detaching the call keeps any rate-limit sleep off the consumer's
-  critical path. Detached tasks are held in a set (with a done-callback that
-  discards them) so they are not garbage-collected mid-flight.
+  deliberate: under the 0.12 caller surface the bridge's progress renderer
+  drains the run's ``stream()`` and processes hops *serially* on the bridge's
+  event loop (there are no consumers and no ``agent.steps`` topic), so an
+  awaited ``send_typing`` that hit discord.py's rate limiter (which
+  ``asyncio.sleep``s inside the request when ``max_ratelimit_timeout`` is
+  unset — and the shared REST client leaves it unset) would stall the
+  live-progress UI for **every** channel. Detaching the call keeps any
+  rate-limit sleep off the renderer's critical path. Detached tasks are held
+  in a set (with a done-callback that discards them) so they are not
+  garbage-collected mid-flight.
 * **Best-effort.** Typing is purely cosmetic; a failure must never propagate or
   crash a hop. Every error is logged and swallowed. ``CancelledError`` is a
   ``BaseException`` (not caught), so shutdown cancellation stays clean.
@@ -71,7 +73,7 @@ class TypingNotifier:
 
         Synchronous and non-blocking: the REST call runs on a detached task, so
         a rate-limit sleep can never stall the caller (notably the serial
-        ``agent.steps`` consumer). Safe to call from inside a ``try`` whose
+        progress renderer). Safe to call from inside a ``try`` whose
         ``except`` would otherwise misread a typing error as a handler failure —
         any error lives on the detached task, not the caller.
         """

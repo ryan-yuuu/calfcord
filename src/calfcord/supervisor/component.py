@@ -1,24 +1,25 @@
 """Generic component lifecycle: a named SINGLETON roster process clocking in/out.
 
-The router and the tools host are each a single declared Process Compose slot —
-unlike agents (of which a host runs many, and which can collide org-wide), a
-component is exactly one process per role per host. Their start/stop flow is
-therefore the same workspace-check-then-REST shape as
+The tools host is a single declared Process Compose slot — unlike agents (of
+which a host runs many, and which can collide org-wide), a component is exactly
+one process per role per host. Its start/stop flow is therefore the same
+workspace-check-then-REST shape as
 :mod:`calfcord.supervisor.roster`, *minus* the agent-only pieces:
 
 * **No broker-wide duplicate guard.** ``agent_start`` probes the org for a name
   already answering anywhere (two same-id agents double-reply / split-brain). A
   singleton component cannot duplicate on one host — there is one declared slot —
-  so a probe would be dead work. The role-specific veneer above (``router_start``)
-  owns any *cross-host* policy; this base stays minimal.
+  so a probe would be dead work. Any *cross-host* policy is owned by the CLI
+  dispatch that names the slot (:mod:`calfcord.cli.main`); this base stays minimal.
 * **No not-declared reload path.** Components are always pre-declared in the
   generated project (substrate + the fixed roster slots), so a
   ``start_process`` failure here is a genuine REST/infra fault, not "a brand-new
   agent authored after ``start``" — it is left to propagate (a loud raise) rather
   than mistranslated into the agent-only reload hint.
 
-This is the DRY base ``router start|stop`` and ``tools start|stop`` both build on,
-so the workspace-check + the REST call site live in exactly one place. Like the
+This is the DRY base ``tools start|stop`` builds on (it is now the only
+component role — the router was removed in the calfkit 0.12 migration), so the
+workspace-check + the REST call site live in exactly one place. Like the
 rest of :mod:`calfcord.supervisor`, it is import-light so it stays importable from
 the CLI entry point.
 """
@@ -89,7 +90,7 @@ async def component_start(
     **Start of an already-running component is a restart (behavior #2).** A
     component's node bakes its config at construction, so re-running ``start`` on a
     slot that is already ``Running`` locally is the useful idempotency: re-apply an
-    edited config (``router set`` etc.) by restarting in place (``POST
+    edited config (``tools set`` etc.) by restarting in place (``POST
     /process/restart``, print ``<name> restarted``) rather than a no-op ``POST
     start`` the supervisor would reject for a running slot. Otherwise start the
     named declared slot, print ``<name> online``, and return ``0``.
@@ -152,8 +153,8 @@ async def component_restart(
 ) -> int:
     """Reload the singleton component ``name`` after a config edit (``POST`` restart).
 
-    The node bakes its config at construction, so a restart is how a ``router
-    set`` / ``router edit`` (or a tools config change) takes effect on a
+    The node bakes its config at construction, so a restart is how a ``tools
+    set`` / ``tools edit`` (a tools config change) takes effect on a
     *running* singleton. Workspace check first (the not-running hint + return ``1``
     if the office isn't open); otherwise ``POST /process/restart/{name}``, print
     ``<name> restarted``, return ``0``.

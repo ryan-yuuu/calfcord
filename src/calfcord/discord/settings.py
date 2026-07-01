@@ -22,7 +22,12 @@ class DiscordSettings(BaseSettings):
     - ``DISCORD_GUILD_ID``          (optional)  Default guild for guild-scoped
                                                 slash command sync. ``None`` means
                                                 global sync (~1h propagation).
-    - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional) Seeds the first agent's channel on boot.
+    - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional, legacy) Auto-discovered by
+                                                ``calfcord init`` and written to
+                                                ``.env``, but no longer consumed —
+                                                per-agent channel subscriptions
+                                                were removed in the calfkit 0.12
+                                                migration.
     - ``DISCORD_TRANSCRIPT_DB_PATH`` (optional) Path to the bridge-local SQLite
                                                 transcript store. Must sit on a
                                                 persistent volume in production.
@@ -53,7 +58,8 @@ class DiscordSettings(BaseSettings):
     )
     default_channel_id: int | None = Field(
         default=None,
-        description="Default channel ID seeded as the first agent's channel subscription on boot.",
+        description="Default channel ID auto-discovered by `calfcord init` (legacy). No longer "
+        "consumed: per-agent channel subscriptions were removed in the calfkit 0.12 migration.",
     )
     owner_user_id: int | None = Field(
         default=None,

@@ -5,11 +5,12 @@ Two consumers share this mapper:
 * :class:`calfcord.agents.factory.AgentFactory` — bakes the
   declared ``thinking_effort`` from ``agents/<name>.md`` into the calfkit
   ``Agent`` constructor at agent boot (tier 2). This is the effort that
-  applies to ambient messages.
-* :class:`calfcord.bridge.ingress.BridgeIngress` — forwards
-  the same effort as a per-call override (tier 3) on slash invocations
-  and ``@<agent_id>`` mentions, so a runtime ``/thinking-effort`` change
-  takes effect on the next message without restarting the agent process.
+  governs runs the bridge doesn't intercept — native A2A peer consults and
+  handoffs.
+* :class:`calfcord.bridge.mention_handler.MentionHandler` — forwards
+  the same effort as a per-call override (tier 3) on ``@<agent_id>``
+  mentions, so a runtime ``/thinking-effort`` change takes effect on the
+  next message without restarting the agent process.
 
 The Anthropic ``budget_tokens`` ramp anchors its ``low`` / ``medium`` /
 ``high`` values (4000 / 10000 / 31999) to the same budgets Claude Code's
@@ -21,15 +22,16 @@ plan for sources. ``minimal`` uses Anthropic's documented floor of
 distinct values with ``xhigh`` and ``max`` saturating at ``high``. See
 the per-provider tables below for exact values.
 
-Ambient-message limitation (v1)
--------------------------------
-Per-call (tier 3) overrides only apply when the bridge can identify the
-target agent ahead of time. That's true for slash invocations and
-``@<agent_id>`` mentions (both produce ``WireMessage.slash_target``).
-Plain ambient channel messages flow without a per-call override and fall
-back to the tier-2 effort baked in at agent boot — which means an agent
-needs a restart to pick up a ``/thinking-effort`` change for its ambient
-path.
+Per-call override scope
+-----------------------
+Per-call (tier 3) overrides apply to every message the bridge answers.
+The bridge only answers ``@<agent_id>`` mentions (ambient, un-mentioned
+channel messages are no longer answered under the 0.12 caller surface), so
+it always knows the target agent ahead of time and applies the current
+override when one is set (no override → the run uses the boot-baked tier-2).
+Runs the bridge doesn't intercept — native A2A peer consults and handoffs —
+fall back to the tier-2 effort baked in at agent boot, so those pick up a
+``/thinking-effort`` change only after the agent process restarts.
 """
 
 from __future__ import annotations
@@ -121,3 +123,34 @@ def build_model_settings(
     raise ValueError(
         f"unknown provider {provider!r}; expected 'anthropic', 'openai', or 'openai-codex'"
     )
+
+
+def build_model_settings_union(effort: ThinkingEffort | None) -> dict[str, Any] | None:
+    """Build a **provider-blind** ``model_settings`` override for ``effort``.
+
+    The bridge no longer knows an agent's provider (the registry that carried it
+    is gone), and calfkit forwards ``model_settings`` raw with provider-specific
+    keys. So the C11 per-call override emits BOTH keys at once —
+    ``anthropic_thinking`` (a dict) and ``openai_reasoning_effort`` (a string):
+    whichever model the target agent runs reads only its own key (pydantic-ai
+    model clients ``.get()`` their key and ignore the foreign one), so one union
+    dict is correct regardless of provider. See R-A1.
+
+    Returns ``None`` for ``effort is None`` (no override) and ``{}`` for
+    ``"none"`` (explicit no-override), mirroring :func:`build_model_settings`.
+    """
+    if effort is None:
+        return None
+    if effort == "none":
+        return {}
+    settings: dict[str, Any] = {}
+    budget = _ANTHROPIC_BUDGET_TOKENS.get(effort)
+    if budget is not None:
+        settings["anthropic_thinking"] = {"type": "enabled", "budget_tokens": budget}
+    reasoning = _OPENAI_REASONING_EFFORT.get(effort)
+    if reasoning is not None:
+        settings["openai_reasoning_effort"] = reasoning
+    if not settings:
+        logger.warning("unknown effort tier %r; degrading to no override", effort)
+        return {}
+    return settings

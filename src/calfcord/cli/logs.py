@@ -68,10 +68,7 @@ def _known_names(agents_dir: Path) -> list[str]:
     """
     # ``_RESERVED_PROCESS_NAMES`` is a frozenset; pin a stable, readable order
     # (substrate then the fixed components) rather than its hash order.
-    ordered_reserved = [
-        name for name in ("broker", "bridge", "tools", "router")
-        if name in _RESERVED_PROCESS_NAMES
-    ]
+    ordered_reserved = [name for name in ("broker", "bridge", "tools") if name in _RESERVED_PROCESS_NAMES]
     # MCP slots come from the same no-secrets mcp.json seam the compose
     # generator uses. Tolerant on purpose: a broken mcp.json must not take the
     # logs command down with it ("always show what the broker said before it
@@ -143,7 +140,7 @@ def _follow(
                     # rotated-smaller file is not re-streamed from a stale offset.
                     offsets[name] = len(data)
                     continue
-                fresh = data[offsets[name]:].decode("utf-8", errors="replace")
+                fresh = data[offsets[name] :].decode("utf-8", errors="replace")
                 offsets[name] = len(data)
                 label = label_for(name)
                 for line in fresh.splitlines():
@@ -182,19 +179,13 @@ def tail(
     """
     log_dir = home / "state" / "logs"
     if not log_dir.is_dir():
-        out(
-            f"error: no logs under {log_dir} — the workspace may not be running "
-            "(start it with: calfcord start)."
-        )
+        out(f"error: no logs under {log_dir} — the workspace may not be running (start it with: calfcord start).")
         return 1
 
     names = _known_names(agents_dir)
 
     if component is not None and component not in names:
-        out(
-            f"error: unknown component {component!r}; choose one of: "
-            f"{', '.join(names)} (or omit it to tail all)."
-        )
+        out(f"error: unknown component {component!r}; choose one of: {', '.join(names)} (or omit it to tail all).")
         return 1
 
     selected = [component] if component is not None else names
@@ -202,9 +193,7 @@ def tail(
 
     if follow:
         targets = [(name, Path(_log_location(str(home), name))) for name in selected]
-        return _follow(
-            targets, labeled=labeled, out=out, sleep=sleep, poll_interval=poll_interval
-        )
+        return _follow(targets, labeled=labeled, out=out, sleep=sleep, poll_interval=poll_interval)
 
     # One-shot: dump each selected file's current contents. An explicitly named
     # component with no file yet is informational (the slot never ran); in the

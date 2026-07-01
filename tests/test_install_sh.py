@@ -4,13 +4,13 @@
 pieces of its logic are easy to get subtly wrong and impossible to unit-test
 from Python directly, so we drive the *actual shell* here:
 
-* ``seed_agents`` — must give the native install a stable agents/state home and
+* ``seed_agents`` — must give the native install a stable agents home and
   drop in the starter agent on first install, **without** clobbering an
   operator who removed the starter or added their own agents.
 * the generated ``calfcord`` shim's ``_default_env`` block — must default
-  ``CALFKIT_AGENTS_DIR`` / ``CALFKIT_STATE_DIR`` under the install home and
-  ``CALFCORD_WORKSPACE_DIR`` to the *launch* directory, while letting an
-  operator override any of them via the shell env or ``config/.env``.
+  ``CALFKIT_AGENTS_DIR`` under the install home and ``CALFCORD_WORKSPACE_DIR``
+  to the *launch* directory, while letting an operator override either of them
+  via the shell env or ``config/.env``.
 
 The installer guards ``main "$@"`` so the file can be *sourced* (rather than
 executed, which would hit the network), letting these tests call individual
@@ -31,12 +31,11 @@ INSTALL_SH = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
 
 _UNSET = "__UNSET__"
 
-# A stand-in for ``uv`` that ignores its args and reports the three dir env vars
+# A stand-in for ``uv`` that ignores its args and reports the two dir env vars
 # the shim is responsible for defaulting. ``${VAR-__UNSET__}`` (no colon)
 # distinguishes "shim did not export it" (unset) from "exported as empty".
 _FAKE_UV = """#!/usr/bin/env bash
 printf 'CALFKIT_AGENTS_DIR=%s\\n' "${CALFKIT_AGENTS_DIR-__UNSET__}"
-printf 'CALFKIT_STATE_DIR=%s\\n' "${CALFKIT_STATE_DIR-__UNSET__}"
 printf 'CALFCORD_WORKSPACE_DIR=%s\\n' "${CALFCORD_WORKSPACE_DIR-__UNSET__}"
 """
 
@@ -49,9 +48,7 @@ def _source_and_run(
     if extra_env:
         env.update(extra_env)
     script = f'source "{INSTALL_SH}"\n{snippet}'
-    return subprocess.run(
-        ["bash", "-c", script], env=env, capture_output=True, text=True, check=False
-    )
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
 
 
 def _make_source_dest(tmp: Path, *, with_assistant: bool = True) -> Path:
@@ -69,9 +66,7 @@ def _install_shims(home: Path) -> None:
     assert (home / "shims" / "calfcord").exists()
 
 
-def _run_shim(
-    home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str, str] | None = None
-) -> dict[str, str]:
+def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str, str] | None = None) -> dict[str, str]:
     """Invoke the generated ``calfcord`` shim and capture the env the fake uv saw."""
     (home / "bin").mkdir(parents=True, exist_ok=True)
     uv = home / "bin" / "uv"
@@ -86,7 +81,11 @@ def _run_shim(
         env.update(extra_env)
     result = subprocess.run(
         [str(home / "shims" / "calfcord"), "calfkit-agent"],
-        cwd=str(cwd), env=env, capture_output=True, text=True, check=False,
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, f"shim failed: {result.stderr}"
     parsed: dict[str, str] = {}
@@ -98,15 +97,15 @@ def _run_shim(
 
 # --------------------------------------------------------------- seed_agents ---
 
-def test_seed_agents_seeds_starter_and_state_dir(tmp_path: Path) -> None:
+
+def test_seed_agents_seeds_starter_and_agents_dir(tmp_path: Path) -> None:
     home = tmp_path / "home"
     dest = _make_source_dest(tmp_path)
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents" / "assistant.md").read_text().startswith("---")
-    # seed_agents pre-creates exactly the dir the runtime's CALFKIT_STATE_DIR
-    # points at (.../state/agents), not just the parent .../state.
-    assert (home / "state" / "agents").is_dir()
+    # seed_agents pre-creates the runtime's CALFKIT_AGENTS_DIR (.../agents).
+    assert (home / "agents").is_dir()
 
 
 def test_seed_agents_does_not_clobber_existing_agents(tmp_path: Path) -> None:
@@ -128,11 +127,11 @@ def test_seed_agents_is_noop_when_source_lacks_starter(tmp_path: Path) -> None:
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents").is_dir()
-    assert (home / "state" / "agents").is_dir()
     assert list((home / "agents").iterdir()) == []
 
 
 # ---------------------------------------------------------- shim _default_env ---
+
 
 def test_shim_defaults_to_home_dirs_and_launch_cwd(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -142,7 +141,6 @@ def test_shim_defaults_to_home_dirs_and_launch_cwd(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch)
     assert seen["CALFKIT_AGENTS_DIR"] == str(home / "agents")
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
     # Workspace follows the directory the command was launched from.
     assert os.path.realpath(seen["CALFCORD_WORKSPACE_DIR"]) == os.path.realpath(str(launch))
 
@@ -183,7 +181,7 @@ def test_shim_defers_to_nonempty_dotenv_agents_dir(tmp_path: Path) -> None:
 
     The shim must not export its own default over a real pinned value (it leaves
     it for ``uv run --env-file``), so the fake uv — which ignores --env-file —
-    sees it unset. The unrelated CALFKIT_STATE_DIR still gets the home default.
+    sees it unset.
     """
     home = tmp_path / "home"
     _install_shims(home)
@@ -192,7 +190,6 @@ def test_shim_defers_to_nonempty_dotenv_agents_dir(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch, env_file="CALFKIT_AGENTS_DIR=/from/dotenv\n")
     assert seen["CALFKIT_AGENTS_DIR"] == _UNSET
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
 def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:
@@ -203,8 +200,6 @@ def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch, extra_env={"CALFKIT_AGENTS_DIR": "/preset/agents"})
     assert seen["CALFKIT_AGENTS_DIR"] == "/preset/agents"
-    # The vars the operator did not preset still get their install-home default.
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
 # --------------------------------------------------------- shim subcommands ---
@@ -242,13 +237,6 @@ def test_shim_dispatches_init_to_calfcord_cli(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["init"]) == "calfcord-cli init"
 
 
-def test_shim_dispatches_router_setup_to_calfcord_cli(tmp_path: Path) -> None:
-    """``calfcord router setup`` must exec ``calfcord-cli router setup`` unchanged."""
-    home = tmp_path / "home"
-    _install_shims(home)
-    assert _run_shim_argv(home, ["router", "setup"]) == "calfcord-cli router setup"
-
-
 def test_shim_dispatches_agent_to_calfcord_cli(tmp_path: Path) -> None:
     """``calfcord agent tools`` must exec ``calfcord-cli agent tools`` unchanged."""
     home = tmp_path / "home"
@@ -269,7 +257,6 @@ def test_shim_run_maps_services_to_runner_scripts(tmp_path: Path) -> None:
     _install_shims(home)
     assert _run_shim_argv(home, ["run", "bridge"]) == "calfkit-bridge"
     assert _run_shim_argv(home, ["run", "agent", "scribe"]) == "calfkit-agent scribe"
-    assert _run_shim_argv(home, ["run", "router"]) == "calfkit-router"
     assert _run_shim_argv(home, ["run", "tools"]) == "calfkit-tools"
 
 
@@ -300,9 +287,7 @@ def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
         (["deploy", "systemd"], "calfcord-cli deploy systemd"),
     ],
 )
-def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
-    tmp_path: Path, argv: list[str], expected: str
-) -> None:
+def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(tmp_path: Path, argv: list[str], expected: str) -> None:
     """The new lifecycle verbs (logs/explain/deploy) route to calfcord-cli, args intact."""
     home = tmp_path / "home"
     _install_shims(home)
@@ -321,9 +306,7 @@ def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(
         (["doctor"], "calfcord-cli doctor"),
     ],
 )
-def test_shim_existing_verbs_still_route_after_lifecycle_verbs(
-    tmp_path: Path, argv: list[str], expected: str
-) -> None:
+def test_shim_existing_verbs_still_route_after_lifecycle_verbs(tmp_path: Path, argv: list[str], expected: str) -> None:
     """Existing verbs keep their routing once the lifecycle verbs are in the dispatch."""
     home = tmp_path / "home"
     _install_shims(home)
@@ -342,7 +325,10 @@ def _run_shim_proc(home: Path, argv: list[str]) -> subprocess.CompletedProcess[s
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
         [str(home / "shims" / "calfcord"), *argv],
-        env=env, capture_output=True, text=True, check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -443,9 +429,7 @@ def test_activate_version_records_outgoing_as_previous(tmp_path: Path) -> None:
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
 
-    result = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    result = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert result.returncode == 0, result.stderr
 
     assert (home / "current").resolve() == bbb.resolve()
@@ -504,7 +488,7 @@ def test_gc_versions_keeps_current_and_previous_prunes_a_third(tmp_path: Path) -
     bbb = _make_version(home, "bbb")
     ccc = _make_version(home, "ccc")
 
-    result = _source_and_run('gc_versions ccc bbb', home=home)
+    result = _source_and_run("gc_versions ccc bbb", home=home)
     assert result.returncode == 0, result.stderr
 
     # Current + previous kept; the unrelated third is pruned.
@@ -518,7 +502,7 @@ def test_gc_versions_prunes_nothing_with_only_cur_and_prev(tmp_path: Path) -> No
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
 
-    result = _source_and_run('gc_versions bbb aaa', home=home)
+    result = _source_and_run("gc_versions bbb aaa", home=home)
     assert result.returncode == 0, result.stderr
 
     assert aaa.is_dir()
@@ -534,7 +518,10 @@ def _run_self(home: Path, argv: list[str]) -> subprocess.CompletedProcess:
     env = {**os.environ, "CALFCORD_HOME": str(home)}
     return subprocess.run(
         [str(home / "shims" / "calfcord-self"), *argv],
-        env=env, capture_output=True, text=True, check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -544,9 +531,7 @@ def test_self_rollback_flips_current_and_swaps_version_fields(tmp_path: Path) ->
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
     # Reach the post-update state (current=B, prev=A) via the real activate path.
-    prep = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    prep = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert prep.returncode == 0, prep.stderr
 
     result = _run_self(home, ["rollback"])
@@ -563,9 +548,7 @@ def test_self_rollback_refuses_when_previous_lacks_ok_marker(tmp_path: Path) -> 
     home = tmp_path / "home"
     aaa = _make_version(home, "aaa")
     bbb = _make_version(home, "bbb")
-    prep = _source_and_run(
-        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
-    )
+    prep = _source_and_run(f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home)
     assert prep.returncode == 0, prep.stderr
     # Remove the predecessor's build marker so it's no longer a valid target.
     (aaa / ".calfcord-ok").unlink()
@@ -688,9 +671,7 @@ def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
     pwned = home / "PWNED"
     # A repo/ref value an attacker might try to smuggle into a sourced file.
     (home / "version").write_text(
-        "CALFCORD_COMMIT=aaa\n"
-        f'CALFCORD_REPO=$(touch {pwned})`touch {pwned}`\n'
-        "CALFCORD_REF=main\n"
+        f"CALFCORD_COMMIT=aaa\nCALFCORD_REPO=$(touch {pwned})`touch {pwned}`\nCALFCORD_REF=main\n"
     )
 
     result = _run_self(home, ["version"])

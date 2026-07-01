@@ -12,11 +12,11 @@ Composition over discovery
 --------------------------
 
 The surface is an **explicit list** (:data:`ALL_TOOLS`), not a filesystem
-walk. Most tools are vendored from the ``calfkit-tools`` package (hermes
-shell/files/web/todo + an SSRF-safe ``web_fetch``); ``private_chat`` is the
-one first-party tool (agent-to-agent A2A over Discord, which the vendored
-package cannot provide). The hermes nodes are imported by name rather than
-spread from ``HERMES_NODES`` on purpose: this list is the security boundary
+walk. Every tool is vendored from the ``calfkit-tools`` package (hermes
+shell/files/web/todo + an SSRF-safe ``web_fetch``); agent-to-agent messaging is
+no longer a tool at all — the calfkit 0.12 migration moved A2A onto calfkit's
+native handoff/messaging dispatch. The hermes nodes are imported by name rather
+than spread from ``HERMES_NODES`` on purpose: this list is the security boundary
 — tools like ``terminal`` and ``execute_code`` run arbitrary code on the
 tools host, so what agents can reach must be a reviewable, local decision,
 never an artifact of which package version happens to be installed. The
@@ -47,7 +47,6 @@ from calfkit_tools.hermes.node import (
 from calfkit_tools.web_fetch.node import web_fetch
 
 from calfcord.tools.deploy_filters import apply_deploy_filters
-from calfcord.tools.private_chat import private_chat_tool
 
 ALL_TOOLS: tuple[ToolNodeDef, ...] = (
     # hermes (vendored ``calfkit-tools``) — shell + process management,
@@ -64,9 +63,6 @@ ALL_TOOLS: tuple[ToolNodeDef, ...] = (
     web_extract,
     # SSRF-safe URL fetch (vendored, separate ``calfkit-tools`` subpackage).
     web_fetch,
-    # First-party: agent-to-agent private chat over Discord. Not vendorable
-    # — needs calfcord's A2A client + Discord guild plumbing.
-    private_chat_tool,
 )
 """The complete, auditable tool surface this deployment can expose."""
 

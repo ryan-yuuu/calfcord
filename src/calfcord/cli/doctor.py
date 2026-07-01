@@ -28,20 +28,13 @@ from typing import TYPE_CHECKING, Literal, get_args
 from calfcord.cli._envfile import read_env
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     import httpx
 
-    from calfcord.agents.definition import AgentDefinition
     from calfcord.health.heartbeat import Heartbeat
-    from calfcord.supervisor.client import ProcessComposeClient
 
-    # A live-roster probe: hand it ``server_urls`` and it returns the
-    # AgentDefinitions of every agent answering the control-plane discovery ping
-    # across the org. Injected so tests script the deep probe without a real broker
-    # (production adapts :func:`calfcord.control_plane.probe.probe_live_roster`).
-    ProbeFn = Callable[[str], Awaitable[list[AgentDefinition]]]
     # A heartbeat reader, injected so the daemon-liveness check needs no real beat
     # file (production is :func:`calfcord.health.heartbeat.read_beat`).
     ReadBeatFn = Callable[[Path, str], Heartbeat | None]
@@ -202,15 +195,15 @@ def _check_agents(agents_dir: Path) -> Result:
 # The five checks above are STATIC — they answer "will the processes boot?" from
 # config alone, with no running daemon. When the workspace IS open (the substrate
 # started detached via ``calfcord start``) doctor adds a RUNTIME section that proves
-# the live org actually functions end-to-end — the "green light that lies" the
-# design (§12.1) exists to catch: a fresh-but-silent bridge, a broker that no agent
-# can reach, a process up locally that never joined the org. The section is the only
-# place that can see those, so it carries its own checks (§4.4 / §13.3).
+# the daemon is actually alive — the "green light that lies" the design (§12.1)
+# exists to catch: a fresh-but-silent bridge whose heartbeat has gone stale.
 #
 # It runs ONLY when the daemon is up, detected via the bridge heartbeat (§12.1: the
 # bridge beat — written on Discord ``on_ready`` — is the authoritative "daemon up"
-# signal; broker TCP is a fast-fail precondition, not the liveness signal). A closed
-# workspace is a valid read-only state, never a failure: doctor says so and stops.
+# signal). A closed workspace is a valid read-only state, never a failure: doctor
+# says so and stops. Roster liveness and local↔org drift moved onto the native mesh
+# in the calfkit 0.12 migration (the bespoke control-plane probe was deleted), so
+# the runtime section reports daemon liveness plus a pointer to ``calfcord status``.
 
 # The bridge heartbeat names the daemon; its presence gates the whole runtime section.
 _DAEMON_COMPONENT = "bridge"
@@ -236,63 +229,19 @@ def _check_daemon_alive(beat: Heartbeat, *, now: datetime) -> Result:
     )
 
 
-def _check_deep_probe(roster: list[AgentDefinition]) -> Result:
-    """Whether the control-plane deep probe proves the org answers (§4.4 / §12.1).
-
-    A non-empty roster proves broker + bridge + agents function together end-to-end
-    (the ping↔response loop only completes if the broker serves and agents are
-    live), and names the registered agents. An EMPTY roster is the "green but no
-    replies" symptom — the daemon is up but no agent is online — surfaced as a
-    ``warn`` with the fix (bring one online), never a fail (an empty roster is a
-    valid, recoverable state).
-    """
-    if roster:
-        names = ", ".join(sorted(defn.agent_id for defn in roster))
-        return Result("deep probe", "ok", f"{len(roster)} registered agent(s): {names}")
-    return Result(
-        "deep probe",
-        "warn",
-        "bridge answers but no agents are registered — bring one online: `calfcord agent start <name>`",
-    )
-
-
-def _check_drift(*, running_local: set[str], registered: set[str]) -> Result:
-    """Whether agents running locally match those registered org-wide (§4.4 / §3.4).
-
-    Drift = a process Process Compose reports ``Running`` on THIS host that does not
-    answer the discovery probe: up but never joined the org, or wedged. Surfaced as
-    a ``warn`` naming the drifting agents with the fix (restart them), never a fail
-    — drift is a recoverable operational state, and the inverse (registered but not
-    local) is expected multi-host and is NOT drift.
-    """
-    drifted = sorted(running_local - registered)
-    if not drifted:
-        return Result("drift", "ok", "running agents match the registered roster")
-    return Result(
-        "drift",
-        "warn",
-        "process up but not registered: "
-        + ", ".join(drifted)
-        + " — restart: `calfcord agent restart <name>`",
-    )
-
-
 async def _gather_runtime(
     *,
     home: Path,
-    server_urls: str,
     now: datetime,
     read_beat_fn: ReadBeatFn,
-    probe_fn: ProbeFn,
-    pc_client: ProcessComposeClient,
 ) -> list[Result]:
     """Build the runtime-section results, or ``[]`` when the daemon is down.
 
     Daemon-down (no bridge beat) is a valid read-only state, so it yields no runtime
     results — :func:`run` prints the closed-workspace hint instead. When the daemon
-    IS up the deep probe and drift checks degrade to a ``warn`` (never a crash, never
-    a fail) if the broker is unreachable for the probe — the bridge being alive is
-    already established by the heartbeat, so a probe miss is a soft signal.
+    IS up the section reports its liveness and points the operator at the native
+    mesh view for the live roster; the deep control-plane probe and the local↔org
+    drift check were removed in the calfkit 0.12 migration.
     """
     beat = read_beat_fn(home, _DAEMON_COMPONENT)
     if beat is None:
@@ -300,51 +249,22 @@ async def _gather_runtime(
 
     results = [_check_daemon_alive(beat, now=now)]
 
-    # The deep probe (and the drift check that consumes its result) talks to the
-    # broker; a stale daemon means the bridge timer stopped, so probing further
-    # would only add noise to an already-decided "restart the workspace" verdict.
+    # A stale daemon (the bridge timer stopped) already decides a "restart the
+    # workspace" verdict, so there is nothing further worth reporting.
     if results[0].status == "fail":
         return results
 
-    try:
-        roster = await probe_fn(server_urls)
-    except Exception:
-        # The bridge is alive (beat is fresh) but the deep probe could not reach the
-        # broker. Degrade to a warn — never crash a read-only doctor, never fail the
-        # run on a soft signal — and skip drift (no registered set to compare).
-        results.append(
-            Result(
-                "deep probe",
-                "warn",
-                "couldn't reach the broker to probe the live roster; try again shortly",
-            )
+    # Roster liveness rides the native mesh now (the deep control-plane probe was
+    # removed in the calfkit 0.12 migration). The bridge heartbeat above already
+    # proves the daemon is up; point the operator at the mesh view for who's online
+    # and the local↔org drift this section used to compute.
+    results.append(
+        Result(
+            "roster",
+            "ok",
+            "agent roster is read from the mesh — check who's online with `calfcord status`",
         )
-        return results
-
-    results.append(_check_deep_probe(roster))
-
-    # Drift reuses the roster module's physical-view extractor (DRY): the same
-    # wire-shape tolerance and reserved-name filtering ``agent ps`` uses.
-    from calfcord.supervisor.roster import _running_roster_names
-
-    # The supervisor (Process Compose) is a SEPARATE failure domain from the
-    # (already-proven-alive) bridge: its REST surface can miss (down / wrong port)
-    # while the bridge beats. That read must degrade like the deep probe above —
-    # never crash a read-only doctor on a drift read it cannot complete.
-    try:
-        running_local = _running_roster_names(await pc_client.list_processes())
-    except Exception:
-        results.append(
-            Result(
-                "drift",
-                "warn",
-                "couldn't reach the supervisor to read the local roster; try again shortly",
-            )
-        )
-        return results
-
-    registered = {defn.agent_id for defn in roster}
-    results.append(_check_drift(running_local=running_local, registered=registered))
+    )
     return results
 
 
@@ -355,23 +275,19 @@ def run(
     offline: bool = False,
     client_factory: Callable[[], httpx.Client] | None = None,
     home: Path | None = None,
-    server_urls: str | None = None,
     now: datetime | None = None,
     read_beat_fn: ReadBeatFn | None = None,
-    probe_fn: ProbeFn | None = None,
-    pc_client: ProcessComposeClient | None = None,
 ) -> int:
     """Run every preflight check, print the report, and return the exit code (1 iff any check fails).
 
     The five STATIC checks (config / broker / token / app id / agents) always run.
     When ``home`` is supplied (a native install) doctor additionally runs the
-    RUNTIME section — daemon liveness, a deep control-plane probe, and local↔org
-    drift — but only if the daemon is actually up (a fresh bridge heartbeat exists);
-    a closed workspace prints a next-step hint and adds no findings. doctor stays
-    **read-only**: the runtime seams (``read_beat_fn`` / ``probe_fn`` / ``pc_client``
-    / ``now``) are injected so tests need no real broker, supervisor, or beat file,
-    and default in production to the heartbeat reader, the control-plane probe, and a
-    per-home Process Compose client.
+    RUNTIME section — daemon liveness plus a pointer to the native mesh roster view
+    — but only if the daemon is actually up (a fresh bridge heartbeat exists); a
+    closed workspace prints a next-step hint and adds no findings. doctor stays
+    **read-only**: the runtime seams (``read_beat_fn`` / ``now``) are injected so
+    tests need no real beat file, and default in production to the heartbeat reader
+    and the system clock.
     """
     results = [
         _check_config(env_path),
@@ -382,11 +298,8 @@ def run(
     ]
     runtime_results, daemon_up = _runtime_section(
         home=home,
-        server_urls=server_urls,
         now=now,
         read_beat_fn=read_beat_fn,
-        probe_fn=probe_fn,
-        pc_client=pc_client,
     )
 
     all_results = results + runtime_results
@@ -418,11 +331,8 @@ def run(
 def _runtime_section(
     *,
     home: Path | None,
-    server_urls: str | None,
     now: datetime | None,
     read_beat_fn: ReadBeatFn | None,
-    probe_fn: ProbeFn | None,
-    pc_client: ProcessComposeClient | None,
 ) -> tuple[list[Result], bool]:
     """Resolve the runtime seams and gather the section; ``([], False)`` when N/A.
 
@@ -437,32 +347,16 @@ def _runtime_section(
 
     if now is None:
         now = datetime.now(UTC)
-    if server_urls is None:
-        server_urls = os.environ.get("CALF_HOST_URL", "").strip() or "localhost"
     if read_beat_fn is None:
         from calfcord.health.heartbeat import read_beat
 
         read_beat_fn = read_beat
-    if probe_fn is None:
-        from calfcord.control_plane.probe import probe_live_roster
-
-        async def probe_fn(urls: str) -> list[AgentDefinition]:  # type: ignore[misc]
-            return await probe_live_roster(urls)
-
-    if pc_client is None:
-        from calfcord.supervisor.client import ProcessComposeClient
-        from calfcord.supervisor.lifecycle import pc_port_for
-
-        pc_client = ProcessComposeClient(port=pc_port_for(home))
 
     results = asyncio.run(
         _gather_runtime(
             home=home,
-            server_urls=server_urls,
             now=now,
             read_beat_fn=read_beat_fn,
-            probe_fn=probe_fn,
-            pc_client=pc_client,
         )
     )
     return results, bool(results)

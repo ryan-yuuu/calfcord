@@ -1,25 +1,23 @@
 """Shared retry-with-feedback policy for Discord-rejected LLM replies.
 
-Two callers post LLM-generated text to Discord and both want the same
-"if Discord rejects it, tell the LLM and let it adapt" loop:
+Several bridge callers post LLM-generated text to Discord and all want the
+same "if Discord rejects it, tell the LLM and let it adapt" loop, e.g.:
 
-* :mod:`calfcord.bridge.outbox` — channel replies, posted
-  fire-and-forget via ``client.send`` on retry.
-* :mod:`calfcord.tools.private_chat` — A2A audit
-  projections, posted synchronously inside the caller's
-  ``execute`` RPC on retry.
+* :mod:`calfcord.bridge.reply_poster` — user-facing replies to a
+  channel message.
+* :mod:`calfcord.bridge.a2a_project` — agent-to-agent audit
+  projections into a Discord thread.
 
-The two orchestration mechanisms cannot share their transport (one is
-async-via-Kafka-consumer, the other is await-inside-RPC), but they DO
-share their **policy** and their **content construction**: the retry
-budget, the error classification, the ``<system-reminder>`` wording,
-the ``message_history`` shape, and the chunk-split fallback. This
-module is the single source of truth for those.
+Their orchestration paths differ, but they DO share their **policy** and
+their **content construction**: the retry budget, the error
+classification, the ``<system-reminder>`` wording, the ``message_history``
+shape, and the chunk-split fallback. This module is the single source of
+truth for those.
 
-Process boundary: this module sits beneath both consumers and depends
+Process boundary: this module sits beneath its callers and depends
 only on stdlib, ``discord``, and ``pydantic_ai`` message types — no
-project imports — so both ``bridge`` and ``tools`` can import it
-without inducing a cycle.
+project imports — so the ``bridge`` modules can import it without
+inducing a cycle.
 """
 
 from __future__ import annotations
@@ -56,12 +54,14 @@ CHUNK_SAFE_SIZE: Final[int] = 1990
 content limit is 2000; the 10-char safety buffer absorbs the occasional
 emoji / encoding surprise that tips a 1999-char string over the limit."""
 
-NON_AGENT_FIXABLE_STATUSES: Final[frozenset[int]] = frozenset({
-    401,   # unauthorized — bot token invalid
-    403,   # forbidden — missing Manage Webhooks / View Channel / etc.
-    404,   # not found — channel or webhook deleted
-    429,   # rate limited — discord.py already retried internally
-})
+NON_AGENT_FIXABLE_STATUSES: Final[frozenset[int]] = frozenset(
+    {
+        401,  # unauthorized — bot token invalid
+        403,  # forbidden — missing Manage Webhooks / View Channel / etc.
+        404,  # not found — channel or webhook deleted
+        429,  # rate limited — discord.py already retried internally
+    }
+)
 """Discord HTTP statuses where retrying the agent with a revised reply
 cannot possibly succeed. These are infrastructure / permission errors
 that require operator action, not agent content adjustment. Callers

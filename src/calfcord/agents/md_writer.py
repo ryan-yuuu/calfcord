@@ -19,20 +19,18 @@ Validate-before-write
 ---------------------
 Validation runs on a synthetic :class:`AgentDefinition` built from the
 mutated metadata before any disk write. If validation fails the existing
-file is untouched. This is what keeps the on-disk file and the
-:class:`AgentRegistry`'s in-memory entry from diverging when an operator
-has hand-edited the ``.md`` between boot and the slash invocation: either
-both succeed or neither does. The function returns the validated
-in-memory definition rather than re-parsing from disk, so a post-write
-read error (transient OS, concurrent edit) can't break the invariant
-either.
+file is untouched. This is what keeps the on-disk file and any validated
+in-memory :class:`AgentDefinition` a CLI caller has cached from diverging
+when an operator has hand-edited the ``.md`` between boot and the slash
+invocation: either both succeed or neither does. The function returns the
+validated in-memory definition rather than re-parsing from disk, so a
+post-write read error (transient OS, concurrent edit) can't break the
+invariant either.
 
-Atomicity on disk uses the same tmp-file + fsync + ``os.replace`` +
-parent-dir fsync sequence as
-:class:`calfcord.agents.state.AgentStateStore`. Mirrored here
-rather than abstracted because a one-call-site abstraction would add
-indirection without saving meaningful lines — extract a shared helper if
-a third atomic-write call site appears.
+Atomicity on disk uses a tmp-file + fsync + ``os.replace`` + parent-dir
+fsync sequence. This is now the only such atomic-write call site; it is
+kept inline rather than abstracted — extract a shared helper if a second
+atomic-write call site appears.
 
 Frontmatter round-trip caveat: ``python-frontmatter`` ultimately dumps
 through PyYAML's ``safe_dump``, which alphabetizes keys (PyYAML defaults
@@ -76,8 +74,8 @@ def _validate_and_write(md_path: Path, post: frontmatter.Post) -> AgentDefinitio
 
     Returns the validated in-memory definition rather than re-parsing from disk:
     the bytes just written are what produced it, and a re-parse exception here
-    would leave a caller's registry copy stale relative to disk — the very desync
-    the validate-before-write design prevents.
+    would leave a caller's cached in-memory definition stale relative to disk —
+    the very desync the validate-before-write design prevents.
     """
     candidate_metadata = dict(post.metadata)
     candidate_metadata["system_prompt"] = post.content.strip()
@@ -102,8 +100,8 @@ def _update_fields(md_path: Path, updates: dict[str, object]) -> AgentDefinition
     the file, overlay ``updates`` onto its metadata, build and validate a
     synthetic :class:`AgentDefinition` from the mutated metadata **in
     memory**, and only then atomically rewrite the file. A bad value raises
-    before any disk write, so the on-disk file (and any registry copy a
-    caller holds) is left untouched — the desync-prevention invariant the
+    before any disk write, so the on-disk file (and any in-memory definition a
+    caller has cached) is left untouched — the desync-prevention invariant the
     module docstring describes. The returned definition is the validated
     in-memory object, not a re-parse, so a transient post-write read error
     can't break that invariant either.
@@ -143,9 +141,9 @@ def update_system_prompt(md_path: Path, body: str) -> AgentDefinition:
     :class:`AgentDefinition` from the mutated state **in memory** (the
     ``system_prompt`` validator rejects an empty/whitespace-only body, so a bad
     value raises before any disk write), then atomically rewrite. The on-disk
-    file is left untouched on any failure, keeping a caller's registry copy from
-    diverging from disk — the same desync-prevention invariant the rest of the
-    module upholds. The returned definition is the validated in-memory object,
+    file is left untouched on any failure, keeping a caller's cached in-memory
+    definition from diverging from disk — the same desync-prevention invariant
+    the rest of the module upholds. The returned definition is the validated in-memory object,
     not a re-parse, so a transient post-write read error can't break it either.
 
     Raises:

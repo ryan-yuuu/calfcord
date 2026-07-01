@@ -1,12 +1,14 @@
 """Gated REAL-broker test for the hand-rolled provision-before-bare-start path.
 
-After the Tier-3 lifecycle unification, only the control-plane **probe**
-(:func:`calfcord.control_plane.probe.probe_live_roster`) still wires a raw
-``broker.subscriber(...)`` and then a BARE ``await client.broker.start()`` — the
-agents and bridge runners now use the managed ``Worker`` lifecycle (``run()`` /
-embedded ``start()``), which declares their node topics for them. On a broker
-that does NOT auto-create topics (e.g. Tansu) a bare start blocks forever if any
-subscribed topic does not yet exist, so the bare-start path must provision its
+After the calfkit 0.12 migration removed the bespoke control plane, no in-tree
+runner hand-rolls a raw ``broker.subscriber(...)`` + BARE ``await
+client.broker.start()`` anymore — the agents/tools runners and the bridge all use
+the managed ``Worker`` lifecycle (``run()`` / embedded ``start()``), which
+declares their node topics for them.
+:func:`calfcord._provisioning.provision_and_start_broker` survives as a
+general-purpose helper for any future caller that DOES hand-roll that path. On a
+broker that does NOT auto-create topics (e.g. Tansu) a bare start blocks forever
+if any subscribed topic does not yet exist, so that path must provision its
 topics first.
 
 calfkit 0.6.0 changed the provisioning surface this rests on:
@@ -16,9 +18,9 @@ calfkit 0.6.0 changed the provisioning surface this rests on:
   "a bare start hangs on the missing reply topic" canary is now FALSE; but
 * a **Worker's node topics** are auto-provisioned only on the MANAGED run
   surfaces (``Worker.run()`` / ``start()`` / ``async with``), NOT on the
-  hand-rolled ``register_handlers()`` + bare ``broker.start()`` path — so the
-  hand-rolled runners must still provision their node topics themselves
-  (``topics_for_nodes`` over their node list) before the bare start.
+  hand-rolled ``register_handlers()`` + bare ``broker.start()`` path — so a
+  hand-rolled caller must still provision its node topics itself
+  (``topics_for_nodes`` over its node list) before the bare start.
 
 These tests pin both halves against a live no-auto-create broker:
 

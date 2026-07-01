@@ -77,7 +77,7 @@ Two layers are worth keeping straight:
   `calfcord start` brings it up (detached, health-gated); `calfcord stop` closes
   it. `start` brings up **only** the substrate — nothing else runs that you
   didn't ask for.
-- **The roster** — your agents, the tools host, and the ambient router. These
+- **The roster** — your agents, the tools host, and any MCP servers. These
   are teammates that clock into the running office on demand:
   `calfcord agent start <name>`, `calfcord tools start`, and so on.
 
@@ -152,42 +152,29 @@ e.g. `calfcord logs -f bridge`.
 
 ### Sanity-check with `doctor`
 
-`calfcord doctor` is the deliberate, authoritative health check. It runs the
+`calfcord doctor` is the deliberate, authoritative preflight. It runs the
 **static config checks** — config file, broker reachability, the Discord bot
 token + application id, and that your agents parse — and, **when the workspace is
-running**, adds **runtime checks**: that the daemon is alive (not a zombie), that
-the bridge is connected to Discord, an end-to-end control-plane probe that
-confirms the broker and bridge actually function together, and a drift check
-(agents running vs. agents registered). The exit code is non-zero on a hard
-failure (a ✗) and 0 on warnings, so it gates scripts cleanly.
+running**, adds a **daemon-liveness check**: that the bridge heartbeat is fresh
+(a live daemon, not a wedged zombie), which — because the bridge only beats once
+it is connected to Discord — also confirms the gateway is up. The exit code is
+non-zero on a hard failure (a ✗) and 0 on warnings, so it gates scripts cleanly.
 
 ```bash
 calfcord doctor             # add --offline to skip the live Discord token check
 ```
 
-Reach for `doctor` when `status` looks green but nothing is replying — the deep
-probe is the only check that can see that case. `status` is the cheap, glanceable
-view; `doctor` is the thorough one.
+For *who is actually online right now*, use `calfcord status` / `calfcord agent
+ps` — the roster is read from calfkit's live agent mesh (the old end-to-end
+control-plane probe was removed in the calfkit 0.12 migration). `status` is the
+cheap, glanceable view; `doctor` is the thorough config + daemon check.
 
-### Enable ambient routing (optional)
+### Talking to an agent
 
-By default an agent answers only when you `@mention` it; messages **without** an
-`@mention` simply go unanswered (nothing errors). To have an agent also answer
-those ambient messages, configure the router, then bring it online as a roster
-member:
-
-```bash
-calfcord router edit         # pick the router's provider + model
-calfcord router start        # bring the router online
-```
-
-`router edit` defaults to **your agent's provider** plus a fast/cheap model (the
-router runs one LLM call per ambient message) and ensures that provider's
-credentials. `router start` refuses to launch until the router is configured. The
-router's config is editable anytime — `calfcord router show` to inspect it,
-`calfcord router set` to change it non-interactively. Skip routing entirely and
-`@mentions` still work. See [`ambient-routing.md`](ambient-routing.md) for how
-routing decides who answers.
+An agent answers when you `@mention` it (`@assistant hello`); a message with no
+`@mention` goes unanswered by design — there is no ambient router. A mentioned
+agent can also consult or hand off to a peer, which the bridge projects to an
+audit channel (see [`a2a-threads.md`](a2a-threads.md)).
 
 ## Where your agents live
 

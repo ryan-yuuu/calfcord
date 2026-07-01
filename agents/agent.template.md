@@ -23,7 +23,7 @@
 # round-trips.
 
 # ----------------------------------------------------------------------------
-# Identity (all three required; immutable after first deploy — the slash
+# Identity (both required; immutable after first deploy — the slash
 # command and channel routing both index by these).
 # ----------------------------------------------------------------------------
 
@@ -35,22 +35,8 @@
 # slashes are wired in code but disabled.
 name: example
 
-# What Discord users see as the bot's name on this agent's webhook
-# replies. 1-80 chars. "Clyde" is rejected by Discord webhooks.
-display_name: Example
-
 # Short blurb shown in Discord's slash-command picker. 1-100 chars.
 description: An example agent demonstrating the .md frontmatter schema.
-
-# ----------------------------------------------------------------------------
-# Appearance (optional)
-# ----------------------------------------------------------------------------
-
-# Avatar URL for the persona webhook reply. Omit (or set to `null`) to
-# get the per-agent DiceBear default
-# (https://api.dicebear.com/9.x/glass/png?seed=<name>). Set to any
-# public image URL to override.
-# avatar_url: https://example.com/my-avatar.png
 
 # ----------------------------------------------------------------------------
 # LLM (optional — see CALFKIT_AGENT_DEFAULT_PROVIDER / _DEFAULT_MODEL
@@ -92,8 +78,7 @@ model: claude-sonnet-4-5
 # builtin). See docs/mcp-tools.md.
 # ----------------------------------------------------------------------------
 
-# Available builtins (vendored from calfkit-tools, plus first-party private_chat):
-#   - private_chat   one-on-one A2A conversation with another agent
+# Available builtins (vendored from calfkit-tools):
 #   - terminal       run a shell command on the calfkit-tools host
 #   - process        manage background processes started by terminal
 #   - read_file      view a file's contents (with line numbers)
@@ -154,17 +139,6 @@ tools: []
 thinking_effort: medium
 
 # ----------------------------------------------------------------------------
-# Conversation history (optional)
-# ----------------------------------------------------------------------------
-
-# Number of recent channel messages the bridge fetches and projects into
-# the model's message_history on every invocation. Integer 0-100 (100 is
-# Discord's per-call REST cap); default 30.
-#   - 0 disables history fetching entirely (no Discord REST call; the agent
-#     runs with only the system prompt + the triggering message).
-history_turns: 30
-
-# ----------------------------------------------------------------------------
 # Memory (optional)
 # ----------------------------------------------------------------------------
 
@@ -178,22 +152,6 @@ history_turns: 30
 # otherwise. Omitting `tools:` grants all builtins and satisfies this.
 # Default false.
 memory: false
-
-# ----------------------------------------------------------------------------
-# Reserved fields — DO NOT set on a normal assistant agent
-# ----------------------------------------------------------------------------
-#
-# role: "assistant" | "router". Defaults to "assistant", which is what every
-# user-authored agent should be. "router" is reserved for the singleton
-# built-in routing agent, constructed in code from a bundled router.md
-# (not loaded from this directory). Wiring a second router trips a registry
-# boot error. Leave this unset. (Routers declare NO tools at all, so no
-# builtin names ever appear on a router.)
-#
-# publish_topic: reserved for routers (declares the Kafka topic their
-# structured output is published to). The validator REJECTS an assistant
-# that sets publish_topic, so leave it unset — assistants emit their reply
-# to the inbound frame's callback_topic automatically.
 ---
 
 The body of this .md file (everything after the closing `---` of the frontmatter) 

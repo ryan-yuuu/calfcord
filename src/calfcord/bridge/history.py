@@ -1,24 +1,28 @@
-"""Channel-history fetching and agent-POV projection for agent invocations.
+"""Channel-history fetching and canonical author-stamped history building.
 
-Three public exports:
+The bridge fetches recent Discord history and builds **one** canonical,
+author-stamped ``message_history`` per invocation; calfkit's agent-POV
+projection (``nodes/_projection.py``) re-roles it per viewer at read time
+(C8/R-A3). Per-author re-roling no longer happens here. Public surface:
 
-* :class:`HistoryRecord` — JSON-serializable snapshot of one Discord message.
-  Built by the fetcher at fetch time so identity resolution (webhook
-  display_name → ``agent_id``) happens once and downstream consumers
-  (router, fan-out, synthesized-in, assistants) don't need
-  :class:`~calfcord.bridge.registry.AgentRegistry` access.
+* :class:`HistoryRecord` — snapshot of one Discord message, with ``is_agent``
+  set when the message came from one of the bridge's own persona webhooks
+  (resolved by ``webhook_id`` against the persona sender's id set, not by
+  name and not via a registry — R-A3).
 * :class:`ChannelHistoryFetcher` — thin wrapper around
-  :meth:`discord.abc.Messageable.history` with a per-channel TTL cache
-  and graceful Discord-error degradation. Lives in the bridge process;
-  the other deployments (router, agents, tools) never call this — they
-  receive history through Kafka envelopes.
-* :func:`project_history` — pure function that turns a list of
-  :class:`HistoryRecord` into a ``list[ModelMessage]`` projected from a
-  specific agent's POV (self → :class:`ModelResponse`; others →
-  :class:`ModelRequest` with ``<author>`` prefix in
-  :class:`UserPromptPart` content).
+  :meth:`discord.abc.Messageable.history` with a per-channel TTL cache and
+  graceful Discord-error degradation. Lives in the bridge process.
+* :func:`build_message_history` — pure function turning a
+  :class:`HistoryRecord` list into a name-stamped ``list[ModelMessage]``
+  (agent turns → :class:`ModelResponse` with ``name=``; humans →
+  :class:`UserPromptPart` with ``name=``), splicing persisted tool-call
+  replay deltas before an agent's final-text response. calfkit strips the
+  ``name`` before any provider sees it.
+* :class:`DiscordHistoryProvider` — wires the fetcher + transcript store +
+  builder into the ``MentionRequest`` → ``list[ModelMessage]`` seam the
+  bridge's ``MentionHandler`` calls.
 
-**Why projection deliberately does NOT merge adjacent same-role**
+**Why building deliberately does NOT merge adjacent same-role**
 messages: pydantic-ai's :func:`_clean_message_history`
 (``calfkit/_vendor/pydantic_ai/_agent_graph.py:1386``) auto-merges
 adjacent same-type messages with compatible instructions before the
@@ -74,46 +78,39 @@ already include it (forum threads keep their starter in-thread).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import discord
 from calfkit._vendor.pydantic_ai.messages import (
+    BaseToolReturnPart,
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     TextPart,
     UserPromptPart,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from calfcord.agents.identifier import AGENT_ID_PATTERN
+from calfcord.bridge.transcripts import TranscriptStoreLike
 
 if TYPE_CHECKING:
-    # ``AgentRegistry`` is needed only as a type hint. Keep it behind
-    # ``TYPE_CHECKING`` (paired with the ``from __future__ import
-    # annotations`` above, which keeps the hint a string at runtime) so
-    # this low-level module — loaded early in the ``bridge`` package init
-    # via ``bridge.gateway`` — does not hard-depend on ``bridge.registry``
-    # (which pulls in ``router.definition``). There is no hard runtime
-    # cycle today; the historical one ran through the now-deleted
-    # ``_compat.invoke`` shim. The lazy hint keeps the decoupling and
-    # keeps ``history.py`` importable standalone.
-    from calfcord.bridge.registry import AgentRegistry
+    from calfcord.bridge.mention_handler import MentionRequest
 
 logger = logging.getLogger(__name__)
 
 
 _DEFAULT_CACHE_TTL_SECONDS = 2.0
-"""Default TTL for the per-channel fetch cache. Tuned to absorb router
-fan-out bursts — a single ambient message fans out into N synthesized
-slash invocations, all hitting :meth:`ChannelHistoryFetcher.fetch`
-within a few hundred milliseconds with the same
-``(source_channel_id, before_message_id, limit)`` key. 2 seconds is
+"""Default TTL for the per-channel fetch cache. Tuned to coalesce bursts of
+fetches that hit :meth:`ChannelHistoryFetcher.fetch` with the same
+``(source_channel_id, before_message_id, limit)`` key within a few hundred
+milliseconds (e.g. overlapping turns in the same channel). 2 seconds is
 long enough to coalesce the burst without serving meaningfully stale
 data on the next user message."""
 
@@ -188,99 +185,40 @@ def is_clear_marker(msg: Any, bot_user_id: int | None) -> bool:
     )
 
 
-class HistoryRecord(BaseModel):
-    """JSON-serializable snapshot of one Discord message.
+@dataclass(frozen=True, slots=True)
+class HistoryRecord:
+    """Snapshot of one Discord message, built by :class:`ChannelHistoryFetcher`.
 
-    Built once by :class:`ChannelHistoryFetcher` at fetch time. Downstream
-    consumers (router, fan-out, synthesized-in, assistant invocations)
-    receive these on ``deps["history"]`` or via
-    :class:`BridgeIngress.handle`'s ``prefetched_history`` kwarg, and
-    pass them straight to :func:`project_history` without needing
-    registry access of their own.
-
-    Fields are kept minimal: only what :func:`project_history` reads.
-    Adding attachments/embeds support is a v2+ concern (token budget
-    matters more than richer content at v1).
+    In-process only (it is no longer serialized over ``deps`` — the wire/router
+    paths that carried it are deleted in the 0.12 migration), so a plain frozen
+    dataclass. Fields are the minimum :func:`build_message_history` reads.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     message_id: int
-    """Discord message id. Carried for potential future use (session
-    boundary detection, edit/delete event correlation) — currently not
-    consumed by :func:`project_history`."""
+    """Discord message id. The replay-hydration join key against the transcript
+    store; also reserved for edit/delete correlation."""
 
     created_at: datetime
-    """Original message creation time. tz-aware (Discord returns UTC).
-    Same forward-compat rationale as ``message_id``."""
+    """Original message creation time. tz-aware (Discord returns UTC)."""
 
     content: str
     """Raw message content. May be empty (system messages, attachment-only
-    posts); :func:`project_history` filters those out."""
+    posts); :func:`build_message_history` filters those out."""
 
-    author_display_name: str = Field(min_length=1)
-    """User-visible name to use in the ``<author>`` prefix when projecting
-    to a non-self ``UserPromptPart``. Derived from ``message.author.display_name``
-    (falling back to ``message.author.name``) at fetch time. Required to
-    be non-empty so the projected ``<...>`` prefix is never bare brackets."""
+    author_display_name: str
+    """User-visible name, stamped as :attr:`ModelResponse.name` (agent turns)
+    or :attr:`UserPromptPart.name` (human turns). Under C8 a persona webhook's
+    username *is* the agent's name. Derived from ``message.author.display_name``
+    (falling back to ``message.author.name``) at fetch time."""
 
-    author_agent_id: str | None = None
-    """Set when the author is a webhook whose ``display_name`` matches a
-    registered agent (resolved against :class:`AgentRegistry` at fetch
-    time). ``None`` for humans, third-party bots, and webhook posts from
-    removed/renamed personas that no longer match any registered agent.
-    :func:`project_history` uses this to decide self vs. other.
-
-    Validated via :meth:`_validate_author_agent_id` (full-string match
-    against :data:`AGENT_ID_PATTERN`) so a non-None value is constrained
-    to the same character set / length :class:`AgentDefinition.agent_id`
-    enforces. This prevents a malformed record from accidentally
-    satisfying ``record.author_agent_id == self_agent_id`` if a future
-    code path constructs records bypassing the fetcher (which only
-    assigns from a validated registry entry).
-
-    The reason we use a custom validator instead of :data:`AgentId` is
-    that pydantic's ``StringConstraints(pattern=...)`` performs partial
-    (search-style) matching, not full-string match. A value like
-    ``"aaaUPPERCASE"`` slips through because the substring ``"aaa"``
-    matches the pattern anywhere in the string. Mirroring
-    :meth:`AgentDefinition._validate_agent_id`'s use of
-    :meth:`re.Pattern.fullmatch` is the right enforcement."""
-
-    @field_validator("author_agent_id")
-    @classmethod
-    def _validate_author_agent_id(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        if not AGENT_ID_PATTERN.fullmatch(v):
-            raise ValueError(
-                f"author_agent_id must match [a-z0-9_-]{{1,32}}, got {v!r}"
-            )
-        return v
-
-
-def history_from_deps(raw: object) -> tuple[HistoryRecord, ...]:
-    """Parse channel-history records out of a raw ``deps["history"]`` value.
-
-    Symmetric with :func:`~calfcord.agents.phonebook.phonebook_from_deps`:
-    the producer packs ``[r.model_dump(mode="json") for r in records]`` on
-    ``deps`` and the synthesized-in consumer validates them back into typed
-    records on read. An empty list is valid ("no history"). Returns a
-    ``tuple`` (not a ``list``) to match the immutable shape consumers pass
-    as :meth:`BridgeIngress.handle`'s ``prefetched_history``.
-
-    Raises:
-        ValueError: the value isn't a list (covers a non-iterable or
-            ``None`` payload).
-        pydantic.ValidationError: any record fails :class:`HistoryRecord`
-            validation. Callers catch both — ``(ValueError, ValidationError)``
-            — and wrap them in a fail-closed contract error, since the
-            bridge / fan-out is expected to forward well-formed history on
-            every publish.
-    """
-    if not isinstance(raw, list):
-        raise ValueError(f"history must be a list, got {type(raw).__name__}")
-    return tuple(HistoryRecord.model_validate(item) for item in raw)
+    is_agent: bool = False
+    """``True`` when the message came from one of the bridge's own persona
+    webhooks — i.e. ``webhook_id`` is in the persona sender's id set (R-A3).
+    ``False`` for humans, third-party webhooks, and the bot's own non-webhook
+    posts. Decides :class:`ModelResponse` (agent) vs :class:`ModelRequest`
+    (human) in :func:`build_message_history`. Liveness-independent: a
+    renamed/offline agent's past turns are never mis-attributed (the check is
+    by ``webhook_id``, not by name and not against a live roster)."""
 
 
 class ChannelHistoryFetcher:
@@ -322,13 +260,17 @@ class ChannelHistoryFetcher:
     def __init__(
         self,
         discord_client: discord.Client,
-        registry: AgentRegistry,
+        owns_webhook: Callable[[int], bool],
         *,
         cache_ttl_seconds: float = _DEFAULT_CACHE_TTL_SECONDS,
         cache_max_entries: int = _DEFAULT_CACHE_MAX_ENTRIES,
     ) -> None:
         self._client = discord_client
-        self._registry = registry
+        # Predicate ``webhook_id -> is one of the bridge's persona webhooks``
+        # (R-A3). Sourced from the persona sender's id set (which grows as it
+        # discovers/creates per-channel webhooks), so it is liveness-independent
+        # and replaces the deleted registry ``by_display_name`` lookup.
+        self._owns_webhook = owns_webhook
         self._cache_ttl = cache_ttl_seconds
         self._cache_max = cache_max_entries
         self._cache: OrderedDict[
@@ -339,10 +281,9 @@ class ChannelHistoryFetcher:
         # ``(source_channel_id, before_message_id, limit)`` key share a
         # single Discord REST call. Without this, the TTL cache only
         # coalesces *sequential* bursts (first caller's result is cached
-        # by the time the second arrives) — but a router fan-out
-        # triggers N concurrent fetches simultaneously, and all N would
-        # otherwise race past the empty cache and each hit Discord
-        # independently. The single-flight map ensures one fetch
+        # by the time the second arrives) — but a simultaneous burst of
+        # same-key fetches would each race past the empty cache and hit
+        # Discord independently. The single-flight map ensures one fetch
         # serves all N callers.
         self._in_flight: dict[
             tuple[int, int, int], asyncio.Future[list[HistoryRecord]]
@@ -730,24 +671,24 @@ class ChannelHistoryFetcher:
     def _to_record(self, msg: Any) -> HistoryRecord:
         """Translate one ``discord.Message`` into a :class:`HistoryRecord`.
 
-        Identity resolution (webhook display_name → ``agent_id``) mirrors
-        :meth:`MessageNormalizer._build_author` so live invocations and
-        replayed history use the same self-recognition primitive.
+        A message is an *agent* turn iff it came from one of the bridge's own
+        persona webhooks — ``webhook_id`` present and in the persona sender's id
+        set (R-A3). This is liveness-independent and matches by id (not by the
+        deleted registry's display-name lookup), so a renamed or offline agent's
+        past turns are still correctly attributed and a third-party webhook is
+        never read as an agent.
         """
         author_display_name = (
             getattr(msg.author, "display_name", None) or msg.author.name
         )
-        author_agent_id: str | None = None
-        if msg.webhook_id is not None:
-            spec = self._registry.by_display_name(author_display_name)
-            if spec is not None:
-                author_agent_id = spec.agent_id
+        webhook_id = getattr(msg, "webhook_id", None)
+        is_agent = webhook_id is not None and self._owns_webhook(webhook_id)
         return HistoryRecord(
             message_id=msg.id,
             created_at=msg.created_at,
             content=msg.content,
             author_display_name=author_display_name,
-            author_agent_id=author_agent_id,
+            is_agent=is_agent,
         )
 
     def _cache_and_return(
@@ -787,109 +728,221 @@ class ChannelHistoryFetcher:
         )
 
 
-def project_history(
+def build_message_history(
     records: Sequence[HistoryRecord],
-    self_agent_id: str | None,
     *,
     hydration: Mapping[int, list[ModelMessage]] | None = None,
 ) -> list[ModelMessage]:
-    """Project records into a ``list[ModelMessage]`` from one agent's POV.
+    """Build ONE canonical, author-stamped ``message_history`` from ``records``.
+
+    POV-agnostic (C8/R-A3): every agent turn becomes a :class:`ModelResponse`
+    stamped ``name=<agent name>`` and every human turn a :class:`ModelRequest`
+    whose :class:`UserPromptPart` is stamped ``name=<display name>``. calfkit's
+    agent-POV projection (``nodes/_projection.py``) re-roles this per viewer at
+    read time — the running agent's own turns stay responses, every other author
+    is surfaced as an attributed user turn — and strips the ``name`` before any
+    provider sees it. So the bridge builds the history once, independent of which
+    agent it is sent to (no app-side per-viewer projection).
 
     Args:
-        records: Oldest-first :class:`HistoryRecord` list, typically
-            from :meth:`ChannelHistoryFetcher.fetch` or
-            ``deps["history"]``.
-        self_agent_id: The agent the resulting history will be sent to.
-            Records whose ``author_agent_id`` matches become
-            :class:`ModelResponse` (the agent's own prior turns); all
-            others become :class:`ModelRequest` with the speaker's
-            display_name prefixed into the
-            :class:`UserPromptPart` content as ``<name>``. Passing
-            ``None`` (used by the router) treats everything as
-            ``ModelRequest`` — the router is an outside observer with
-            no prior turns in the channel.
-        hydration: Optional tool-call replay map, ``message_id → the
-            stored structured delta`` for that reply. When a SELF record
-            (one projected to a :class:`ModelResponse`) has its
-            ``message_id`` in this map, the mapped delta messages are
-            spliced in IMMEDIATELY BEFORE that record's
-            :class:`ModelResponse`, so the agent re-sees the tool
-            calls/returns it made on that prior turn rather than only its
-            final text. ``None`` (the default — and the only value the
-            router and ambient paths ever pass) reproduces the
-            pre-replay behavior exactly: nothing is spliced and the
-            output is byte-identical to passing no map. Pure: the caller
-            pre-fetches and truncates the deltas; this function never
-            touches the DB. See
-            ``docs/design/step-transcripts-and-live-streaming-plan.md``
-            §4, §7.6.
+        records: Oldest-first :class:`HistoryRecord` list from
+            :meth:`ChannelHistoryFetcher.fetch`.
+        hydration: Optional tool-call replay map, ``message_id -> the stored,
+            name-stamped structured delta`` for that agent reply. When an agent
+            record's ``message_id`` is in the map, the delta is spliced in
+            IMMEDIATELY BEFORE that record's final-text :class:`ModelResponse`,
+            so the agent re-sees the tool calls/returns it made on that turn. The
+            delta's responses must already carry the agent's ``name`` (see
+            :meth:`DiscordHistoryProvider._build_replay_hydration`) so calfkit
+            attributes them to the right viewer. ``None`` (default) reproduces
+            the no-replay output exactly. Pure: never touches the DB.
 
     Returns:
-        A list suitable for ``Client.send(message_history=...)``.
-        May be empty.
+        A list suitable for ``start(message_history=...)``. May be empty.
 
-    **What this function deliberately does NOT do**:
-
-    * It does *not* merge consecutive same-role entries. Pydantic-ai's
-      :func:`_clean_message_history`
-      (``calfkit/_vendor/pydantic_ai/_agent_graph.py:1386``) handles
-      that automatically before any provider mapper sees the list. Our
-      constructed messages satisfy its merge conditions
-      (``instructions=None``; no provider metadata).
-    * It does *not* peel a trailing :class:`ModelRequest` to merge with
-      the staged user_prompt — same reason; pydantic-ai's clean
-      merges the trailing history ``ModelRequest`` with the staged
-      one automatically.
-
-    **What it DOES do**:
-
-    * Drops records with empty/whitespace-only ``content``. Anthropic's
-      mapper would silently emit zero-block user messages (guarded out
-      at ``models/anthropic.py:740``) and OpenAI would waste tokens —
-      cleaner to filter here.
-    * Drops leading :class:`ModelResponse` entries iteratively.
-      Pydantic-ai's clean merges but never drops, and Anthropic
-      rejects requests whose first message is ``assistant``. If the
-      oldest fetched record is the agent's own webhook reply, we'd
-      open with a ``ModelResponse`` and Anthropic would 400.
+    Deliberately does NOT merge consecutive same-role entries — pydantic-ai's
+    ``_clean_message_history`` (``_agent_graph.py:1386``) does that before any
+    provider mapper runs (our messages satisfy its merge conditions). It DOES
+    drop empty/whitespace-only content (Anthropic skips zero-block user messages;
+    OpenAI wastes tokens) and DOES drop leading :class:`ModelResponse` entries
+    iteratively — calfkit's projection keeps a self-authored leading response as
+    a response, and Anthropic rejects a history whose first message is
+    ``assistant``.
     """
     out: list[ModelMessage] = []
     seen_request = False
     for r in records:
         if not r.content.strip():
             continue
-        is_self = (
-            self_agent_id is not None and r.author_agent_id == self_agent_id
-        )
-        if is_self:
-            # Tool-call replay: when this self-record's reply has a
-            # persisted structured delta, splice it in just BEFORE the
-            # record's final-text ``ModelResponse`` so the agent re-sees
-            # the tool calls/returns it made on that turn. ``hydration``
-            # is always ``None`` on the router / ambient (observer) path
-            # — those never self-classify, so the splice can't fire there
-            # — and when ``None`` here the output is byte-identical to the
-            # pre-replay behavior.
-            #
-            # Gate on ``seen_request``: a self reply with no preceding user
-            # ``ModelRequest`` is a *leading* ``ModelResponse`` that the
-            # trailing drop below removes (Anthropic rejects an
-            # assistant-first history). Splicing its delta there would leave
-            # an orphaned tool-return ``ModelRequest`` (a ``tool_result``
-            # with no matching ``tool_use``) at the head once the leading
-            # ``ModelResponse`` is popped → provider 400. So only replay for
-            # turns that survive the leading drop.
+        if r.is_agent:
+            # Tool-call replay: splice this agent reply's persisted delta just
+            # BEFORE its final-text response so the agent re-sees the tool
+            # calls/returns it made. Gate on ``seen_request``: an agent reply
+            # with no preceding user ``ModelRequest`` is a *leading* response
+            # the trailing drop below removes — splicing its delta there would
+            # orphan a tool-return ``ModelRequest`` (a ``tool_result`` with no
+            # matching ``tool_use``) at the head → provider 400.
             if hydration is not None and seen_request:
                 replay = hydration.get(r.message_id)
                 if replay:
                     out.extend(replay)
-            out.append(ModelResponse(parts=[TextPart(content=r.content)]))
-        else:
-            prefix = f"<{r.author_display_name}> "
             out.append(
-                ModelRequest(parts=[UserPromptPart(content=prefix + r.content)])
+                ModelResponse(parts=[TextPart(content=r.content)], name=r.author_display_name)
+            )
+        else:
+            out.append(
+                ModelRequest(parts=[UserPromptPart(content=r.content, name=r.author_display_name)])
             )
             seen_request = True
     while out and isinstance(out[0], ModelResponse):
         out.pop(0)
     return out
+
+
+REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000
+"""Per-tool-return character cap applied to replayed (hydrated) tool returns
+before they re-enter an agent's ``message_history``.
+
+Deliberately distinct from — and much larger than — the 2000-char Discord
+display budget: this bounds the *LLM context* a replayed turn re-injects, not a
+*display*. Reusing a display-sized cap would lobotomize the tool context the
+model reasons over on the next turn (the whole point of replay). Only oversized
+individual tool returns are trimmed; per R-A5 there is no global history ceiling,
+and this per-return cap is the one backstop kept (it bounds the realistic
+envelope blow-up — a giant tool output spliced back in)."""
+
+_REPLAY_TRUNCATION_MARKER: Final[str] = "\n…(truncated)"
+"""Visible marker appended to a tool return truncated to
+:data:`REPLAY_TOOL_RETURN_MAX_CHARS` so the model can tell the content was cut
+rather than genuinely short."""
+
+
+def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Cap oversized tool-return payloads in a replayed delta.
+
+    Walks ``messages`` (the deserialized structured slice of a prior turn) and,
+    for every :class:`BaseToolReturnPart` whose model-facing string
+    (``part.model_response_str()``) exceeds :data:`REPLAY_TOOL_RETURN_MAX_CHARS`,
+    replaces the part with an immutable copy whose ``content`` is the truncated
+    string plus :data:`_REPLAY_TRUNCATION_MARKER`. Non-mutating: rebuilds only
+    the parts/messages that need it and returns a NEW list, so callers can splice
+    it without aliasing the input.
+    """
+    out: list[ModelMessage] = []
+    for msg in messages:
+        new_parts: list[Any] | None = None
+        parts = msg.parts
+        for idx, part in enumerate(parts):
+            if isinstance(part, BaseToolReturnPart):
+                rendered = part.model_response_str()
+                if len(rendered) > REPLAY_TOOL_RETURN_MAX_CHARS:
+                    if new_parts is None:
+                        new_parts = list(parts)
+                    head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
+                    truncated = rendered[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
+                    new_parts[idx] = dataclasses.replace(part, content=truncated)
+        if new_parts is None:
+            out.append(msg)
+        else:
+            out.append(dataclasses.replace(msg, parts=new_parts))
+    return out
+
+
+def _stamp_response_names(messages: list[ModelMessage], name: str) -> list[ModelMessage]:
+    """Return ``messages`` with ``name`` set on every :class:`ModelResponse`.
+
+    A persisted delta (dumped from the agent's own run) has no ``name`` on its
+    responses; stamping the agent's name lets calfkit's POV projection attribute
+    the spliced tool calls to that agent — kept verbatim for that viewer (so the
+    tool-call/return pairing the re-entry needs stays intact) and surfaced for
+    others. Non-mutating: rebuilds only the responses that need it.
+    """
+    out: list[ModelMessage] = []
+    for m in messages:
+        if isinstance(m, ModelResponse) and m.name != name:
+            out.append(dataclasses.replace(m, name=name))
+        else:
+            out.append(m)
+    return out
+
+
+class DiscordHistoryProvider:
+    """Bridge-side ``MentionRequest`` → ``list[ModelMessage]`` history seam.
+
+    Wires :class:`ChannelHistoryFetcher` (Discord fetch + ``/clear`` truncation +
+    thread-starter recovery), the transcript store (tool-call replay deltas), and
+    :func:`build_message_history` (canonical name-stamped build). Satisfies the
+    ``HistoryProvider`` protocol the bridge's ``MentionHandler`` calls.
+    """
+
+    def __init__(
+        self,
+        fetcher: ChannelHistoryFetcher,
+        transcript_store: TranscriptStoreLike,
+        *,
+        limit: int = _DISCORD_HISTORY_MAX_LIMIT,
+    ) -> None:
+        self._fetcher = fetcher
+        self._transcript_store = transcript_store
+        # Per R-A5 there is no global history ceiling; ``limit`` is just the
+        # Discord per-call REST cap (≤100). The fetched window is used as-is.
+        self._limit = limit
+
+    async def message_history(self, req: MentionRequest) -> list[ModelMessage]:
+        records = await self._fetcher.fetch(
+            source_channel_id=req.source_channel_id,
+            before_message_id=req.message_id,
+            limit=self._limit,
+        )
+        hydration = await self._build_replay_hydration(records)
+        return build_message_history(records, hydration=hydration)
+
+    async def _build_replay_hydration(
+        self, records: Sequence[HistoryRecord]
+    ) -> dict[int, list[ModelMessage]] | None:
+        """Join the fetched agent-reply records against the transcript store.
+
+        For every agent record (``is_agent``) with a persisted transcript row,
+        deserialize its structured delta, trim oversized tool returns to
+        :data:`REPLAY_TOOL_RETURN_MAX_CHARS`, and stamp the agent's ``name`` onto
+        every :class:`ModelResponse` in the delta so calfkit's POV projection
+        attributes those tool calls to that agent. Never DB-scans — the read
+        scope is the surviving (``/clear``-truncated) record set, so a cleared
+        reply is simply never looked up (``/clear`` correctness for free).
+
+        Returns ``None`` (⇒ no replay) when the store is disabled/empty, no agent
+        record has a row, or every row fails to deserialize. Best-effort: a
+        single corrupt blob is logged and skipped.
+        """
+        agent_names = {r.message_id: r.author_display_name for r in records if r.is_agent}
+        if not agent_names:
+            return None
+        # The store keys ``final_message_id`` as TEXT (snowflake precision); join
+        # on the str form and map back to int to match ``HistoryRecord.message_id``.
+        rows = await self._transcript_store.get_by_final_message_ids(
+            [str(mid) for mid in agent_names]
+        )
+        if not rows:
+            return None
+        hydration: dict[int, list[ModelMessage]] = {}
+        for final_message_id_str, row in rows.items():
+            message_id = int(final_message_id_str)
+            agent_name = agent_names[message_id]
+            try:
+                msgs = list(ModelMessagesTypeAdapter.validate_json(row.delta_json))
+                msgs = _truncate_replay_tool_returns(msgs)
+                msgs = _stamp_response_names(msgs, agent_name)
+            except Exception:
+                # A single unparseable/malformed blob must not sink the whole
+                # invocation: skip just this reply's replay. The row was written
+                # from a live turn, so this is unexpected — log for investigation.
+                logger.exception(
+                    "replay hydration skipped reply_id=%s agent=%s: failed to "
+                    "deserialize/trim/stamp stored delta; this turn keeps only "
+                    "its final text in replay",
+                    final_message_id_str,
+                    agent_name,
+                )
+                continue
+            hydration[message_id] = msgs
+        return hydration or None

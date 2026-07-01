@@ -22,26 +22,27 @@ agent (the same guided flow as `calfcord agent create`) while it configures the
 install's `.env`. See §9 for the full CLI; the rest of this section is the
 frontmatter reference the CLI reads and writes.
 
-At boot, the bridge scans `agents/` via
+At boot, the **agent runner** (`calfkit-agent`) scans `agents/` via
 `calfcord.agents.loader.load_agents_dir` and parses each
 `<name>.md` into an `AgentDefinition` (see
-`src/calfcord/agents/definition.py`). The definitions feed
-the agent registry that powers ingress routing, the phonebook
-propagated to A2A peers, and the slash-command tree the bridge
-registers with Discord. **A brand-new `.md` file is picked up by
-`calfcord agent start <name>` (it brings the new teammate online); the
-bridge owns the `/<name>` slash command, so a newly created or renamed
-agent also needs a bridge restart — `calfcord stop && calfcord start`**
-— the registry scan and the calfkit `Worker.register_handlers` are both
-one-shot at startup.
+`src/calfcord/agents/definition.py`); the factory turns that definition
+into a calfkit `Agent` node addressed **by name** (no per-channel topic
+subscriptions). The **bridge no longer reads `agents/*.md`** — it resolves
+`@mention`s against calfkit's live agent **mesh** and derives each agent's
+Discord persona from its `name`. So a brand-new `.md` is brought online
+with `calfcord agent start <name>` (after a one-time workspace reload so
+the supervisor declares its slot — see
+[`using-calfcord.md`](using-calfcord.md#build-your-team-of-agents)); there
+is **no bridge restart and no per-agent slash command** — agents are
+invoked by `@<name>` mention, not `/<name>`.
 
-calfcord runs as five processes (`calfkit-bridge`, `calfkit-agent`,
-`calfkit-router`, `calfkit-tools`, and one `calfkit-mcp` per configured
-MCP server). The bridge owns Discord I/O and the
-slash-command tree; the agent-runner process loads each agent's
-definition, constructs the calfkit `Agent` node, and dispatches LLM
-calls. Builtin tools advertised in the agent's frontmatter execute in the
-`calfkit-tools` process — the agent process only carries the tool's
+calfcord runs as four process types (`calfkit-bridge`, `calfkit-agent`,
+`calfkit-tools`, and one `calfkit-mcp` per configured MCP server). The
+bridge owns Discord I/O and the two operator slash commands
+(`/thinking-effort`, `/clear`); the agent-runner process loads each
+agent's definition, constructs the calfkit `Agent` node, and dispatches
+LLM calls. Builtin tools advertised in the agent's frontmatter execute in
+the `calfkit-tools` process — the agent process only carries the tool's
 schema — while `mcp/...` tools dispatch to a `calfkit-mcp` toolbox (see
 [`mcp-tools.md`](mcp-tools.md)). Read `README.md` for the architecture diagram
 before going further.
@@ -53,15 +54,13 @@ tool:
 
 ```yaml
 ---
-name: example-bot                       # filename stem; [a-z0-9_-]{1,32}; also the slash command (/example-bot)
-display_name: Example                   # webhook username; 1-80 chars; not "Clyde"
-description: A demo agent.              # slash-picker blurb; 1-100 chars
-# avatar_url: ...                       # optional; omit for DiceBear default seeded by name
+name: example-bot                       # filename stem; [a-z0-9_-]{1,32}; the persona/webhook name too
+description: A demo agent.              # AgentCard + slash-picker blurb; 1-100 chars
 provider: anthropic                     # "anthropic" | "openai" | "openai-codex"
 model: claude-sonnet-4-5                # provider-specific model name
-tools: [private_chat]                   # resolved against TOOL_REGISTRY
+tools: [read_file, web_search]          # resolved against TOOL_REGISTRY
 thinking_effort: medium                 # see §6 for the seven tiers
-history_turns: 30                       # channel-history depth, 0-100
+# a2a / handoff default to true — this agent can already consult and hand off to peers (§8)
 ---
 
 You are Example, a friendly demo agent. Reply concisely (1-3
@@ -69,11 +68,10 @@ sentences) to whatever the user says.
 ```
 
 Drop the file at `agents/example-bot.md`, bring it online with `calfcord
-agent start example-bot`, then `@example-bot hi` in a Discord channel the
-agent is subscribed to. (A brand-new agent also needs the bridge to learn
-its `/<name>` slash command — `calfcord stop && calfcord start` once after
-the first create.) The webhook reply will appear under the `Example`
-persona.
+agent start example-bot`, then `@example-bot hi` in any Discord channel the
+bot can see. The webhook reply appears under the `example-bot` persona (the
+webhook username is the agent's `name`; the avatar is a deterministic
+[DiceBear](https://www.dicebear.com) image seeded by the name).
 
 Field details, fallbacks, and reserved fields are in §3. The
 canonical, comment-annotated walkthrough is `agents/agent.template.md`
@@ -90,16 +88,15 @@ than silently falling back to defaults.
 
 ### 3.1 Identity (required)
 
-These three fields define what Discord and other agents see. They are
-immutable in practice — the bridge's command tree, the persona
-webhook, and the phonebook all index by them. The Discord slash
-command is always `/<name>`; there is no separate `slash` field.
+These two fields define what humans and other agents see. The agent's
+`name` is its whole identity: it is the persona/webhook name, the
+`@mention` target, and the key the runtime addresses it by. There is no
+separate `display_name`, no per-agent slash command, and no `slash` field.
 
 | Field          | Type   | Constraint                                                                 |
 | -------------- | ------ | -------------------------------------------------------------------------- |
-| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem. Also the slash command.  |
-| `display_name` | string | 1-80 characters. The literal `"Clyde"` is rejected by Discord's webhooks. |
-| `description`  | string | 1-100 characters (Discord's slash-command description cap).                |
+| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem. The persona/webhook name and `@mention` target. |
+| `description`  | string | 1-100 characters. The Discord slash-picker blurb *and* the agent's `AgentCard` blurb — the LLM-facing pitch peers read when choosing whom to consult. |
 
 The YAML key is `name` for Claude Code parity. Internally, the parsed
 field is `agent_id` via a Pydantic alias — `spec.agent_id` and
@@ -108,10 +105,18 @@ enforces `path.stem == frontmatter["name"]`, so a file at
 `agents/scribe.md` whose frontmatter says `name: scribbler` fails to
 load with a clear error.
 
-`display_name == "Clyde"` is the one display name Discord's webhook
-API rejects unconditionally (it's reserved for Discord's own AI). The
-validator catches this at load time so you don't have to debug a
-late-stage webhook 400.
+The Discord persona is derived entirely from `name`: the webhook username
+*is* the name, and the avatar is a deterministic
+[DiceBear](https://www.dicebear.com) image seeded by the name
+(`https://api.dicebear.com/9.x/glass/png?seed=<name>`). Because `name`
+matches `[a-z0-9_-]{1,32}`, it can never be the reserved `"Clyde"` webhook
+name — there is no display-name validator to trip over anymore.
+
+The factory passes `description` straight into the calfkit `Agent`, so it
+becomes the agent's `AgentCard` on the mesh — keep it a specific,
+LLM-readable pitch (it is what peers see when deciding whether to consult
+you). "Test agent" is a worse description than "Calendar mechanics; books
+and preps meetings."
 
 ### 3.2 LLM configuration (optional, with fallbacks)
 
@@ -138,7 +143,7 @@ through `CALFKIT_AGENT_DEFAULT_MODEL` rather than editing every `.md`.
 ### 3.3 Tools (optional)
 
 ```yaml
-tools: [private_chat, terminal, read_file]
+tools: [terminal, read_file, web_search]
 ```
 
 `tools` is a list of bare tool names. Each name is resolved against
@@ -147,17 +152,18 @@ unknown name fails fast:
 
 ```
 agent 'librarian' declares unknown tool(s) ['web_lookup']; known
-tools: ['execute_code', 'patch', 'private_chat', 'process',
-'read_file', 'search_files', 'terminal', 'todo', 'web_extract',
-'web_fetch', 'web_search', 'write_file']
+tools: ['execute_code', 'patch', 'process', 'read_file',
+'search_files', 'terminal', 'todo', 'web_extract', 'web_fetch',
+'web_search', 'write_file']
 ```
 
 The registry is the explicit `ALL_TOOLS` list in
 `src/calfcord/tools/__init__.py`, narrowed/aliased at boot by
-`deploy_filters.apply_deploy_filters`. Most tools are vendored from the
-`calfkit-tools` package; `private_chat` is the one first-party tool. To
-change which tools exist, edit that list — see `docs/authoring-tools.md`
-for the contract.
+`deploy_filters.apply_deploy_filters`. All of the builtin tools are
+vendored from the `calfkit-tools` package (the former first-party
+`private_chat` tool is gone — agent-to-agent messaging is native now, see
+§8). To change which tools exist, edit that list — see
+`docs/authoring-tools.md` for the contract.
 
 Each agent only ever carries the `ToolNodeDef` for schema and
 subscribe-topic purposes; the actual tool body runs in the
@@ -222,22 +228,32 @@ sets the list non-interactively — see §9. Because the tool set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
 `calfcord agent restart <name>` — there is no live reload.
 
-### 3.4 Behavior (optional)
+### 3.4 Behavior & peers (optional)
 
-| Field           | Type | Default | Range  | Effect                                                                      |
-| --------------- | ---- | ------- | ------ | --------------------------------------------------------------------------- |
-| `history_turns` | int  | `30`    | 0-100  | Number of recent channel messages the bridge projects into `message_history`. |
-| `memory`        | bool | `false` | —      | Opt in to a persistent per-agent notepad (see below).                          |
+| Field     | Type                    | Default | Effect                                                                    |
+| --------- | ----------------------- | ------- | ------------------------------------------------------------------------- |
+| `memory`  | bool                    | `false` | Opt in to a persistent per-agent notepad (see below).                     |
+| `a2a`     | bool \| list of names   | `true`  | Whether this agent can **consult** peers via calfkit's `message_agent` tool. |
+| `handoff` | bool \| list of names   | `true`  | Whether this agent can **hand off** the turn to a peer.                   |
 
-`history_turns: 0` disables history entirely — no Discord REST call,
-agent runs with only the system prompt and the user prompt. Useful for
-single-turn personas or for cost-sensitive deployments where the
-channel history is too noisy to be useful.
+**There is no `history_turns` field.** Per-agent history windows are gone:
+the bridge passes the recent channel history it fetches (bounded by
+Discord's per-call REST cap of ~100 messages), scoped to the thread when
+the message is in a thread and to the channel otherwise. Use `/clear` in a
+channel to draw a context boundary the history fetcher truncates at (see
+§6 / [`using-calfcord.md`](using-calfcord.md)).
 
-The upper bound of 100 is Discord's per-call REST cap for
-`channel.history(limit=...)`. The default of 30 (~3K input tokens at
-~100 tokens per message) is the v1 balance between context quality and
-cost.
+`a2a` and `handoff` both **default to `true`**, so out of the box every
+agent can consult and hand off to any peer on the mesh. Set either to a
+list to restrict it to named peers (`a2a: [librarian, security]`), or to
+`false` to disable the capability. See §8 for the full A2A model; the
+short version:
+
+- `a2a: true` → calfkit injects the `message_agent(name, message)` tool
+  with the live peer directory (`Messaging(discover=True)`).
+- `a2a: [names]` → only those peers are reachable (`Messaging(*names)`).
+- `handoff: true | [names]` → the agent may emit a handoff to any / those
+  peers (`Handoff(discover=True)` / `Handoff(*names)`).
 
 `memory: true` opts the agent into a persistent notepad. At runtime the agent
 gets a "how memory works" block appended to its instructions, telling it to
@@ -261,20 +277,13 @@ place (the bridge) without rebuilding agents.
 
 | Field           | Type   | Why reserved                                                                              |
 | --------------- | ------ | ----------------------------------------------------------------------------------------- |
-| `role`          | string | `"assistant"` is the default and the only value user-authored agents should use.          |
-| `publish_topic` | string | Router-only Kafka publish topic. The model validator rejects it for non-router agents.    |
+| `publish_topic` | string | A vestigial no-op. The model validator (`_forbid_publish_topic` in `definition.py`) rejects any non-`None` value, so leave it unset. |
 
-`role: router` is reserved for the singleton built-in routing agent
-constructed by `build_router_definition` in
-`calfcord/router/definition.py`. A user agent with
-`role: router` will boot but collide with the real router in the
-registry. Don't set this field.
-
-`publish_topic` is the router's structured-output destination. The
-validator (`_validate_router_constraints` in `definition.py`) rejects
-assistants that declare it — assistants emit `ReturnCall` to the
-inbound frame's `callback_topic` (the bridge's `discord.outbox`), not
-to a fixed published topic.
+There is **no `role` field** anymore — the router is gone, so every agent
+is an assistant. A stale `.md` that still carries `role:` (or the removed
+`display_name` / `avatar_url` / `history_turns`) fails to parse: the model
+is `extra="forbid"`, so an unknown key is a hard Pydantic error at load
+time, not a silent fallback.
 
 ## 4. System-prompt body
 
@@ -319,18 +328,18 @@ docstring tells the LLM *when to reach for this tool at all*. The
 agent's system prompt is where to add tool-selection guidance that
 spans multiple tools.
 
-The canonical "good docstring" reference is `private_chat` at
-`src/calfcord/tools/private_chat.py` — it
-explicitly covers *when not to use*, *how to write the `content`
-argument*, and *what the return shape means*. Lean on that pattern for
-tools you write, and reference the tool by name in the agent's body
-when the agent should prefer a specific tool for a specific task:
+A good tool docstring covers *when not to use it*, *how to shape the
+arguments*, and *what the return means* — see
+[`authoring-tools.md`](authoring-tools.md) for the contract. Reference a
+tool by name in the agent's body when the agent should prefer a specific
+tool for a specific task, and lean on the auto-injected `message_agent`
+tool (present whenever `a2a` is enabled, §8) to consult a peer:
 
 ```markdown
-You are the librarian. For Python package questions, call `pypi_info`
-first. If the result is thin or you need release notes, follow up with
-`web_fetch` on the project's home page. Reserve `private_chat` for
-asking the resident security agent to review a license.
+You are the librarian. For Python package questions, call `web_fetch`
+on the project's PyPI page first. If you need release notes, follow up
+with `web_search`. To have a license reviewed, consult the resident
+security agent with `message_agent`.
 ```
 
 ### 4.3 No frontmatter inside the body
@@ -338,63 +347,42 @@ asking the resident security agent to review a license.
 The body is plain Markdown plus whitespace. Don't put YAML key-value
 lines below the closing `---`; they'll be sent to the LLM as text.
 Conversely, anything you set in the frontmatter is *not* repeated in
-the system prompt — if you want the LLM to know its own
-`display_name`, write it into the body.
+the system prompt — if you want the LLM to know its own `name`, write it
+into the body.
 
-## 5. Channel subscriptions
+## 5. How agents are addressed
 
-An agent's identity (and the tool surface) lives in
-`agents/<name>.md`. The set of Discord channels the agent listens on
-lives in `state/agents/<name>.json` — see
-`src/calfcord/agents/state.py`. Channel subscriptions are
-**runtime state**, not identity, and so they're tracked separately and
-written atomically by the agent process.
+Agents are **name-addressed**. Each calfkit `Agent` is reachable on a
+private input topic derived from its `name` — there are no per-channel
+topic subscriptions and no addressing gate. The bridge owns all Discord
+I/O: it sees every channel the bot is in, and when a message `@mention`s
+an agent that is **online on the mesh**, it invokes that agent by name and
+posts the reply. Consequences:
 
-### 5.1 First-boot seeding
+- **There is no per-agent channel allowlist.** An agent answers
+  `@mention`s in any channel the bot can see; scope where it can be
+  reached with Discord's own channel permissions, not with calfcord
+  config.
+- **There is no `state/agents/<name>.json` and no bootstrap-channel env
+  var.** The old per-agent channel-subscription state was removed with the
+  router. Adding an agent to a channel is just a matter of the bot having
+  access to that channel — nothing to configure and no restart to pick up
+  a new channel.
+- **Ambient (non-`@mention`) messages go unanswered.** There is no
+  automatic agent selection — an agent replies only when `@mention`ed, or
+  when a peer consults or hands off to it (§8).
 
-On first boot, an agent has no state file. The runner
-(`calfcord/agents/runner.py`) seeds the channel list from
-two environment variables, in order:
-
-1. `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` — comma-separated
-   Discord channel IDs for this specific agent. Underscores replace
-   hyphens (`example-bot` reads `CALFKIT_AGENT_EXAMPLE_BOT_BOOTSTRAP_CHANNELS`).
-2. `DISCORD_DEFAULT_CHANNEL_ID` — the shared dev fallback used when
-   no per-agent var is set. Convenient when every agent in a small
-   deployment should listen on the same channel.
-
-Once `state/agents/<name>.json` exists the bootstrap env var is ignored
-with a `WARNING` log — the persisted state is canonical. **Clear the
-bootstrap env var from `.env` after first successful boot** to prevent
-accidental re-seeding if the state file is later deleted.
-
-### 5.2 Restart required for new channels
-
-Calfkit's `Worker.register_handlers` is one-shot at startup, so adding
-a channel ID to the runtime state file (or via a future `store.add_channel`
-call) does **not** change the running agent's Kafka subscriptions. The
-agent factory's docstring spells this out:
-
-> Worker subscription is fixed at boot. [...] Adding a channel to an
-> existing agent requires a process restart.
-
-The `store` parameter on `AgentFactory.build` exists for forward
-compatibility with a not-yet-implemented dynamic-subscribe path. In v1,
-the workflow for adding an agent to a new channel is:
-
-1. Edit `state/agents/<name>.json` to add the channel ID, or set the
-   bootstrap env var and delete the state file.
-2. Restart the agent with `calfcord agent restart <name>` so it
-   re-reads its subscriptions.
+An `@mention` of an agent that is **not online** gets a plain reply — "No
+agent matching `@name` is online right now." — so a typo or a
+not-yet-started agent is never silently dropped.
 
 ## 6. Thinking-effort tiers
 
-`thinking_effort` is the one frontmatter field that is operator-tunable
-at runtime via the `/thinking-effort` Discord slash command (the
-command rewrites the file in place — see
-`calfcord/agents/md_writer.py`). The seven tier names are
-defined in `src/calfcord/agents/definition.py` as the
-`ThinkingEffort` literal type.
+`thinking_effort` in the frontmatter is the agent's **boot-time default**,
+baked into the calfkit `Agent` at startup. It is also tunable at runtime —
+but through a **bridge-side override** applied per call, not by rewriting
+the `.md` (see §6.1). The seven tier names are defined in
+`src/calfcord/agents/definition.py` as the `ThinkingEffort` literal type.
 
 | Tier      | Anthropic `budget_tokens` | OpenAI `reasoning_effort` |
 | --------- | ------------------------- | ------------------------- |
@@ -418,28 +406,34 @@ Omitting the field entirely skips the override — the agent uses
 whatever the model client or provider defaults to. Setting it to
 `none` is explicit: the operator chose to disable extended thinking.
 
-### 6.1 Runtime tunability
+### 6.1 Runtime override (the `/thinking-effort` slash)
 
-The `/thinking-effort agent:<name> effort:<tier>` Discord slash command
-rewrites the `.md` file's frontmatter via `md_writer.update_thinking_effort`.
-Slash-invocation and `@<agent_id>` mentions pick up the new value on
-the next message — the bridge resolves the override per-call via
-`BridgeIngress` (see
-`src/calfcord/bridge/ingress.py`).
+The owner-gated `/thinking-effort agent:<name> effort:<tier>` Discord slash
+command sets a **per-agent override the bridge owns** — it does **not**
+touch the agent's `.md` and does **not** reconfigure the running agent
+process. The override is persisted in the bridge's SQLite store (the
+`agent_overrides` table, so it survives a bridge restart) and is applied
+as a per-call `model_settings` on that agent's **next bridge invocation**.
+`effort:none` clears it (the next call reverts to the agent's baked-in
+default).
 
-Ambient-channel messages do **not** pick up runtime changes without an
-agent restart. The tier is also baked into the calfkit `Agent`
-constructor at agent boot, and ambient routing has no per-call override
-path. If you change effort and want the agent's ambient behavior to
-shift, run `calfcord agent restart <name>`.
+Two scopes to keep straight:
+
+- The **frontmatter `thinking_effort`** is the boot-time default. Change it
+  with `calfcord agent set <name> --thinking-effort <tier>` (or hand-edit),
+  then `calfcord agent restart <name>` to apply. This default is what
+  **native A2A consults and handoffs use** — they run inside the agent
+  runtime with its own settings.
+- The **`/thinking-effort` override** rides only the bridge's own
+  `@mention` invocations. It does **not** apply to A2A consults/handoffs.
 
 ### 6.2 Field-ordering note
 
-When `/thinking-effort` rewrites the `.md`, python-frontmatter's
-PyYAML `safe_dump` alphabetizes the frontmatter keys and discards
-comments. Treat any comments in `agents/agent.template.md` as
-documentation only — they don't survive a round-trip on a live agent
-file.
+When `calfcord agent set` / `edit` rewrite the `.md` (via
+`calfcord/agents/md_writer.py`), python-frontmatter's PyYAML `safe_dump`
+alphabetizes the frontmatter keys and discards comments. Treat any
+comments in `agents/agent.template.md` as documentation only — they don't
+survive a round-trip through the CLI editors on a live agent file.
 
 ## 7. Debugging an agent
 
@@ -489,21 +483,18 @@ override if you want this in production.
   Either fix the name or add the tool to the explicit `ALL_TOOLS` list in
   `src/calfcord/tools/__init__.py` and restart the tools host
   (`calfcord tools stop && calfcord tools start`, or `uv run calfkit-tools` in dev).
-- **`display_name == "Clyde"`.** Pydantic rejects this at parse time
-  with a clear validator error — the agent never boots.
+- **Removed field in a stale `.md`.** `display_name`, `avatar_url`,
+  `history_turns`, and `role` were dropped in the calfkit 0.12 migration.
+  Because the model is `extra="forbid"`, any of them (or a typo like
+  `thiking_effort:`) fails to parse with `Extra inputs are not permitted
+  [type=extra_forbidden, ...]`. Delete the stale key.
 - **Missing API key.** The provider's client construction succeeds (no
   key is required to instantiate the client), but the first LLM call
   fails with the provider's auth error. Check
   `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env`.
-- **Frontmatter typo.** `extra="forbid"` means
-  `thiking_effort: medium` fails to parse with
-  `Extra inputs are not permitted [type=extra_forbidden, ...]`. Fix
-  the key name.
-- **Bootstrap channels not picked up.** Check that the agent has no
-  existing `state/agents/<name>.json`. The bootstrap env var is a
-  one-shot seed and is ignored once the file exists. Delete the file
-  to re-seed (be careful — this also clears any channels added at
-  runtime).
+- **`memory: true` without file tools.** A memory-enabled agent must have
+  at least `read_file` and `write_file` (or omit `tools:` to grant all);
+  the factory raises at build time otherwise.
 
 ### 7.4 Verifying a definition without running
 
@@ -518,65 +509,69 @@ print(spec.model_dump())
 "
 ```
 
-Catches every validator failure (display_name, name format, etc.)
-without needing Kafka or Discord.
+Catches every validator failure (name format, description length,
+extra/removed fields, etc.) without needing Kafka or Discord.
 
-## 8. A2A patterns
+## 8. Agent-to-agent (A2A): consult & handoff
 
-calfcord supports agent-to-agent collaboration through the
-`private_chat` builtin tool. Two agents wire up A2A by both declaring
-the tool in their frontmatter; the bridge populates the phonebook each
-agent sees, and either side can route a focused sub-task to the other.
+A2A is **native to calfkit** — there is no `private_chat` tool. Two
+frontmatter fields, both **defaulting to `true`**, decide what an agent
+can do:
 
-### 8.1 When to declare `private_chat`
+- **`a2a`** — the agent can **consult** peers. When enabled, calfkit
+  auto-injects a `message_agent(name, message)` tool whose description
+  carries the live peer directory. The agent calls a peer, the peer
+  answers, and the reply folds back into the tool result. The peer answers
+  on a **fresh conversation** (consults are stateless — no prior A2A turns
+  are replayed).
+- **`handoff`** — the agent can **transfer the turn** to a peer. The peer
+  answers the original human directly, and the bridge posts the peer's
+  persona.
 
-Declare `private_chat` on agents that have a reason to consult another
-agent's expertise, persona, or access. Examples:
+Because both default to `true`, every agent can already consult and hand
+off to any peer on the mesh without declaring anything. Narrow or disable
+per agent:
 
-- A general-purpose agent that should delegate Python-packaging
-  questions to a `librarian` agent.
-- A `triage` agent that picks a specialist and forwards the user's
-  request.
-- A code-reviewer agent that asks a security specialist for a
-  second opinion before approving a change.
+```yaml
+a2a: [librarian, security]   # consult only these peers
+handoff: false               # never hand off the turn
+```
 
-Agents that have nothing to delegate (a fixed-persona joke bot, an
-agent that only ever needs `read_file`) don't need it.
+### 8.1 When to restrict A2A
+
+Leave the defaults for a collaborative team. Restrict when you want
+control:
+
+- A code-reviewer that should only ever consult a `security` specialist:
+  `a2a: [security]`.
+- A fixed-persona joke bot that should never pull in peers: `a2a: false`,
+  `handoff: false`.
+- A `triage` agent that should hand off (not just consult) to specialists:
+  leave `handoff: true`, and consider `a2a: false` if it should always
+  transfer rather than relay.
+
+Keep the declared **handoff graph acyclic** — calfkit has no handoff-loop
+guard, so an A→B→A handoff ring loops indefinitely.
 
 ### 8.2 How peers see your agent
 
-The bridge constructs the phonebook at boot from the agent registry and
-propagates it to A2A peers via `deps["phonebook"]`. Each
-`PhonebookEntry` (`calfcord/agents/phonebook.py`) carries
-the peer's `agent_id`, `display_name`, `description`, and tool list.
-That's what every other agent sees when picking a peer to call.
-
-Implication: your `description` is the LLM-facing pitch for your
-agent's services in any A2A interaction. Treat it as
-LLM-readable: be specific about what the agent is good at and what it
-isn't. "Test agent" is a worse description than "Calendar mechanics;
-books and preps meetings."
+Peers discover each other through calfkit's native mesh: every agent
+advertises an `AgentCard` carrying its `name` and `description`. The
+factory wires your frontmatter `description` straight into that card, so
+**your `description` is the LLM-facing pitch** other agents read when
+choosing whom to consult. Be specific about what the agent is good at.
+There is no calfcord phonebook and no `deps["phonebook"]` anymore — the
+directory is calfkit's.
 
 ### 8.3 The audit channel
 
-Every A2A exchange is projected to a unified Discord audit channel
-(default `private-a2a-chats`, overridable via `CALFKIT_A2A_CHANNEL_NAME`). The
-caller's request and the target's reply each appear as the appropriate
-persona's webhook message, anchored in a per-conversation thread. See
-`docs/a2a-threads.md` and
-`src/calfcord/bridge/egress.py` for the projection design.
-
-Kafka is the system of record; Discord is the projection. The audit
-view is for humans observing the organization, not for state recovery.
-
-### 8.4 Continuation threads
-
-`private_chat` returns the target's reply prefixed with
-`<thread_id>{id}</thread_id>\n`. Passing that id back as the
-`thread_id` argument on a subsequent call continues the conversation —
-the target sees the prior turns as `message_history`. The id tag is
-internal and the calling agent should not echo it to the user; the
-`private_chat` docstring spells this out.
+A2A activity is projected to a unified Discord audit channel (default
+`private-a2a-chats`, overridable via `CALFKIT_A2A_CHANNEL_NAME`), now
+**hosted by the bridge**. The bridge watches each `@mention` run's event
+stream and renders the consult request, the peer's reply, and any handoff
+into a per-turn thread. Kafka is the system of record; Discord is the
+human-readable audit. See [`a2a-threads.md`](a2a-threads.md) for the full
+projection design.
 
 ## 9. Managing agents from the CLI
 
@@ -595,8 +590,8 @@ accepts is a value the agent will boot with.
 | `calfcord agent edit [<name>]` | Interactive field menu — pick a field, edit it with the right widget; each change is written immediately. Omit `<name>` to pick from a list. |
 | `calfcord agent set <name> --… …` | The non-interactive, scriptable equivalent of `edit` — one or more `--flag value` updates. |
 | `calfcord agent tools [<name>]` | The tool-list checkbox of §3.3 (also reachable as the *Tools* row of `edit`). |
-| `calfcord agent rename <old> <new>` | Renames the `.md`, the `name:`/`/<name>` slash command, **and** moves the agent's channel-subscription state (§5) so it isn't orphaned. |
-| `calfcord agent delete <name> [--yes] [--keep-state]` | Removes the `.md` (and the state file unless `--keep-state`); confirms first, skip with `--yes`. |
+| `calfcord agent rename <old> <new>` | Renames the `.md` and its `name:` field. (There is no per-agent slash command or channel-subscription state to move — see §5.) |
+| `calfcord agent delete <name> [--yes]` | Removes the `.md`; confirms first, skip with `--yes`. |
 
 `calfcord agent create` does not prune the seeded starter — adding an
 agent never deletes another. (`calfcord init`'s first-run setup runs the
@@ -612,32 +607,30 @@ widget, `set` takes them as flags for scripting and CI. The fields:
 | Field | `edit` widget | `set` flag |
 | ----- | ------------- | ---------- |
 | Description | text | `--description` |
-| Display name | text | `--display-name` |
 | Provider / model | live provider + model picker | `--provider`, `--model` |
 | Tools | checkbox (§3.3) | `--tools "a,b,c"` |
 | System prompt | opens `$EDITOR` | `--system-prompt "…"` (or `--system-prompt @file` to read a file) |
 | Thinking effort | select (§6) | `--thinking-effort` |
-| History turns | number (0-100) | `--history-turns` |
 | Memory | toggle | `--memory` (`on`/`off`, `true`/`false`, `yes`/`no`) |
-| Avatar URL | text | `--avatar-url` |
 
-`--model` can be set without restating `--provider`. Validation is
-identical on both surfaces: a rejected value (an out-of-range
-`history-turns`, an unknown tool, a `display_name` of `"Clyde"`) leaves
-the file untouched — `set` exits non-zero, `edit` prints one `error:`
-line and keeps the menu open. Renaming and deleting are *not* in the
-`edit` menu — they change the agent's identity or existence, so they are
-their own commands.
+The `a2a` / `handoff` peer fields (§3.4, §8) are **not** in the CLI editor —
+set them by hand-editing the `.md`. `--model` can be set without restating
+`--provider`. Validation is identical on both surfaces: a rejected value
+(an unknown tool, a bad `thinking-effort` tier) leaves the file untouched —
+`set` exits non-zero, `edit` prints one `error:` line and keeps the menu
+open. Renaming and deleting are *not* in the `edit` menu — they change the
+agent's identity or existence, so they are their own commands.
 
 ### 9.2 Restart to apply
 
 These commands edit the `.md` on disk; the running agent bakes its
-config at boot (the same one-shot constraint behind every "restart
-required" note in §3.3, §5.2, and §6.1). So **run `calfcord agent
-restart <name>`** after any edit to apply it — and for a newly created
-or renamed agent **also bounce the bridge** (`calfcord stop && calfcord
-start`), since the bridge owns the `/<name>` slash command. Each command
-prints the matching restart hint on success.
+config at boot (the same one-shot constraint behind the "restart required"
+notes in §3.3 and §6). So **run `calfcord agent restart <name>`** after any
+edit to apply it. A *newly created* agent additionally needs a one-time
+workspace reload (`calfcord stop && calfcord start`) so the supervisor
+declares its slot before `calfcord agent start <name>` — but there is **no
+bridge slash-command re-sync**, since agents are invoked by `@mention`, not
+`/<name>`. Each command prints the matching restart hint on success.
 
 The same boot-time rule covers credentials and `.env`: a changed API key,
 model, or provider in `.env` is read only at boot too, so it also needs a

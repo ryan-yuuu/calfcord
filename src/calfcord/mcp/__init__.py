@@ -5,7 +5,7 @@ Two strictly separated halves, mirroring the deployment boundary:
 * **Agent path** (any host): :mod:`calfcord.mcp.selector` parses the
   ``mcp/...`` entries in agent frontmatter and
   :mod:`calfcord.mcp.agent_select` groups them into per-server
-  :class:`~calfkit.mcp.MCPToolboxRef` handles, which calfkit resolves per
+  :class:`~calfkit.mcp.MCPToolbox` handles, which calfkit resolves per
   turn against the capability view it maintains from the
   ``mcp.capabilities`` topic. Schema-free and secret-free — agent hosts
   never read ``mcp.json``.

@@ -2,14 +2,15 @@
 
 Covers three units:
 
-* :func:`project_history` — pure function; tested with hand-built
-  :class:`HistoryRecord` lists across POV variants, empty content,
-  leading-response, and router (None) POV.
+* :func:`build_message_history` — pure, POV-agnostic builder; tested with
+  hand-built :class:`HistoryRecord` lists for human/agent turns, name
+  stamping, empty content, leading-response drop, and the no-merge contract.
+  (Per-viewer POV re-roling is calfkit's job and is tested there, not here.)
 * :class:`ChannelHistoryFetcher` — wraps the gateway's ``discord.Client``;
   tested with hand-built async-iterator fakes for ``channel.history()``
   and stub clients for ``get_channel`` / ``fetch_channel``. No real
   Discord, no real Kafka.
-* :class:`HistoryRecord` — pydantic schema validation.
+* :class:`HistoryRecord` — frozen-dataclass snapshot.
 
 The fakes mirror the duck-typing the production code does: only the
 attributes/methods actually read by the code under test are populated.
@@ -17,6 +18,7 @@ attributes/methods actually read by the code under test are populated.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -28,17 +30,14 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
 )
-from pydantic import ValidationError
 
-from calfcord.agents.definition import AgentDefinition
 from calfcord.bridge.history import (
     CLEAR_MARKER_TEXT,
     ChannelHistoryFetcher,
     HistoryRecord,
+    build_message_history,
     is_clear_marker,
-    project_history,
 )
-from calfcord.bridge.registry import AgentRegistry
 
 
 def _record(
@@ -46,7 +45,7 @@ def _record(
     message_id: int = 1,
     content: str = "hi",
     author_display_name: str = "ryan",
-    author_agent_id: str | None = None,
+    is_agent: bool = False,
     created_at: datetime | None = None,
 ) -> HistoryRecord:
     return HistoryRecord(
@@ -54,7 +53,7 @@ def _record(
         created_at=created_at or datetime.now(UTC),
         content=content,
         author_display_name=author_display_name,
-        author_agent_id=author_agent_id,
+        is_agent=is_agent,
     )
 
 
@@ -70,24 +69,29 @@ class TestHistoryRecord:
             created_at=datetime.now(UTC),
             content="hello",
             author_display_name="alice",
-            author_agent_id=None,
         )
         assert r.message_id == 42
         assert r.content == "hello"
-        assert r.author_agent_id is None
+        # ``is_agent`` defaults to False — a record is a human turn unless the
+        # fetcher resolved it to one of the bridge's persona webhooks.
+        assert r.is_agent is False
 
     def test_is_frozen(self) -> None:
+        """A frozen dataclass (slots) — assigning a field raises
+        ``dataclasses.FrozenInstanceError``, NOT pydantic's ValidationError
+        (the record is no longer a pydantic model)."""
         r = _record()
-        with pytest.raises(ValidationError):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             r.content = "mutated"  # type: ignore[misc]
 
-    def test_agent_id_optional(self) -> None:
-        r = _record(author_agent_id="scribe")
-        assert r.author_agent_id == "scribe"
+    def test_is_agent_flag(self) -> None:
+        """An agent (persona-webhook) turn is built with ``is_agent=True``."""
+        r = _record(is_agent=True)
+        assert r.is_agent is True
 
 
 # ---------------------------------------------------------------------------
-# project_history
+# build_message_history
 # ---------------------------------------------------------------------------
 
 
@@ -98,85 +102,65 @@ def _text(msg: Any) -> str:
     return parts[0].content
 
 
-class TestProjectHistory:
-    def test_empty_input(self) -> None:
-        assert project_history([], self_agent_id="scribe") == []
+def _name(msg: Any) -> str | None:
+    """Extract the author name a message was stamped with.
 
-    def test_simple_pov_scribe(self) -> None:
-        records = [
-            _record(message_id=1, content="how do I X?", author_display_name="ryan"),
-            _record(
-                message_id=2,
-                content="here's how",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-            _record(message_id=3, content="thanks", author_display_name="ryan"),
-        ]
-        out = project_history(records, self_agent_id="scribe")
-        assert len(out) == 3
+    Agent turns stamp ``name`` on the :class:`ModelResponse` itself; human
+    turns stamp it on the :class:`UserPromptPart`. calfkit's POV projection
+    reads it from these positions (and strips it before any provider sees it).
+    """
+    if isinstance(msg, ModelResponse):
+        return msg.name
+    return msg.parts[0].name
+
+
+class TestBuildMessageHistory:
+    """The pure, POV-agnostic builder.
+
+    Per C8/R-A3 the bridge builds ONE canonical, name-stamped history and
+    calfkit's agent-POV projection re-roles it per viewer at read time. These
+    tests pin only the literal output — no POV re-roling, which is calfkit's
+    job and is tested there.
+    """
+
+    def test_empty_input(self) -> None:
+        assert build_message_history([]) == []
+
+    def test_human_turn_is_request_with_name_and_no_prefix(self) -> None:
+        """A human record becomes a ModelRequest whose UserPromptPart carries
+        the RAW content plus the author in the ``name`` field — there is NO
+        ``<author>`` text prefix on the content anymore. The name travels in
+        the structured field (which calfkit strips before the provider)."""
+        out = build_message_history([_record(content="how do I X?", author_display_name="ryan")])
+        assert len(out) == 1
         assert isinstance(out[0], ModelRequest)
-        assert _text(out[0]) == "<ryan> how do I X?"
+        assert _text(out[0]) == "how do I X?"  # raw, NOT "<ryan> how do I X?"
+        assert _name(out[0]) == "ryan"
+
+    def test_agent_turn_is_response_with_name(self) -> None:
+        """An agent record becomes a ModelResponse with the agent name stamped
+        on the response itself (its TextPart holds the raw content)."""
+        out = build_message_history(
+            [
+                _record(content="kick off", author_display_name="ryan"),
+                _record(content="here's how", author_display_name="Scribe", is_agent=True),
+            ]
+        )
+        assert len(out) == 2
         assert isinstance(out[1], ModelResponse)
         assert _text(out[1]) == "here's how"
-        assert isinstance(out[2], ModelRequest)
-        assert _text(out[2]) == "<ryan> thanks"
+        assert _name(out[1]) == "Scribe"
 
-    def test_pov_rotates_for_different_target(self) -> None:
-        """The same records project differently for scribe vs. conan.
-
-        Leading human message keeps the projected list opening with a
-        ModelRequest so the drop-leading-ModelResponse step doesn't
-        consume the per-POV self-classified entries we're asserting on.
-        """
+    def test_interleaved_human_and_agent(self) -> None:
         records = [
-            _record(message_id=0, content="kick it off", author_display_name="ryan"),
-            _record(
-                message_id=1,
-                content="riveting stuff",
-                author_display_name="Conan",
-                author_agent_id="conan",
-            ),
-            _record(
-                message_id=2,
-                content="thanks Conan",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
+            _record(message_id=1, content="how do I X?", author_display_name="ryan"),
+            _record(message_id=2, content="here's how", author_display_name="Scribe", is_agent=True),
+            _record(message_id=3, content="thanks", author_display_name="ryan"),
         ]
-        scribe_view = project_history(records, self_agent_id="scribe")
-        # For scribe: ryan + conan are ModelRequest; scribe is ModelResponse.
-        assert isinstance(scribe_view[0], ModelRequest)
-        assert _text(scribe_view[0]) == "<ryan> kick it off"
-        assert isinstance(scribe_view[1], ModelRequest)
-        assert _text(scribe_view[1]) == "<Conan> riveting stuff"
-        assert isinstance(scribe_view[2], ModelResponse)
-        assert _text(scribe_view[2]) == "thanks Conan"
-
-        conan_view = project_history(records, self_agent_id="conan")
-        # For conan: ryan + scribe are ModelRequest; conan is ModelResponse.
-        assert isinstance(conan_view[0], ModelRequest)
-        assert _text(conan_view[0]) == "<ryan> kick it off"
-        assert isinstance(conan_view[1], ModelResponse)
-        assert _text(conan_view[1]) == "riveting stuff"
-        assert isinstance(conan_view[2], ModelRequest)
-        assert _text(conan_view[2]) == "<Scribe> thanks Conan"
-
-    def test_router_pov_none_means_everything_is_request(self) -> None:
-        """self_agent_id=None: outside-observer; every record is ModelRequest."""
-        records = [
-            _record(
-                message_id=1,
-                content="hi",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-            _record(message_id=2, content="hi back", author_display_name="ryan"),
-        ]
-        out = project_history(records, self_agent_id=None)
-        assert all(isinstance(m, ModelRequest) for m in out)
-        assert _text(out[0]) == "<Scribe> hi"
-        assert _text(out[1]) == "<ryan> hi back"
+        out = build_message_history(records)
+        assert [type(m) for m in out] == [ModelRequest, ModelResponse, ModelRequest]
+        assert [_text(m) for m in out] == ["how do I X?", "here's how", "thanks"]
+        assert [_name(m) for m in out] == ["ryan", "Scribe", "ryan"]
 
     def test_drops_empty_content(self) -> None:
         records = [
@@ -185,113 +169,65 @@ class TestProjectHistory:
             _record(message_id=3, content="   "),  # whitespace-only also dropped
             _record(message_id=4, content="world"),
         ]
-        out = project_history(records, self_agent_id="scribe")
+        out = build_message_history(records)
         assert len(out) == 2
-        assert _text(out[0]) == "<ryan> hello"
-        assert _text(out[1]) == "<ryan> world"
+        assert _text(out[0]) == "hello"
+        assert _text(out[1]) == "world"
 
     def test_drops_leading_response_iteratively(self) -> None:
-        """Multiple leading ModelResponses get dropped one by one."""
+        """Multiple leading ModelResponses get dropped one by one — Anthropic
+        rejects a history whose first message is ``assistant`` role."""
         records = [
-            _record(
-                message_id=1,
-                content="one",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-            _record(
-                message_id=2,
-                content="two",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
+            _record(message_id=1, content="one", author_display_name="Scribe", is_agent=True),
+            _record(message_id=2, content="two", author_display_name="Scribe", is_agent=True),
             _record(message_id=3, content="user msg", author_display_name="ryan"),
         ]
-        out = project_history(records, self_agent_id="scribe")
+        out = build_message_history(records)
         assert len(out) == 1
         assert isinstance(out[0], ModelRequest)
-        assert _text(out[0]) == "<ryan> user msg"
+        assert _text(out[0]) == "user msg"
 
     def test_drops_leading_response_to_empty(self) -> None:
-        """If all records are self-responses, the result is empty."""
+        """If every record is an agent turn (no human request), the result is
+        empty — all leading responses are popped."""
         records = [
-            _record(
-                content="r1",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
-            _record(
-                content="r2",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
+            _record(content="r1", author_display_name="Scribe", is_agent=True),
+            _record(content="r2", author_display_name="Scribe", is_agent=True),
         ]
-        out = project_history(records, self_agent_id="scribe")
-        assert out == []
+        assert build_message_history(records) == []
 
     def test_does_not_merge_consecutive(self) -> None:
         """Adjacent same-role messages are NOT merged here.
 
-        Plan §4 / §6: pydantic-ai's _clean_message_history merges before
-        provider mappers see the list. Doing it here would be redundant.
-        This test pins the contract.
+        pydantic-ai's _clean_message_history merges before provider mappers see
+        the list (our messages satisfy its merge conditions), so doing it here
+        would be redundant. This test pins the contract.
         """
         records = [
             _record(message_id=1, content="a", author_display_name="ryan"),
             _record(message_id=2, content="b", author_display_name="ryan"),
             _record(message_id=3, content="c", author_display_name="ryan"),
         ]
-        out = project_history(records, self_agent_id="scribe")
+        out = build_message_history(records)
         assert len(out) == 3
         for m in out:
             assert isinstance(m, ModelRequest)
 
-    def test_unknown_webhook_treated_as_other(self) -> None:
-        """A webhook post from a removed/renamed agent (author_agent_id=None)
-        is just another speaker — projected as ModelRequest with the
-        webhook's display_name in the prefix."""
-        records = [
-            _record(
-                content="ghost",
-                author_display_name="Aksel",
-                author_agent_id=None,  # removed agent
-            ),
-        ]
-        out = project_history(records, self_agent_id="scribe")
-        assert len(out) == 1
-        assert isinstance(out[0], ModelRequest)
-        assert _text(out[0]) == "<Aksel> ghost"
-
-    def test_self_agent_id_none_does_not_self_classify(self) -> None:
-        """Records with author_agent_id matching None must not become
-        ModelResponse — None == None would be a false positive."""
-        records = [
-            _record(content="hi", author_display_name="ryan", author_agent_id=None),
-        ]
-        out = project_history(records, self_agent_id=None)
-        assert len(out) == 1
-        assert isinstance(out[0], ModelRequest)
-
     def test_hydration_none_is_byte_identical_default(self) -> None:
         """Passing ``hydration=None`` explicitly produces the same output as
-        omitting it — the replay kwarg defaults to a no-op so every existing
-        caller (router, ambient) is unaffected. Tool-call replay itself is
-        exercised in :mod:`tests.bridge.test_replay`."""
+        omitting it — the replay kwarg defaults to a no-op. Tool-call replay
+        itself is exercised in :mod:`tests.bridge.test_replay`."""
         records = [
             _record(message_id=1, content="how do I X?", author_display_name="ryan"),
-            _record(
-                message_id=2,
-                content="here's how",
-                author_display_name="Scribe",
-                author_agent_id="scribe",
-            ),
+            _record(message_id=2, content="here's how", author_display_name="Scribe", is_agent=True),
         ]
-        omitted = project_history(records, self_agent_id="scribe")
-        explicit = project_history(records, self_agent_id="scribe", hydration=None)
+        omitted = build_message_history(records)
+        explicit = build_message_history(records, hydration=None)
         assert len(omitted) == len(explicit) == 2
         for a, b in zip(omitted, explicit, strict=True):
             assert type(a) is type(b)
             assert _text(a) == _text(b)
+            assert _name(a) == _name(b)
 
 
 # ---------------------------------------------------------------------------
@@ -359,17 +295,14 @@ def _fake_discord_message(
     )
 
 
-def _registry_with_scribe() -> AgentRegistry:
-    return AgentRegistry(
-        [
-            AgentDefinition(
-                agent_id="scribe",
-                display_name="Scribe",
-                description="Scribe agent.",
-                system_prompt="You are Scribe.",
-            ),
-        ]
-    )
+def _owns_none(_webhook_id: int) -> bool:
+    """``owns_webhook`` predicate for fetcher tests with NO persona webhooks.
+
+    Every fetched message is then a human turn (``is_agent`` False). For human
+    messages (``webhook_id is None``) the predicate is never even consulted —
+    it is supplied only to satisfy the constructor's second positional arg
+    (which replaced the deleted ``AgentRegistry``)."""
+    return False
 
 
 def _httpexception(status: int = 500) -> discord.HTTPException:
@@ -404,11 +337,9 @@ class TestChannelHistoryFetcher:
                 _fake_discord_message(message_id=1, content="oldest"),
             ]
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         # Reversed to oldest-first.
         assert [r.message_id for r in records] == [1, 2, 3]
@@ -417,11 +348,9 @@ class TestChannelHistoryFetcher:
     @pytest.mark.asyncio
     async def test_zero_limit_short_circuits(self) -> None:
         client = MagicMock()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=0
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=0)
 
         assert records == []
         client.get_channel.assert_not_called()
@@ -429,11 +358,9 @@ class TestChannelHistoryFetcher:
     @pytest.mark.asyncio
     async def test_negative_limit_treated_as_zero(self) -> None:
         client = MagicMock()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=-5
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=-5)
 
         assert records == []
         client.get_channel.assert_not_called()
@@ -458,7 +385,7 @@ class TestChannelHistoryFetcher:
                 return _Empty()
 
         client.get_channel.return_value = _RecordingChannel()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=9999)
 
@@ -467,10 +394,8 @@ class TestChannelHistoryFetcher:
     @pytest.mark.asyncio
     async def test_cache_hit_within_ttl(self) -> None:
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe(), cache_ttl_seconds=10.0)
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=10.0)
 
         await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         # Second call within TTL should hit cache, not call discord.
@@ -481,11 +406,9 @@ class TestChannelHistoryFetcher:
     @pytest.mark.asyncio
     async def test_cache_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
         # Use a tiny TTL and advance monotonic between calls.
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe(), cache_ttl_seconds=0.1)
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=0.1)
 
         fake_now = {"v": 1000.0}
 
@@ -506,9 +429,7 @@ class TestChannelHistoryFetcher:
         client = MagicMock()
         # Each call hits a unique channel id → unique cache key.
         client.get_channel.return_value = _FakeChannel(messages=[])
-        fetcher = ChannelHistoryFetcher(
-            client, _registry_with_scribe(), cache_max_entries=2
-        )
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_max_entries=2)
 
         await fetcher.fetch(source_channel_id=1, before_message_id=999, limit=10)
         await fetcher.fetch(source_channel_id=2, before_message_id=999, limit=10)
@@ -525,44 +446,35 @@ class TestChannelHistoryFetcher:
         channel = MagicMock()
         channel.history = MagicMock(side_effect=_httpexception(500))
         client.get_channel.return_value = channel
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert records == []
         assert any("history fetch failed" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_handles_forbidden_logs_once_per_channel(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_handles_forbidden_logs_once_per_channel(self, caplog: pytest.LogCaptureFixture) -> None:
         client = MagicMock()
         channel = MagicMock()
         channel.history = MagicMock(side_effect=_forbidden())
         client.get_channel.return_value = channel
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         # Same channel, three fetches → one Forbidden WARN.
         await fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
         await fetcher.fetch(source_channel_id=100, before_message_id=2, limit=10)
         await fetcher.fetch(source_channel_id=100, before_message_id=3, limit=10)
 
-        forbidden_logs = [
-            r for r in caplog.records if "Read Message History" in r.message
-        ]
+        forbidden_logs = [r for r in caplog.records if "Read Message History" in r.message]
         assert len(forbidden_logs) == 1, (
-            f"expected 1 Forbidden log per channel, got {len(forbidden_logs)}: "
-            f"{[r.message for r in forbidden_logs]}"
+            f"expected 1 Forbidden log per channel, got {len(forbidden_logs)}: {[r.message for r in forbidden_logs]}"
         )
 
         # Different channel → another WARN fires.
         caplog.clear()
         await fetcher.fetch(source_channel_id=200, before_message_id=1, limit=10)
-        forbidden_logs = [
-            r for r in caplog.records if "Read Message History" in r.message
-        ]
+        forbidden_logs = [r for r in caplog.records if "Read Message History" in r.message]
         assert len(forbidden_logs) == 1
 
     @pytest.mark.asyncio
@@ -571,11 +483,9 @@ class TestChannelHistoryFetcher:
         channel = MagicMock()
         channel.history = MagicMock(side_effect=_not_found())
         client.get_channel.return_value = channel
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert records == []
 
     @pytest.mark.asyncio
@@ -584,15 +494,11 @@ class TestChannelHistoryFetcher:
         client = MagicMock()
         client.get_channel.return_value = None
         client.fetch_channel = AsyncMock(
-            return_value=_FakeChannel(
-                messages=[_fake_discord_message(message_id=1, content="hi")]
-            )
+            return_value=_FakeChannel(messages=[_fake_discord_message(message_id=1, content="hi")])
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert len(records) == 1
         assert records[0].content == "hi"
@@ -603,11 +509,9 @@ class TestChannelHistoryFetcher:
         client = MagicMock()
         client.get_channel.return_value = None
         client.fetch_channel = AsyncMock(side_effect=_not_found())
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert records == []
 
@@ -616,18 +520,18 @@ class TestChannelHistoryFetcher:
         client = MagicMock()
         client.get_channel.return_value = None
         client.fetch_channel = AsyncMock(side_effect=_forbidden())
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert records == []
 
     @pytest.mark.asyncio
-    async def test_resolves_webhook_to_agent_id(self) -> None:
-        """A webhook post whose display_name matches a registered agent
-        should have ``author_agent_id`` populated."""
+    async def test_owned_webhook_is_agent(self) -> None:
+        """A webhook post whose ``webhook_id`` is one of the bridge's persona
+        webhooks → ``is_agent`` True, with the persona username as the display
+        name (R-A3: identity by id, not by display name and not via a registry).
+        """
         client = MagicMock()
         client.get_channel.return_value = _FakeChannel(
             messages=[
@@ -639,74 +543,71 @@ class TestChannelHistoryFetcher:
                 ),
             ]
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, lambda wid: wid == 777)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert len(records) == 1
-        assert records[0].author_agent_id == "scribe"
+        assert records[0].is_agent is True
         assert records[0].author_display_name == "Scribe"
 
     @pytest.mark.asyncio
-    async def test_unknown_webhook_display_name_passes_through(self) -> None:
-        """Webhook with display_name not in registry → author_agent_id=None."""
+    async def test_unowned_webhook_is_not_agent(self) -> None:
+        """A third-party webhook (``webhook_id`` not owned by the bridge) is a
+        human turn — ``is_agent`` False — never mis-read as an agent."""
         client = MagicMock()
         client.get_channel.return_value = _FakeChannel(
             messages=[
                 _fake_discord_message(
                     message_id=1,
                     content="ghost",
-                    author_display_name="Aksel",  # not registered
-                    webhook_id=888,
+                    author_display_name="Aksel",
+                    webhook_id=888,  # not one of the bridge's webhooks
                 ),
             ]
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, lambda wid: wid == 777)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert len(records) == 1
-        assert records[0].author_agent_id is None
+        assert records[0].is_agent is False
         assert records[0].author_display_name == "Aksel"
 
     @pytest.mark.asyncio
-    async def test_non_webhook_message_never_resolves_agent_id(self) -> None:
-        """Even if a HUMAN's display_name happens to match an agent's
-        registered display_name, the record's ``author_agent_id`` must
-        remain None — agent identity requires the message to be a
-        webhook post."""
+    async def test_non_webhook_message_is_not_agent(self) -> None:
+        """A human message (``webhook_id is None``) is never an agent — and the
+        ``owns_webhook`` predicate is not even consulted (the id-None short
+        circuit in ``_to_record`` happens first), even when the human's display
+        name collides with a persona's."""
+
+        def _boom(_webhook_id: int) -> bool:
+            raise AssertionError("owns_webhook must not be consulted for a non-webhook message")
+
         client = MagicMock()
         client.get_channel.return_value = _FakeChannel(
             messages=[
                 _fake_discord_message(
                     message_id=1,
                     content="impersonator",
-                    author_display_name="Scribe",  # matches registered name
+                    author_display_name="Scribe",  # collides with a persona name
                     webhook_id=None,  # but not a webhook → not the agent
                 ),
             ]
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _boom)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert len(records) == 1
-        assert records[0].author_agent_id is None
+        assert records[0].is_agent is False
 
     @pytest.mark.asyncio
     async def test_defensive_copy_on_cache_hit(self) -> None:
         """Mutating a returned list must not corrupt the cache."""
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe(), cache_ttl_seconds=60.0)
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=60.0)
 
         first = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         first.clear()  # caller mutates
@@ -719,10 +620,8 @@ class TestChannelHistoryFetcher:
         """A second fetch with a different ``before_message_id`` is a
         cache miss even when channel + limit match."""
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         await fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
         await fetcher.fetch(source_channel_id=100, before_message_id=2, limit=10)
@@ -753,7 +652,7 @@ class TestChannelHistoryFetcher:
 
         client = MagicMock()
         client.get_channel.return_value = _SlowChannel()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         # Launch three concurrent fetches with the same key.
         async def _race() -> tuple[list[HistoryRecord], ...]:
@@ -784,10 +683,8 @@ class TestChannelHistoryFetcher:
         attaching to a completed future).
         """
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe(), cache_ttl_seconds=0.0)
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=0.0)
 
         await fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
         assert fetcher._in_flight == {}
@@ -795,39 +692,6 @@ class TestChannelHistoryFetcher:
         # entry is freshly created and freshly torn down.
         await fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
         assert fetcher._in_flight == {}
-
-    def test_history_record_rejects_invalid_agent_id(self) -> None:
-        """Stricter than the v1 happy path: a malformed author_agent_id
-        (empty string, bad chars) must be rejected at construction so
-        no caller can produce a record that compares equal to a valid
-        self_agent_id via accident.
-        """
-        with pytest.raises(ValidationError):
-            HistoryRecord(
-                message_id=1,
-                created_at=datetime.now(UTC),
-                content="x",
-                author_display_name="x",
-                author_agent_id="",
-            )
-        with pytest.raises(ValidationError):
-            HistoryRecord(
-                message_id=1,
-                created_at=datetime.now(UTC),
-                content="x",
-                author_display_name="x",
-                author_agent_id="UPPERCASE-NOT-ALLOWED",
-            )
-
-    def test_history_record_rejects_empty_display_name(self) -> None:
-        with pytest.raises(ValidationError):
-            HistoryRecord(
-                message_id=1,
-                created_at=datetime.now(UTC),
-                content="x",
-                author_display_name="",
-                author_agent_id=None,
-            )
 
     @pytest.mark.asyncio
     async def test_leader_cancellation_does_not_poison_followers(self) -> None:
@@ -855,17 +719,13 @@ class TestChannelHistoryFetcher:
 
         client = MagicMock()
         client.get_channel.return_value = _BlockingChannel()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         # Two concurrent fetches with the same key — leader (A) starts,
         # follower (B) joins via in-flight.
-        leader = _asyncio.create_task(
-            fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
-        )
+        leader = _asyncio.create_task(fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10))
         await _asyncio.sleep(0)  # let leader register in_flight
-        follower = _asyncio.create_task(
-            fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
-        )
+        follower = _asyncio.create_task(fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10))
         await _asyncio.sleep(0)
         await _asyncio.sleep(0)  # let follower hit the in-flight branch
 
@@ -882,9 +742,7 @@ class TestChannelHistoryFetcher:
         assert fetcher._in_flight == {}
 
     @pytest.mark.asyncio
-    async def test_unexpected_exception_is_absorbed_for_all_callers(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_unexpected_exception_is_absorbed_for_all_callers(self, caplog: pytest.LogCaptureFixture) -> None:
         """If something inside ``fetch`` raises an unexpected exception
         (i.e. one that escapes ``_do_fetch``'s own defensive sweep —
         a true bug in the cache helper, etc.), the public contract
@@ -892,10 +750,8 @@ class TestChannelHistoryFetcher:
         hold: both the leader and any concurrent followers get [].
         """
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         # Force a non-Discord, non-CancelledError exception by breaking
         # _cache_and_return (which runs in the happy path after
@@ -903,23 +759,14 @@ class TestChannelHistoryFetcher:
         # protected scope" case.
         from unittest.mock import patch as _patch
 
-        with _patch.object(
-            fetcher, "_cache_and_return", side_effect=RuntimeError("boom")
-        ):
-            result = await fetcher.fetch(
-                source_channel_id=100, before_message_id=1, limit=10
-            )
+        with _patch.object(fetcher, "_cache_and_return", side_effect=RuntimeError("boom")):
+            result = await fetcher.fetch(source_channel_id=100, before_message_id=1, limit=10)
 
         assert result == []
-        assert any(
-            "single-flight raised unexpectedly" in r.message
-            for r in caplog.records
-        )
+        assert any("single-flight raised unexpectedly" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_defensive_sweep_on_malformed_message(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_defensive_sweep_on_malformed_message(self, caplog: pytest.LogCaptureFixture) -> None:
         """If a future discord.py returns a Message missing an attribute
         the fetcher reads, the projection-time AttributeError must NOT
         raise into the invocation path (the documented contract).
@@ -933,15 +780,11 @@ class TestChannelHistoryFetcher:
         )
         client = MagicMock()
         client.get_channel.return_value = _FakeChannel(messages=[bad_msg])
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert records == []
-        assert any(
-            "failed to project messages" in r.message for r in caplog.records
-        )
+        assert any("failed to project messages" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -964,12 +807,8 @@ class TestBypassCache:
         """A bypass fetch must NOT serve a cache-hit, even when a fresh
         entry from a prior default fetch exists for the same key."""
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(
-            client, _registry_with_scribe(), cache_ttl_seconds=60.0
-        )
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=60.0)
 
         # Populate the cache via a default fetch.
         await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
@@ -977,9 +816,7 @@ class TestBypassCache:
 
         # Bypass fetch with identical key must NOT hit the cache —
         # Discord is queried again.
-        await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True
-        )
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True)
         assert client.get_channel.call_count == 2
 
     @pytest.mark.asyncio
@@ -987,16 +824,10 @@ class TestBypassCache:
         """A bypass fetch must NOT populate the LRU, so a subsequent
         default fetch with the same key still misses and hits Discord."""
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(
-            client, _registry_with_scribe(), cache_ttl_seconds=60.0
-        )
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=60.0)
 
-        await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True
-        )
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True)
         assert client.get_channel.call_count == 1
 
         # The bypass fetch did not write to the cache; default fetch
@@ -1025,7 +856,7 @@ class TestBypassCache:
 
         client = MagicMock()
         client.get_channel.return_value = _SlowChannel()
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
         async def _race() -> tuple[list[HistoryRecord], ...]:
             return await _asyncio.gather(
@@ -1065,12 +896,8 @@ class TestBypassCache:
         produce the same observable behavior.
         """
         client = MagicMock()
-        client.get_channel.return_value = _FakeChannel(
-            messages=[_fake_discord_message(message_id=1)]
-        )
-        fetcher = ChannelHistoryFetcher(
-            client, _registry_with_scribe(), cache_ttl_seconds=60.0
-        )
+        client.get_channel.return_value = _FakeChannel(messages=[_fake_discord_message(message_id=1)])
+        fetcher = ChannelHistoryFetcher(client, _owns_none, cache_ttl_seconds=60.0)
 
         # Cold call writes to cache.
         await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
@@ -1117,9 +944,7 @@ class TestIsClearMarker:
         assert is_clear_marker(msg, _BOT_ID) is True
 
     def test_rejects_wrong_content(self) -> None:
-        msg = _fake_discord_message(
-            message_id=1, content="not the marker", author_id=_BOT_ID, webhook_id=None
-        )
+        msg = _fake_discord_message(message_id=1, content="not the marker", author_id=_BOT_ID, webhook_id=None)
         assert is_clear_marker(msg, _BOT_ID) is False
 
     def test_rejects_user_typed_sentinel(self) -> None:
@@ -1160,7 +985,7 @@ class TestClearMarkerTruncation:
         client = MagicMock()
         client.user = SimpleNamespace(id=_BOT_ID)
         client.get_channel.return_value = _FakeChannel(messages=messages)
-        return ChannelHistoryFetcher(client, _registry_with_scribe())
+        return ChannelHistoryFetcher(client, _owns_none)
 
     @pytest.mark.asyncio
     async def test_truncates_at_marker(self) -> None:
@@ -1169,15 +994,11 @@ class TestClearMarkerTruncation:
             [
                 _fake_discord_message(message_id=4, content="after2"),
                 _fake_discord_message(message_id=3, content="after1"),
-                _fake_discord_message(
-                    message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
                 _fake_discord_message(message_id=1, content="before"),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert [r.message_id for r in records] == [3, 4]
         assert all(r.content != CLEAR_MARKER_TEXT for r in records)
 
@@ -1189,9 +1010,7 @@ class TestClearMarkerTruncation:
                 _fake_discord_message(message_id=1, content="a"),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert [r.message_id for r in records] == [1, 2]
 
     @pytest.mark.asyncio
@@ -1200,19 +1019,13 @@ class TestClearMarkerTruncation:
         fetcher = self._fetcher(
             [
                 _fake_discord_message(message_id=5, content="keep"),
-                _fake_discord_message(
-                    message_id=4, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=4, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
                 _fake_discord_message(message_id=3, content="between"),
-                _fake_discord_message(
-                    message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=2, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
                 _fake_discord_message(message_id=1, content="old"),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert [r.message_id for r in records] == [5]
 
     @pytest.mark.asyncio
@@ -1220,16 +1033,12 @@ class TestClearMarkerTruncation:
         # newest-first: marker(3), 2, 1 → everything dropped.
         fetcher = self._fetcher(
             [
-                _fake_discord_message(
-                    message_id=3, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=3, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
                 _fake_discord_message(message_id=2, content="b"),
                 _fake_discord_message(message_id=1, content="a"),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         assert records == []
 
     @pytest.mark.asyncio
@@ -1245,14 +1054,10 @@ class TestClearMarkerTruncation:
                 _fake_discord_message(message_id=5, content="newest"),
                 _fake_discord_message(message_id=4, content="next"),
                 _fake_discord_message(message_id=3, content="mid"),
-                _fake_discord_message(
-                    message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=2
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=2)
         assert [r.message_id for r in records] == [4, 5]
 
     @pytest.mark.asyncio
@@ -1261,14 +1066,10 @@ class TestClearMarkerTruncation:
         fetcher = self._fetcher(
             [
                 _fake_discord_message(message_id=2, content="after"),
-                _fake_discord_message(
-                    message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID + 1
-                ),
+                _fake_discord_message(message_id=1, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID + 1),
             ]
         )
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         # Both kept; the spoofed sentinel is just another user message.
         assert [r.message_id for r in records] == [1, 2]
 
@@ -1309,7 +1110,7 @@ def _fetcher_for(thread: Any) -> ChannelHistoryFetcher:
     client = MagicMock()
     client.user = SimpleNamespace(id=_BOT_ID)
     client.get_channel.return_value = thread
-    return ChannelHistoryFetcher(client, _registry_with_scribe())
+    return ChannelHistoryFetcher(client, _owns_none)
 
 
 # The starter id equals the thread id (Discord invariant); in-thread messages
@@ -1324,9 +1125,7 @@ class TestThreadStarterMessage:
     @pytest.mark.asyncio
     async def test_followup_prepends_starter_via_rest(self) -> None:
         # Cache miss (starter_message=None) → recovered via parent.fetch_message.
-        starter = _fake_discord_message(
-            message_id=_THREAD_ID, content="do the task", author_display_name="ryan"
-        )
+        starter = _fake_discord_message(message_id=_THREAD_ID, content="do the task", author_display_name="ryan")
         parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter))
         thread = _FakeThread(
             [
@@ -1340,9 +1139,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1003, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1003, limit=10)
 
         # Starter is the oldest record, followed by the in-thread messages.
         assert [r.message_id for r in records] == [_THREAD_ID, 1001, 1002]
@@ -1363,9 +1160,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [_THREAD_ID, 1001]
         # In-memory cache hit ⇒ no REST round-trip.
@@ -1387,9 +1182,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=_THREAD_ID, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=_THREAD_ID, limit=10)
 
         assert records == []
 
@@ -1405,11 +1198,9 @@ class TestThreadStarterMessage:
                 _fake_discord_message(message_id=1, content="a"),
             ]
         )
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=100, before_message_id=999, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
 
         assert [r.message_id for r in records] == [1, 2]
 
@@ -1418,12 +1209,8 @@ class TestThreadStarterMessage:
         # Forum-post thread: the starter (id == thread id) IS returned by
         # history(); the membership guard must skip the prepend so it isn't
         # duplicated.
-        starter_in_thread = _fake_discord_message(
-            message_id=_THREAD_ID, content="forum op"
-        )
-        parent = SimpleNamespace(
-            fetch_message=AsyncMock(return_value=starter_in_thread)
-        )
+        starter_in_thread = _fake_discord_message(message_id=_THREAD_ID, content="forum op")
+        parent = SimpleNamespace(fetch_message=AsyncMock(return_value=starter_in_thread))
         thread = _FakeThread(
             [
                 _fake_discord_message(message_id=1001, content="reply"),
@@ -1436,9 +1223,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [_THREAD_ID, 1001]
 
@@ -1455,16 +1240,12 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [1001]
 
     @pytest.mark.asyncio
-    async def test_starter_forbidden_logs_once(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_starter_forbidden_logs_once(self, caplog: pytest.LogCaptureFixture) -> None:
         # Missing Read Message History on the parent → no prepend, deduped log.
         parent = SimpleNamespace(fetch_message=AsyncMock(side_effect=_forbidden()))
         thread = _FakeThread(
@@ -1478,18 +1259,12 @@ class TestThreadStarterMessage:
 
         # Distinct before_message_id values bypass the TTL cache so both
         # fetches re-attempt recovery (and both hit Forbidden).
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
-        records_again = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1003, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
+        records_again = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1003, limit=10)
 
         assert [r.message_id for r in records] == [1001]
         assert [r.message_id for r in records_again] == [1001]
-        forbidden_logs = [
-            r for r in caplog.records if "Read Message History" in r.message
-        ]
+        forbidden_logs = [r for r in caplog.records if "Read Message History" in r.message]
         assert len(forbidden_logs) == 1
 
     @pytest.mark.asyncio
@@ -1501,9 +1276,7 @@ class TestThreadStarterMessage:
         thread = _FakeThread(
             [
                 _fake_discord_message(message_id=1002, content="after clear"),
-                _fake_discord_message(
-                    message_id=1001, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID
-                ),
+                _fake_discord_message(message_id=1001, content=CLEAR_MARKER_TEXT, author_id=_BOT_ID),
             ],
             thread_id=_THREAD_ID,
             parent_id=_PARENT_ID,
@@ -1512,9 +1285,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1003, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1003, limit=10)
 
         # Only the post-marker message survives; the anchor was above the line.
         assert [r.message_id for r in records] == [1002]
@@ -1538,11 +1309,9 @@ class TestThreadStarterMessage:
             return {_THREAD_ID: thread, _PARENT_ID: parent}.get(cid)
 
         client.get_channel.side_effect = _get_channel
-        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+        fetcher = ChannelHistoryFetcher(client, _owns_none)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [_THREAD_ID, 1001]
         parent.fetch_message.assert_awaited_once_with(_THREAD_ID)
@@ -1560,22 +1329,16 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [1001]
 
     @pytest.mark.asyncio
-    async def test_starter_http_exception_degrades(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_starter_http_exception_degrades(self, caplog: pytest.LogCaptureFixture) -> None:
         # A non-Forbidden/non-NotFound 5xx from parent.fetch_message must be
         # caught (WARN) and degrade to thread-only history — NOT escape into
         # _do_fetch's defensive sweep (which would drop the whole thread).
-        parent = SimpleNamespace(
-            fetch_message=AsyncMock(side_effect=_httpexception(500))
-        )
+        parent = SimpleNamespace(fetch_message=AsyncMock(side_effect=_httpexception(500)))
         thread = _FakeThread(
             [_fake_discord_message(message_id=1001, content="followup")],
             thread_id=_THREAD_ID,
@@ -1585,15 +1348,11 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         # In-thread message survives (graceful degrade), not empty history.
         assert [r.message_id for r in records] == [1001]
-        assert any(
-            "starter-message fetch failed" in r.message for r in caplog.records
-        )
+        assert any("starter-message fetch failed" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_starter_after_before_window_excluded(self) -> None:
@@ -1637,9 +1396,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1002, limit=10
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1002, limit=10)
 
         assert [r.message_id for r in records] == [_THREAD_ID]
 
@@ -1667,9 +1424,7 @@ class TestThreadStarterMessage:
         )
         fetcher = _fetcher_for(thread)
 
-        records = await fetcher.fetch(
-            source_channel_id=_THREAD_ID, before_message_id=1004, limit=3
-        )
+        records = await fetcher.fetch(source_channel_id=_THREAD_ID, before_message_id=1004, limit=3)
 
         # limit=3 in-thread messages + the prepended starter == 4 (limit + 1),
         # starter first. The caller's [-N:] re-trim would drop the starter.

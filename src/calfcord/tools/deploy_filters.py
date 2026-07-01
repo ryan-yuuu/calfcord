@@ -92,17 +92,12 @@ def parse_alias_csv(raw: str) -> dict[str, str]:
         if not chunk:
             continue
         if "=" not in chunk:
-            raise ValueError(
-                f"alias entry {chunk!r} has no '=' — expected src=dst "
-                f"(full value: {raw!r})"
-            )
+            raise ValueError(f"alias entry {chunk!r} has no '=' — expected src=dst (full value: {raw!r})")
         src, _, dst = chunk.partition("=")
         src = src.strip()
         dst = dst.strip()
         if not src or not dst:
-            raise ValueError(
-                f"alias entry {chunk!r} has empty src or dst (full value: {raw!r})"
-            )
+            raise ValueError(f"alias entry {chunk!r} has empty src or dst (full value: {raw!r})")
         if not TOOL_NAME_REGEX.match(dst):
             raise ValueError(
                 f"alias target {dst!r} is not a valid tool name; must match "
@@ -110,8 +105,7 @@ def parse_alias_csv(raw: str) -> dict[str, str]:
             )
         if src == dst:
             raise ValueError(
-                f"alias entry {chunk!r} aliases a tool to itself; pick a "
-                f"distinct target (full value: {raw!r})"
+                f"alias entry {chunk!r} aliases a tool to itself; pick a distinct target (full value: {raw!r})"
             )
         if src in result:
             raise ValueError(
@@ -151,9 +145,9 @@ def is_aliasable(node: ToolNodeDef) -> bool:
     """Whether ``node`` can be cloned under a second wire identity.
 
     A tool that registers node-scoped lifecycle state — an ``@resource``
-    bracket or a lifecycle hook (only ``todo`` and ``private_chat`` today) —
-    cannot be aliased: the clone can't safely share that per-node resource.
-    Stateless and worker-resource tools (terminal, files, web_*) are aliasable.
+    bracket or a lifecycle hook (only ``todo`` today) — cannot be aliased:
+    the clone can't safely share that per-node resource. Stateless and
+    worker-resource tools (terminal, files, web_*) are aliasable.
 
     NOTE: this inspects calfkit's private lazily-created ``__dict__`` keys
     (the same ones ``_clone_with_name`` keys off and the worker populates). If
@@ -163,10 +157,7 @@ def is_aliasable(node: ToolNodeDef) -> bool:
     "is this node stateless?" predicate on ``ToolNodeDef`` would remove this
     coupling — worth filing upstream if it churns.
     """
-    return not (
-        node.__dict__.get("_lifecycle_resource_cms")
-        or node.__dict__.get("_lifecycle_hooks")
-    )
+    return not (node.__dict__.get("_lifecycle_resource_cms") or node.__dict__.get("_lifecycle_hooks"))
 
 
 def validate_alias(
@@ -186,18 +177,14 @@ def validate_alias(
     ``{src: dst}`` aliases.
     """
     if src not in tool_names:
-        raise ValueError(
-            f"{src!r} is not a known tool; valid tools: {sorted(tool_names)}"
-        )
+        raise ValueError(f"{src!r} is not a known tool; valid tools: {sorted(tool_names)}")
     if src not in aliasable_names:
         raise ValueError(
             f"tool {src!r} can't be aliased (it holds per-session state); "
             f"aliasing is for stateless tools like terminal/search_files/web_*"
         )
     if not TOOL_NAME_REGEX.match(dst):
-        raise ValueError(
-            f"{dst!r} is not a valid tool name; must match {TOOL_NAME_REGEX.pattern}"
-        )
+        raise ValueError(f"{dst!r} is not a valid tool name; must match {TOOL_NAME_REGEX.pattern}")
     if dst == src:
         raise ValueError(f"cannot alias {src!r} to itself; pick a distinct name")
     if dst in tool_names:
@@ -205,10 +192,7 @@ def validate_alias(
     if dst in set(existing.values()):
         raise ValueError(f"{dst!r} is already used as an alias target")
     if src in existing:
-        raise ValueError(
-            f"{src!r} is already aliased to {existing[src]!r}; "
-            f"remove that alias first to change it"
-        )
+        raise ValueError(f"{src!r} is already aliased to {existing[src]!r}; remove that alias first to change it")
 
 
 def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
@@ -232,10 +216,10 @@ def _clone_with_name(node: ToolNodeDef, new_name: str) -> ToolNodeDef:
 
     Aliasing is only valid for tools with no node-scoped lifecycle state.
     A tool that registers ``@resource`` brackets or lifecycle hooks (only
-    ``todo`` and ``private_chat`` today — both single-host by nature) can't
-    be cloned under a second wire identity without its resource being built
-    twice, so this raises rather than carrying brittle copy-the-internals
-    logic for a path no real deployment exercises.
+    ``todo`` today — single-host by nature) can't be cloned under a second
+    wire identity without its resource being built twice, so this raises
+    rather than carrying brittle copy-the-internals logic for a path no real
+    deployment exercises.
 
     Raises:
         ValueError: if ``node`` has node-scoped resources or lifecycle hooks.
@@ -302,10 +286,7 @@ def apply_deploy_filters(nodes: Sequence[ToolNodeDef]) -> dict[str, ToolNodeDef]
     for node in nodes:
         name = node.tool_schema.name
         if name in original_names:
-            raise ValueError(
-                f"tool name {name!r} appears twice in the tool surface; "
-                f"each tool must be unique"
-            )
+            raise ValueError(f"tool name {name!r} appears twice in the tool surface; each tool must be unique")
         original_names.add(name)
     unknown_sources = set(alias_map) - original_names
     if unknown_sources:
@@ -337,8 +318,7 @@ def apply_deploy_filters(nodes: Sequence[ToolNodeDef]) -> dict[str, ToolNodeDef]
                 continue
             if name in registry:
                 raise ValueError(
-                    f"tool name {name!r} is registered twice; an alias target "
-                    f"collides with an existing tool name"
+                    f"tool name {name!r} is registered twice; an alias target collides with an existing tool name"
                 )
             registry[name] = resolved
             logger.info("registered tool=%s", name)
@@ -351,8 +331,7 @@ def apply_deploy_filters(nodes: Sequence[ToolNodeDef]) -> dict[str, ToolNodeDef]
         unknown = include_set - matchable
         if unknown:
             logger.warning(
-                "CALFCORD_TOOLS_INCLUDE names not found in the tool surface: "
-                "%s; available: %s",
+                "CALFCORD_TOOLS_INCLUDE names not found in the tool surface: %s; available: %s",
                 sorted(unknown),
                 sorted(matchable),
             )

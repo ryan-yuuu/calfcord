@@ -11,7 +11,7 @@ The shape is the §13.2 Phase-0 contract, pinned against Process Compose
 ``v1.110.0`` (config schema ``version: "0.5"``):
 
 * **Substrate** (``broker``, ``bridge``) autostarts under ``calfcord start``;
-  **roster** (every agent + ``tools`` / ``router``) is declared
+  **roster** (every agent + ``tools``) is declared
   ``disabled`` and waits for an explicit ``... start`` (a ``POST /process/start``).
   "Nothing runs that the user did not start" is a trust property, so the split is
   encoded here, not left to the launcher.
@@ -24,7 +24,7 @@ The shape is the §13.2 Phase-0 contract, pinned against Process Compose
   (``process_healthy``); readiness is an ``exec`` probe (the bridge has no HTTP
   server) calling ``<launcher> _healthcheck <component>``.
 * ``restart: always`` for the substrate (``broker``, ``bridge``); ``on_failure``
-  for the whole roster — every agent *and* ``tools`` / ``router`` — which
+  for the whole roster — every agent *and* ``tools`` — which
   now all run via ``run_worker_until_signal`` and therefore force a non-zero exit
   on any uncommanded exit (a crash *or* a clean signal-less return), while an
   operator-commanded ``stop`` is suppressed from restart by Process Compose
@@ -90,7 +90,7 @@ SUPERVISOR_LOG_STEM = "process-compose"
 # Process names owned by the substrate + non-agent components. An agent id equal
 # to one of these would silently overwrite that process's entry in the shared
 # `processes` dict (corrupting the substrate), so the generator rejects it.
-_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools", "router"})
+_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools"})
 
 # The slot-name convention for MCP servers, homed here (like
 # SUPERVISOR_LOG_STEM) because compose declares the slots and the roster
@@ -151,9 +151,7 @@ def _process(
         "log_location": _log_location(home, name),
     }
     if depends_on is not None:
-        proc["depends_on"] = {
-            dep: {"condition": condition} for dep, condition in depends_on.items()
-        }
+        proc["depends_on"] = {dep: {"condition": condition} for dep, condition in depends_on.items()}
     if readiness_probe is not None:
         proc["readiness_probe"] = readiness_probe
     return proc
@@ -222,7 +220,7 @@ def build_compose_project(
 
     # Roster — declared disabled; each member clocks in on an explicit start and
     # gates on the broker being healthy. Every roster member (agents *and*
-    # tools/router) runs via run_worker_until_signal, which forces a non-zero
+    # tools) runs via run_worker_until_signal, which forces a non-zero
     # exit on any uncommanded exit, so on_failure restarts a crash while an
     # operator-commanded stop is suppressed from restart by Process Compose.
     for agent_id in agent_ids:
@@ -235,7 +233,7 @@ def build_compose_project(
             depends_on={"broker": _HEALTHY},
         )
 
-    for component in ("tools", "router"):
+    for component in ("tools",):
         processes[component] = _process(
             command=f"{launcher} run {component}",
             home=home,
@@ -271,16 +269,12 @@ def build_compose_project(
     }
 
 
-def render_compose(
-    *, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()
-) -> str:
+def render_compose(*, agent_ids: Iterable[str], home: str, launcher: str, mcp_servers: Iterable[str] = ()) -> str:
     """Render the Process Compose project as a YAML string.
 
     Thin serializer over :func:`build_compose_project` — ``sort_keys=False`` keeps
     the substrate-before-roster ordering the builder emits, which makes the
     generated file readable even though the user never edits it.
     """
-    project = build_compose_project(
-        agent_ids=agent_ids, home=home, launcher=launcher, mcp_servers=mcp_servers
-    )
+    project = build_compose_project(agent_ids=agent_ids, home=home, launcher=launcher, mcp_servers=mcp_servers)
     return yaml.safe_dump(project, sort_keys=False)

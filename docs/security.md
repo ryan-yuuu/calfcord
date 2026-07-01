@@ -17,9 +17,15 @@ host access. There is no syscall filter, no per-tool permission grant,
 no per-call confirmation prompt. The tools are the vendored
 `calfkit-tools` nodes (`terminal`, `process`, `read_file`, `write_file`,
 `patch`, `search_files`, `todo`, `execute_code`, `web_search`,
-`web_extract`, `web_fetch`) plus the first-party `private_chat`; they
-lean directly into that posture, and any tool a contributor adds
-inherits it.
+`web_extract`, `web_fetch`); they lean directly into that posture, and any
+tool a contributor adds inherits it.
+
+The tools process holds **no Discord credentials.** Since the calfkit-012
+migration it is pure compute on the broker — native agent-to-agent messaging
+and its audit channel are bridge-hosted, and the first-party `private_chat`
+tool is gone — so a compromised tools host cannot leak the bot token. The
+shipped `docker-compose.yml` blanks `DISCORD_BOT_TOKEN` for the `tools`
+service to make that blast-radius reduction explicit.
 
 **Stateful tools isolate per agent.** While there is no *sandbox*, the
 vendored stateful nodes (`terminal`, `process`, the in-flight file
@@ -146,7 +152,6 @@ malicious system prompt and a broad tool list:
 ```yaml
 ---
 name: helper
-display_name: Helper
 description: General helper.
 tools: [terminal, write_file, read_file]
 ---
@@ -180,9 +185,9 @@ drift-guard test fails CI if calfcord's list and the vendored package's
 published set diverge.
 
 The mitigation is again operational: review every PR that touches
-`ALL_TOOLS` or the first-party tool bodies (`tools/private_chat.py`),
-including their imports, and treat a `calfkit-tools` dependency bump as a
-review of any tool behaviour it changes.
+`ALL_TOOLS` (the explicit tool surface in `src/calfcord/tools/__init__.py`),
+including any imports it adds, and treat a `calfkit-tools` dependency bump as
+a review of any tool behaviour it changes.
 
 The same trust assumption extends to **MCP servers**: a server in `mcp.json`
 is external code (a command this host launches, or a remote endpoint) that
@@ -254,7 +259,6 @@ Compose merges this on top of the base file. Now any agent with `terminal`,
 `read_file`, `write_file`, or `patch` can:
 
 - Read `agents/*.md` (every agent's identity, system prompt, and tool list).
-- Read `state/agents/*.json` (every agent's channel subscriptions).
 - Read `src/` (the application source — including any secrets a
   contributor accidentally committed).
 - Read a root-level `.env` (Docker bind-mounts follow symlinks too).
@@ -270,7 +274,7 @@ override at that path (`- ./some/subdir:/workspace`) instead of `.`.
 ### 3.3 Tools native, broker + others in Docker
 
 **Best for:** A production deployment where you want the bridge / agent
-/ router lifecycles managed by Docker but you want the tools surface to
+lifecycles managed by Docker but you want the tools surface to
 have explicit host access (e.g. so agents can drive your laptop's git
 checkouts, your real `state/workspace`, or your real `.ssh`).
 
@@ -283,7 +287,7 @@ uv run calfkit-tools
 Keep the rest of the stack in compose:
 
 ```bash
-docker compose up -d tansu bridge agent router
+docker compose up -d tansu bridge agent
 ```
 
 Now the tools process runs as your shell user with the full filesystem
@@ -413,12 +417,13 @@ matters in practice.
   `src/calfcord/discord/settings.py`. Global slash sync
   has a longer propagation delay and exposes the commands in every
   guild the bot is in, including ones where you didn't intend to.
-- **Limit which channels each agent subscribes to.** An agent only
-  responds in channels its `state/agents/<name>.json` lists. The
-  bootstrap env var (`CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS`)
-  is the seed; once the state file exists, edit it directly and run
-  `calfcord agent restart <name>` to reload it. See
-  `docs/authoring-agents.md` § Channel subscriptions for the lifecycle.
+- **There is no per-agent channel allowlist any more.** Name-addressing
+  (the calfkit-012 migration) removed per-agent channel subscriptions and
+  the `state/agents/<name>.json` seed, so an agent replies to any `@mention`
+  in any channel the bot can see. The controls that remain are keeping the
+  bot off public guilds (§ 3.4) and — on a split deploy — broker access
+  control (§ 7.2), since anyone who can write to the broker can invoke an
+  agent directly on `agent.<name>.private.input`.
 
 ### 5.3 Process / log hygiene
 
@@ -435,10 +440,12 @@ matters in practice.
 
 ### 5.4 Backups
 
-- **`state/agents/*.json`** contains the channel subscriptions that
-  determine where each agent listens. Loss of these files re-runs the
-  bootstrap-env path on next boot — possibly with stale or no
-  channels. Back them up.
+- **The bridge's SQLite store** (under `./state`, default
+  `state/transcripts.sqlite3`) holds step transcripts and the per-agent
+  thinking-effort overrides (`/thinking-effort`). It is the one piece of
+  calfcord-managed state worth backing up; agents themselves keep no
+  per-agent on-disk state now that name-addressing removed channel
+  subscriptions (`state/agents/*.json` is gone).
 - **No broker volume to back up by default.** The shipped `tansu` broker
   uses ephemeral memory storage, so there is no persisted Kafka data —
   topics/messages reset on broker restart, and calfcord re-creates the
@@ -500,11 +507,26 @@ from § 1 assumes the broker is also trusted. There is no per-call
 signing, no per-caller allowlist, no replay protection beyond what
 Kafka inherently provides.
 
+The calfkit-012 migration widened this surface in two ways, both mitigated
+only by broker access control:
+
+- **Any broker-writer can invoke any agent.** Agents are now name-addressed:
+  a message published to `agent.<name>.private.input` reaches that agent's
+  LLM directly. The old `slash_target` addressing gate — which only let a
+  message through once the bridge had marked it as addressed to that agent —
+  is gone, so that in-app defense-in-depth check no longer stands between a
+  broker-writer and an agent.
+- **Roster poisoning via forged `AgentCard`s.** The bridge and CLI build
+  their roster from calfkit's agent mesh (the `AgentCard`s advertised on
+  `calf.agents`). A broker-writer can advertise a forged `AgentCard`,
+  injecting a fake agent or shadowing a real name in the roster. Only broker
+  write-access control keeps the mesh honest.
+
 The implication: for distributed deployments, **broker auth IS the
-perimeter** for tool invocation. Rotate broker credentials like you
-rotate the Discord bot token (§ 5.1). A leaked broker password gives
-the holder the same blast radius as a leaked bot token gives them
-inside Discord.
+perimeter** — for tool invocation, agent invocation, and roster integrity
+alike. Rotate broker credentials like you rotate the Discord bot token
+(§ 5.1). A leaked broker password gives the holder the same blast radius as
+a leaked bot token gives them inside Discord.
 
 For the operational mechanics of splitting calfcord across hosts —
 including the network prereq and per-host tool narrowing via

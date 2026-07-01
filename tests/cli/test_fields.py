@@ -4,9 +4,8 @@ The registry is the single source of truth for which agent ``.md`` fields are
 editable, so these tests pin both halves of that contract: :func:`render_value`
 (the one renderer the menu and ``show`` share) for every field kind, and
 :func:`write_simple_field` (the one validated-atomic write the menu and ``set``
-share) including the two failure modes the design must surface cleanly — an
-out-of-range ``history_turns`` and a bad ``thinking_effort`` — both of which
-must leave the on-disk file untouched.
+share) including the failure mode the design must surface cleanly — a bad
+``thinking_effort`` — which must leave the on-disk file untouched.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from calfcord.cli._fields import (
 def _make_definition(**overrides: object) -> AgentDefinition:
     defaults = dict(
         agent_id="scribe",
-        display_name="Scribe",
         description="Takes notes.",
         system_prompt="You are Scribe.",
     )
@@ -41,7 +39,6 @@ def _make_definition(**overrides: object) -> AgentDefinition:
 def _seed_md(tmp_path: Path, **meta_overrides: object) -> Path:
     meta: dict[str, object] = {
         "name": "scribe",
-        "display_name": "Scribe",
         "description": "Takes notes.",
         "provider": "anthropic",
     }
@@ -91,10 +88,6 @@ def test_simple_kinds_carry_no_dedicated_editor_marker() -> None:
         {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": None},
         # A non-select field must NOT carry choices.
         {"key": "k", "label": "L", "kind": "text", "flag": "--k", "choices": ("a",)},
-        # An int field MUST carry both bounds.
-        {"key": "k", "label": "L", "kind": "int", "flag": "--k"},
-        # A non-int field must NOT carry int bounds.
-        {"key": "k", "label": "L", "kind": "text", "flag": "--k", "int_min": 0},
     ],
 )
 def test_field_post_init_rejects_malformed_entry(kwargs: dict[str, object]) -> None:
@@ -106,13 +99,11 @@ def test_field_post_init_rejects_malformed_entry(kwargs: dict[str, object]) -> N
 @pytest.mark.parametrize(
     "kwargs",
     [
-        # Well-formed select (choices present, no int bounds).
+        # Well-formed select (choices present).
         {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": ("a", "b")},
-        # Well-formed int (both bounds, no choices).
-        {"key": "k", "label": "L", "kind": "int", "flag": "--k", "int_min": 0, "int_max": 10},
-        # Well-formed simple text (neither choices nor bounds).
+        # Well-formed simple text (no choices).
         {"key": "k", "label": "L", "kind": "text", "flag": "--k"},
-        # Well-formed compound kind (neither choices nor bounds).
+        # Well-formed compound kind (no choices).
         {"key": "k", "label": "L", "kind": "bool", "flag": "--k"},
     ],
 )
@@ -210,11 +201,6 @@ def test_render_bool_on_off() -> None:
     assert render_value(off, FIELDS_BY_KEY["memory"]) == "off"
 
 
-def test_render_int_history_turns() -> None:
-    defn = _make_definition(history_turns=12)
-    assert render_value(defn, FIELDS_BY_KEY["history_turns"]) == "12"
-
-
 def test_render_thinking_effort_unset_is_default() -> None:
     defn = _make_definition()  # thinking_effort None
     assert render_value(defn, FIELDS_BY_KEY["thinking_effort"]) == "(default)"
@@ -223,11 +209,6 @@ def test_render_thinking_effort_unset_is_default() -> None:
 def test_render_thinking_effort_set() -> None:
     defn = _make_definition(thinking_effort="high")
     assert render_value(defn, FIELDS_BY_KEY["thinking_effort"]) == "high"
-
-
-def test_render_avatar_url_unset_is_default() -> None:
-    defn = _make_definition()  # avatar_url None
-    assert render_value(defn, FIELDS_BY_KEY["avatar_url"]) == "(default)"
 
 
 # --- write_simple_field -----------------------------------------------------
@@ -247,13 +228,6 @@ def test_write_select_field(tmp_path: Path) -> None:
     assert parse_agent_md(md_path).thinking_effort == "xhigh"
 
 
-def test_write_int_field(tmp_path: Path) -> None:
-    md_path = _seed_md(tmp_path)
-    updated = write_simple_field(md_path, FIELDS_BY_KEY["history_turns"], "50")
-    assert updated.history_turns == 50
-    assert parse_agent_md(md_path).history_turns == 50
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [("on", True), ("true", True), ("yes", True), ("1", True), ("off", False), ("false", False), ("no", False)],
@@ -265,30 +239,6 @@ def test_write_bool_field(tmp_path: Path, raw: str, expected: bool) -> None:
     md_path = _seed_md(tmp_path)
     updated = write_simple_field(md_path, FIELDS_BY_KEY["memory"], raw)
     assert updated.memory is expected
-
-
-def test_write_int_out_of_range_raises_and_leaves_file(tmp_path: Path) -> None:
-    """An out-of-range history_turns must fail at the AgentDefinition validator,
-    with the on-disk file untouched (the validate-before-write guarantee)."""
-    md_path = _seed_md(tmp_path)
-    original = md_path.read_text(encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        write_simple_field(md_path, FIELDS_BY_KEY["history_turns"], "101")
-
-    assert md_path.read_text(encoding="utf-8") == original
-    assert list(tmp_path.glob(".*.tmp")) == []
-
-
-def test_write_int_non_numeric_raises_cleanly(tmp_path: Path) -> None:
-    """A non-numeric int value raises a precise ValueError, not a pydantic one."""
-    md_path = _seed_md(tmp_path)
-    original = md_path.read_text(encoding="utf-8")
-
-    with pytest.raises(ValueError, match="expects an integer"):
-        write_simple_field(md_path, FIELDS_BY_KEY["history_turns"], "lots")
-
-    assert md_path.read_text(encoding="utf-8") == original
 
 
 def test_write_bad_thinking_effort_raises_and_leaves_file(tmp_path: Path) -> None:

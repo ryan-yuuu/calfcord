@@ -35,7 +35,6 @@ VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
 AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
-STATE_DIR="$CALFCORD_HOME/state/agents"       # per-agent runtime state; matches the shim's CALFKIT_STATE_DIR
 CURRENT_LINK="$CALFCORD_HOME/current"
 
 # Native broker: pinned tansu-io/tansu release, downloaded into BIN_DIR/tansu.
@@ -319,17 +318,16 @@ seed_config() {
   log "seeded config at $CONFIG_ENV (fill in DISCORD_*, CALF_HOST_URL, API keys)"
 }
 
-# Give the native install a stable home for agent definitions and per-agent
-# state, and drop in the bundled starter agent on first install. ``calfkit-agent``
-# resolves these dirs from CALFKIT_AGENTS_DIR / CALFKIT_STATE_DIR — the shim points
-# them at $AGENTS_DIR ($CALFCORD_HOME/agents) and $STATE_DIR ($CALFCORD_HOME/state/agents)
-# respectively, so this pre-creates exactly the two dirs the runtime uses. They
-# live outside the GC'd ``versions/<sha>`` tree to survive ``calfcord self update``.
-# Seeding only happens when the agents dir is empty, so an operator who removed
-# the starter (or added their own agents) is never clobbered on re-install.
+# Give the native install a stable home for agent definitions, and drop in the
+# bundled starter agent on first install. ``calfkit-agent`` resolves the agents
+# dir from CALFKIT_AGENTS_DIR — the shim points it at $AGENTS_DIR
+# ($CALFCORD_HOME/agents), so this pre-creates exactly the dir the runtime uses.
+# It lives outside the GC'd ``versions/<sha>`` tree to survive ``calfcord self
+# update``. Seeding only happens when the agents dir is empty, so an operator who
+# removed the starter (or added their own agents) is never clobbered on re-install.
 seed_agents() {
   local dest="$1"
-  mkdir -p "$AGENTS_DIR" "$STATE_DIR"
+  mkdir -p "$AGENTS_DIR"
   if [ -n "$(ls -A "$AGENTS_DIR" 2>/dev/null)" ]; then
     log "keeping existing agents in $AGENTS_DIR"
     return 0
@@ -445,14 +443,12 @@ usage:
   calfcord deploy <systemd|k8s|docker> [-o PATH]
                                  generate deployment manifests (advanced)
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
-  calfcord run <bridge|agent|router|tools|mcp>
+  calfcord run <bridge|agent|tools|mcp>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
                                  manage agents (create/inspect/edit/rename/delete)
   calfcord agent <start|stop|restart> [<name>|--all]
                                  clock an agent (or every agent on this host) in/out/reload
-  calfcord router <show|set|edit|start|stop|restart [--all]>
-                                 configure / run the optional ambient-message router
   calfcord tools <start|stop|restart> [--all]
                                  bring the tools host online / offline / reload
   calfcord mcp <add|list|remove> [<server>]
@@ -498,7 +494,6 @@ _default_env() {  # name default
   export "$1=$2"
 }
 _default_env CALFKIT_AGENTS_DIR     "$H/agents"
-_default_env CALFKIT_STATE_DIR      "$H/state/agents"
 _default_env CALFCORD_WORKSPACE_DIR "$PWD"
 
 # Translate friendly verbs to the underlying console scripts. Management verbs go to the
@@ -516,11 +511,11 @@ case "${1:-}" in
   # The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
   # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
-  init|agent|router|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
+  init|agent|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
-      bridge|agent|router|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
+      bridge|agent|tools|mcp) set -- "calfkit-$1" "${@:2}" ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
     esac ;;

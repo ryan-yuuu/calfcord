@@ -2,9 +2,11 @@
 
 The tool surface is an explicit, auditable composition
 (:data:`calfcord.tools.ALL_TOOLS`) of the vendored ``calfkit-tools`` nodes
-plus the first-party ``private_chat`` tool. These tests pin that surface
-and guard against drift between what calfcord exposes and what the
-vendored package actually publishes.
+(hermes shell/files/web/todo + an SSRF-safe ``web_fetch``). Agent-to-agent
+messaging is no longer a tool — the calfkit 0.12 migration moved A2A onto
+calfkit's native handoff dispatch — so the surface is entirely vendored.
+These tests pin that surface and guard against drift between what calfcord
+exposes and what the vendored package actually publishes.
 """
 
 from __future__ import annotations
@@ -32,8 +34,6 @@ EXPECTED_TOOLS = frozenset(
         "web_extract",
         # web_fetch (vendored, separate subpackage)
         "web_fetch",
-        # first-party
-        "private_chat",
     }
 )
 
@@ -43,7 +43,7 @@ EXPECTED_TOOLS = frozenset(
 _EXCLUDED_HERMES_NODES: frozenset[str] = frozenset()
 
 # Names contributed by sources other than HERMES_NODES.
-_NON_HERMES_TOOLS = frozenset({"web_fetch", "private_chat"})
+_NON_HERMES_TOOLS = frozenset({"web_fetch"})
 
 
 class TestToolRegistry:
@@ -54,15 +54,11 @@ class TestToolRegistry:
         actual = set(TOOL_REGISTRY)
         missing = EXPECTED_TOOLS - actual
         extras = actual - EXPECTED_TOOLS
-        assert not missing and not extras, (
-            f"registry drift: missing={sorted(missing)} extras={sorted(extras)}"
-        )
+        assert not missing and not extras, f"registry drift: missing={sorted(missing)} extras={sorted(extras)}"
 
     def test_every_entry_is_a_tool_node_def(self) -> None:
         for name, node in TOOL_REGISTRY.items():
-            assert isinstance(node, ToolNodeDef), (
-                f"{name!r} is {type(node).__name__}, not ToolNodeDef"
-            )
+            assert isinstance(node, ToolNodeDef), f"{name!r} is {type(node).__name__}, not ToolNodeDef"
 
     @pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
     def test_schema_name_matches_registry_key(self, name: str) -> None:

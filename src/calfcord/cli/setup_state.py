@@ -84,10 +84,10 @@ class SetupCheckpoint(BaseModel):
 def checkpoint_path(home: Path | None) -> Path:
     """Resolve the checkpoint path: ``<home>/state/setup.json`` (dev: ``state/``).
 
-    Mirrors the install layout used by the supervisor and per-agent state: a
-    native install keeps it under ``$CALFCORD_HOME/state``; a dev run (no home)
-    falls back to the project-local ``state/`` dir, matching the non-shim
-    defaults the rest of the CLI uses.
+    Mirrors the install layout used by the supervisor: a native install keeps it
+    under ``$CALFCORD_HOME/state``; a dev run (no home) falls back to the
+    project-local ``state/`` dir, matching the non-shim defaults the rest of the
+    CLI uses.
     """
     base = home / _STATE_DIRNAME if home is not None else Path(_STATE_DIRNAME)
     return base / _CHECKPOINT_FILENAME

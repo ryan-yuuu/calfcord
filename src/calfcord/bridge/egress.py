@@ -18,7 +18,8 @@ directory of conversation starters and can drill into any thread to
 audit.
 
 When constructed with a ``category_name`` (sourced from
-``CALFKIT_A2A_CHANNEL_CATEGORY`` by the tools runner), the unified
+``CALFKIT_A2A_CHANNEL_CATEGORY`` by the bridge, whose gateway constructs the
+resolver), the unified
 channel is placed under that Discord category on first creation — and
 the category itself is created lazily on the first miss. The child
 channel inherits the category's permission overwrites, so locking down
@@ -27,11 +28,9 @@ rather than a per-channel chore. An existing channel with the
 configured name is reused regardless of its current category, so
 operator overrides and migrations are non-disruptive.
 
-The resolver intentionally does not validate agent identities against a
-registry: callers run in deployments that may not have an
-:class:`AgentRegistry` (e.g. the ``calfkit-tools`` process, which can't
-read ``agents/*.md``). Caller code is expected to validate ids against
-a phonebook or registry before reaching here.
+The resolver intentionally does not validate agent identities: identity
+validation is the caller's job. The bridge is now its only caller — it
+validates ids against the live mesh roster before reaching here.
 """
 
 from __future__ import annotations
@@ -130,8 +129,7 @@ class A2AChannelResolver:
             channel = await self._sender.client.fetch_channel(channel_id)
         except discord.DiscordException:
             logger.warning(
-                "a2a anchor thread channel fetch failed "
-                "channel_id=%d anchor_message_id=%d name=%r",
+                "a2a anchor thread channel fetch failed channel_id=%d anchor_message_id=%d name=%r",
                 channel_id,
                 anchor_message_id,
                 name,
@@ -141,17 +139,13 @@ class A2AChannelResolver:
 
         if not isinstance(channel, discord.TextChannel):
             logger.warning(
-                "a2a anchor thread target is not a TextChannel "
-                "channel_id=%d type=%s anchor_message_id=%d name=%r",
+                "a2a anchor thread target is not a TextChannel channel_id=%d type=%s anchor_message_id=%d name=%r",
                 channel_id,
                 type(channel).__name__,
                 anchor_message_id,
                 name,
             )
-            raise TypeError(
-                f"channel_id={channel_id} resolved to "
-                f"{type(channel).__name__}, expected TextChannel"
-            )
+            raise TypeError(f"channel_id={channel_id} resolved to {type(channel).__name__}, expected TextChannel")
 
         try:
             thread = await channel.create_thread(
@@ -160,8 +154,7 @@ class A2AChannelResolver:
             )
         except discord.DiscordException:
             logger.warning(
-                "a2a anchor thread creation failed "
-                "channel_id=%d anchor_message_id=%d name=%r",
+                "a2a anchor thread creation failed channel_id=%d anchor_message_id=%d name=%r",
                 channel_id,
                 anchor_message_id,
                 name,
@@ -170,8 +163,7 @@ class A2AChannelResolver:
             raise
 
         logger.info(
-            "created a2a anchored thread channel_id=%d "
-            "anchor_message_id=%d thread_id=%d name=%r",
+            "created a2a anchored thread channel_id=%d anchor_message_id=%d thread_id=%d name=%r",
             channel_id,
             anchor_message_id,
             thread.id,
@@ -198,10 +190,7 @@ class A2AChannelResolver:
             )
             raise
         for channel in channels:
-            if (
-                isinstance(channel, discord.TextChannel)
-                and channel.name == self._channel_name
-            ):
+            if isinstance(channel, discord.TextChannel) and channel.name == self._channel_name:
                 logger.info(
                     "resolved a2a unified channel name=%s id=%s",
                     self._channel_name,
@@ -269,10 +258,7 @@ class A2AChannelResolver:
             guild = await self._sender.client.fetch_guild(self._guild_id)
             channels = await guild.fetch_channels()
             for channel in channels:
-                if (
-                    isinstance(channel, discord.CategoryChannel)
-                    and channel.name == self._category_name
-                ):
+                if isinstance(channel, discord.CategoryChannel) and channel.name == self._category_name:
                     logger.info(
                         "resolved a2a category name=%s id=%s",
                         self._category_name,

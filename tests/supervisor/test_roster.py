@@ -1,9 +1,10 @@
 """Unit tests for the agent-roster operations (design §3.4, §3.5, §13.1).
 
 These exercise ``agent_start`` / ``agent_stop`` / ``agent_restart`` / ``agent_ps``
-with **no real process-compose binary, no broker, and no network**: the control-
-plane probe and the REST client are both injected. A stub probe scripts the
-broker-wide live roster; a stub client scripts the supervisor REST surface
+with **no real process-compose binary, no broker, and no network**: the
+broker-wide live-roster probe (a read of calfkit's native mesh) and the REST
+client are both injected. A stub probe scripts the broker-wide live roster (agent
+NAMES, the presence the mesh carries); a stub client scripts the supervisor REST surface
 (``project_state`` for the workspace check, ``start_process`` /
 ``stop_process`` / ``restart_process`` for lifecycle, ``list_processes`` for the
 physical half of the ps union).
@@ -18,38 +19,27 @@ physical-only "not yet registered", logical-only "running on another host").
 
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
-from calfcord.agents.definition import AgentDefinition
+import pytest
+from calfkit.exceptions import MeshUnavailableError
+
 from calfcord.supervisor import roster
 from calfcord.supervisor.client import ProcessComposeError
 
 # --- fakes ------------------------------------------------------------------
 
 
-def _defn(name: str) -> AgentDefinition:
-    """A minimal valid AgentDefinition with ``agent_id == name``.
-
-    The probe returns AgentDefinitions; the roster ops key off ``.agent_id``, so
-    a stub roster entry only needs a valid id (the rest is required by the model).
-    """
-    return AgentDefinition(
-        agent_id=name,
-        display_name=name.title(),
-        description=f"{name} agent",
-        system_prompt="hi",
-    )
-
-
 class _StubProbe:
-    """A scriptable stand-in for ``probe_live_roster``.
+    """A scriptable stand-in for the broker-wide live-roster probe.
 
     Records the ``server_urls`` it was called with so a test can assert the probe
-    fired (duplicate guard / ps) or did NOT (workspace-down short-circuit), and
-    returns a fixed list of live AgentDefinitions.
+    fired (duplicate guard / ps) or did NOT (workspace-down short-circuit). The
+    calfkit 0.12 mesh carries agent NAMES (presence), not full definitions, so it
+    returns a fixed list of live agent names.
     """
 
-    def __init__(self, roster_result: list[AgentDefinition] | None = None) -> None:
+    def __init__(self, roster_result: list[str] | None = None) -> None:
         self._roster = list(roster_result or [])
         self.calls: list[str] = []
 
@@ -147,7 +137,7 @@ async def test_agent_start_refuses_duplicate_when_probe_shows_live(tmp_path, cap
     0, and crucially do NOT call ``start_process`` (no second instance).
     """
     client = _StubClient()
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -177,12 +167,10 @@ async def test_agent_start_local_running_restarts_not_duplicate_refusal(tmp_path
     it is running elsewhere), but a *local* running instance is ours to restart, so
     we never reach the probe and never print the refusal.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "assistant", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "assistant", "status": "Running"}])
     # The probe would also report it live; the local-running branch must win BEFORE
     # the guard, so the probe is never consulted.
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -212,7 +200,7 @@ async def test_agent_start_remote_running_keeps_duplicate_refusal(tmp_path, caps
     client = _StubClient(
         list_processes_result=[]  # not running on THIS host
     )
-    probe = _StubProbe([_defn("assistant")])  # answering on another host
+    probe = _StubProbe(["assistant"])  # answering on another host
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -256,7 +244,7 @@ async def test_agent_start_happy_path_starts_when_roster_empty(tmp_path, capsys)
 async def test_agent_start_ignores_other_live_agents(tmp_path):
     """A different agent being live must not block starting this one."""
     client = _StubClient()
-    probe = _StubProbe([_defn("scheduler")])  # someone else is live
+    probe = _StubProbe(["scheduler"])  # someone else is live
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -311,39 +299,32 @@ class _RaisingProbe:
 
 async def test_agent_ps_physical_excludes_all_non_agent_processes(tmp_path, capsys):
     """The physical half of `ps` lists only AGENTS — not the substrate
-    (broker/bridge) and not the other non-agent processes (tools/router)."""
+    (broker/bridge) and not the other non-agent processes (tools)."""
     client = _StubClient(
         list_processes_result=[
             {"name": "broker", "status": "Running"},
             {"name": "bridge", "status": "Running"},
             {"name": "tools", "status": "Running"},
-            {"name": "router", "status": "Running"},
             {"name": "assistant", "status": "Running"},
         ]
     )
     probe = _StubProbe([])  # nothing logical → the board shows only physical agents
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
     assert "assistant" in out
-    for non_agent in ("broker", "bridge", "tools", "router"):
+    for non_agent in ("broker", "bridge", "tools"):
         assert non_agent not in out
 
 
 async def test_agent_ps_tolerates_probe_failure(tmp_path, capsys):
     """A broker hiccup must not crash read-only `ps`: degrade to physical-only."""
-    client = _StubClient(
-        list_processes_result=[{"name": "assistant", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "assistant", "status": "Running"}])
     probe = _RaisingProbe()
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     assert probe.calls == [_SERVERS]
@@ -375,9 +356,7 @@ async def test_agent_start_tolerates_probe_failure_and_proceeds(tmp_path, capsys
 # --- agent_start: not declared in the running project (§13.1) ----------------
 
 
-async def test_agent_start_not_declared_asks_for_reload_no_update_project(
-    tmp_path, capsys
-):
+async def test_agent_start_not_declared_asks_for_reload_no_update_project(tmp_path, capsys):
     """start_process raises (brand-new agent) → reload message, exit 1, no update.
 
     A new agent authored after ``calfcord start`` is not a declared slot, so the
@@ -421,8 +400,7 @@ async def test_agent_start_server_error_raises_loudly_not_reload_hint(tmp_path):
     raise with caller/target/correlation context, carrying the PC body.
     """
     pc_error = ProcessComposeError(
-        "start_process: process-compose POST /process/start/assistant "
-        "failed with HTTP 500: internal supervisor error",
+        "start_process: process-compose POST /process/start/assistant failed with HTTP 500: internal supervisor error",
         status_code=500,
     )
     client = _StubClient(start_raises=pc_error)
@@ -533,10 +511,8 @@ async def test_agent_start_all_mixes_running_stopped_and_remote(tmp_path, capsys
     answering on another host hits the duplicate-refusal. All three are honored in
     one sweep; every id gets a per-item line; an all-success sweep returns 0.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "local_up", "status": "Running"}]
-    )
-    probe = _StubProbe([_defn("remote")])  # answering elsewhere, not here
+    client = _StubClient(list_processes_result=[{"name": "local_up", "status": "Running"}])
+    probe = _StubProbe(["remote"])  # answering elsewhere, not here
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
@@ -572,9 +548,7 @@ async def test_agent_start_all_never_starts_reserved_processes(tmp_path, capsys)
     locally-Running set — so an unfiltered sweep would fall through to
     ``start_process('tools')``. The assertions below pin BOTH paths regardless.
     """
-    client = _StubClient(
-        list_processes_result=[{"name": "tools", "status": "Running"}]
-    )
+    client = _StubClient(list_processes_result=[{"name": "tools", "status": "Running"}])
     probe = _StubProbe([])  # nobody live → a leaked agent id would reach start
 
     rc = await roster.agent_start_all(
@@ -605,7 +579,7 @@ async def test_agent_start_all_all_reserved_is_clean_no_op(tmp_path, capsys):
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
-        agent_ids=["tools", "router", "broker", "bridge"],
+        agent_ids=["tools", "broker", "bridge"],
         server_urls=_SERVERS,
         client=client,
         probe=probe,
@@ -692,9 +666,7 @@ async def test_agent_start_all_continues_past_a_hard_failure_returns_1(tmp_path,
     assert "start --all: 3 agent(s) processed, 1 failed." in capsys.readouterr().out
 
 
-async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(
-    tmp_path, capsys
-):
+async def test_agent_start_all_non_raising_failure_returns_1_and_keeps_sweeping(tmp_path, capsys):
     """A NON-raising per-id failure (agent_start returns 1) still fails the sweep.
 
     ``agent_start_all`` has two failure paths: ``except Exception`` (a raised 5xx)
@@ -740,7 +712,7 @@ async def test_agent_start_all_probes_org_once_and_threads_live(tmp_path, capsys
     while the local `stopped` starts — all off ONE probe call.
     """
     client = _StubClient(list_processes_result=[])
-    probe = _StubProbe([_defn("remote")])  # answering on another host
+    probe = _StubProbe(["remote"])  # answering on another host
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
@@ -816,14 +788,13 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
     """`stop --all` stops every Running local AGENT — never the substrate/singletons.
 
     The target set is the same physical filter `ps` uses: Running processes whose
-    name is not a reserved (substrate/tools/router) process. A Stopped agent is
+    name is not a reserved (substrate/tools) process. A Stopped agent is
     not a target. An all-success sweep returns 0.
     """
     client = _StubClient(
         list_processes_result=[
             {"name": "broker", "status": "Running"},  # substrate — never
             {"name": "tools", "status": "Running"},  # singleton — never
-            {"name": "router", "status": "Running"},  # singleton — never
             {"name": "assistant", "status": "Running"},  # agent → stop
             {"name": "scheduler", "status": "Running"},  # agent → stop
             # PC v1.110.0 reports an operator-stopped slot as "Completed" (never
@@ -836,7 +807,7 @@ async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys
 
     assert rc == 0
     assert sorted(client.stop_calls) == ["assistant", "scheduler"]
-    for never in ("broker", "tools", "router", "dormant"):
+    for never in ("broker", "tools", "dormant"):
         assert never not in client.stop_calls
     # The summary pins the count math (2 targets, 0 failed) + wording.
     assert "stop --all: 2 agent(s) processed, 0 failed." in capsys.readouterr().out
@@ -969,9 +940,7 @@ async def test_agent_ps_workspace_down(tmp_path, capsys):
     client = _StubClient(workspace_up=False)
     probe = _StubProbe([])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     assert probe.calls == []
@@ -1002,11 +971,9 @@ async def test_agent_ps_union_three_cases(tmp_path, capsys):
             _pc_proc("dormant", "Completed"),
         ]
     )
-    probe = _StubProbe([_defn("assistant"), _defn("remote")])
+    probe = _StubProbe(["assistant", "remote"])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -1037,9 +1004,7 @@ async def test_agent_ps_empty(tmp_path, capsys):
     client = _StubClient(list_processes_result=[_pc_proc("broker", "Running")])
     probe = _StubProbe([])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -1061,11 +1026,9 @@ async def test_agent_ps_tolerates_data_wrapped_and_nondict_rows(tmp_path, capsys
             ]
         }
     )
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
-    rc = await roster.agent_ps(
-        _home(tmp_path), server_urls=_SERVERS, client=client, probe=probe
-    )
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -1097,23 +1060,93 @@ def test_agent_start_defaults_to_per_home_process_compose_client(tmp_path):
 
 
 async def test_default_probe_delegates_to_probe_live_roster(monkeypatch):
-    """The default probe adapts ``probe_live_roster`` to the injectable shape.
+    """The default probe adapts ``_probe_live_roster`` to the injectable shape.
 
     With no ``probe`` injected, the resolver returns a closure that calls
-    :func:`control_plane.probe.probe_live_roster` with the given ``server_urls``.
-    Monkeypatching that function lets the closure body run with no real broker,
-    pinning the production delegation (the seam tests otherwise bypass).
+    :func:`_probe_live_roster` (the calfkit 0.12 native-mesh read) with the given
+    ``server_urls``. Monkeypatching that function lets the closure body run with
+    no real broker, pinning the production delegation (the seam tests otherwise
+    bypass). The mesh carries NAMES, so the default probe returns agent names.
     """
     seen: dict[str, str] = {}
 
     async def _fake_probe_live_roster(server_urls: str):
         seen["server_urls"] = server_urls
-        return [_defn("assistant")]
+        return ["assistant"]
 
-    monkeypatch.setattr(roster, "probe_live_roster", _fake_probe_live_roster)
+    monkeypatch.setattr(roster, "_probe_live_roster", _fake_probe_live_roster)
 
     default_probe = roster._resolve_probe(None)
     result = await default_probe(_SERVERS)
 
     assert seen["server_urls"] == _SERVERS
-    assert [d.agent_id for d in result] == ["assistant"]
+    assert result == ["assistant"]
+
+
+# --- _probe_live_roster body (the native-mesh read; previously monkeypatched away) ---
+
+
+class _ProbeFakeClient:
+    """Scriptable stand-in for the short-lived Client ``_probe_live_roster`` opens.
+
+    Controls ``mesh.get_agents()`` (return a roster or raise) and records ``aclose()``
+    so a test can assert the connection is always cleaned up — even on the error paths.
+    """
+
+    def __init__(self, *, agents=None, get_agents_error=None) -> None:
+        self._agents = agents or {}
+        self._get_agents_error = get_agents_error
+        self.mesh = self  # client.mesh.get_agents() resolves back here
+        self.aclosed = False
+
+    async def get_agents(self):
+        if self._get_agents_error is not None:
+            raise self._get_agents_error
+        return self._agents
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+
+
+def _patch_probe_client(monkeypatch, fake: _ProbeFakeClient) -> None:
+    monkeypatch.setattr(roster.Client, "connect", lambda *a, **k: fake)
+
+
+async def test_probe_returns_sorted_online_names(monkeypatch):
+    """Success: the online agent NAMES from the mesh, sorted; connection closed."""
+    fake = _ProbeFakeClient(agents={"n2": SimpleNamespace(name="scribe"), "n1": SimpleNamespace(name="assistant")})
+    _patch_probe_client(monkeypatch, fake)
+    assert await roster._probe_live_roster(_SERVERS) == ["assistant", "scribe"]
+    assert fake.aclosed is True
+
+
+async def test_probe_empty_readable_roster_returns_empty(monkeypatch):
+    """A *readable* roster with nobody online returns [] — distinct from an
+    unreadable roster (which raises). This is the only path that yields []."""
+    fake = _ProbeFakeClient(agents={})
+    _patch_probe_client(monkeypatch, fake)
+    assert await roster._probe_live_roster(_SERVERS) == []
+    assert fake.aclosed is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MeshUnavailableError("establishing", reason="establishing"),
+        MeshUnavailableError("no topic yet", reason="open_failed"),
+        MeshUnavailableError("reader died", reason="reader_dead"),
+        ConnectionError("broker down"),
+    ],
+    ids=["establishing", "open_failed", "reader_dead", "broker_down"],
+)
+async def test_probe_propagates_when_roster_unreadable(monkeypatch, error):
+    """No broker pre-flight: get_agents() raises at call time when the roster can't
+    be read — a down broker, a not-yet-created topic, a still-establishing view, or a
+    dead reader — and _probe_live_roster PROPAGATES it (never masks it as []) so the
+    caller's ``except Exception`` degrades ("broker unreachable"). The connection is
+    still closed on every raise."""
+    fake = _ProbeFakeClient(get_agents_error=error)
+    _patch_probe_client(monkeypatch, fake)
+    with pytest.raises(type(error)):
+        await roster._probe_live_roster(_SERVERS)
+    assert fake.aclosed is True

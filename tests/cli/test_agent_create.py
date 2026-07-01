@@ -283,7 +283,6 @@ def test_create_agent_blank_name_with_one_non_assistant_edits_it_in_place(tmp_pa
     (agents_dir / "scribe.md").write_text(
         "---\n"
         "name: scribe\n"
-        "display_name: Scribe\n"
         "description: old\n"
         "provider: openai\n"
         "model: gpt-5\n"
@@ -322,7 +321,6 @@ def test_create_agent_prune_seed_false_keeps_pristine_assistant(tmp_path: Path) 
     seed.write_text(
         "---\n"
         "name: assistant\n"
-        "display_name: Assistant\n"
         f"description: {_agents.DEFAULT_DESCRIPTION}\n"
         "tools: []\n"
         "---\n\n"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfcord.agents.thinking import build_model_settings
+from calfcord.agents.thinking import build_model_settings, build_model_settings_union
 
 
 class TestNoneAndUnset:
@@ -93,3 +93,42 @@ class TestUnknownProvider:
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown provider"):
             build_model_settings("xai", "high")  # type: ignore[arg-type]
+
+
+class TestBuildModelSettingsUnion:
+    """The provider-blind C11 override (R-A1): the bridge no longer knows an
+    agent's provider, so it emits BOTH provider keys at once — each model client
+    reads only its own (``.get()``) and ignores the foreign one."""
+
+    def test_unset_returns_none(self) -> None:
+        assert build_model_settings_union(None) is None
+
+    def test_none_tier_returns_empty_dict(self) -> None:
+        assert build_model_settings_union("none") == {}
+
+    @pytest.mark.parametrize(
+        ("effort", "budget", "reasoning"),
+        [
+            ("minimal", 1024, "minimal"),
+            ("low", 4000, "low"),
+            ("medium", 10000, "medium"),
+            ("high", 31999, "high"),
+            ("xhigh", 48000, "high"),
+            ("max", 63999, "high"),
+        ],
+    )
+    def test_emits_both_provider_keys(self, effort: str, budget: int, reasoning: str) -> None:
+        assert build_model_settings_union(effort) == {  # type: ignore[arg-type]
+            "anthropic_thinking": {"type": "enabled", "budget_tokens": budget},
+            "openai_reasoning_effort": reasoning,
+        }
+
+    @pytest.mark.parametrize("bad", ["ultra", "ludicrous", "HIGH", ""])
+    def test_unknown_tier_degrades_to_empty_dict(self, bad: str, caplog: pytest.LogCaptureFixture) -> None:
+        """A stale/garbage tier (this reads a raw ``str`` straight off the SQLite
+        overrides map on the per-turn hot path) must degrade to ``{}`` — NOT raise.
+        A raise here would dark-out the agent on EVERY @mention until the DB is
+        hand-edited. Warns so the bad tier is diagnosable."""
+        with caplog.at_level("WARNING"):
+            assert build_model_settings_union(bad) == {}  # type: ignore[arg-type]
+        assert any("unknown effort tier" in r.message for r in caplog.records)

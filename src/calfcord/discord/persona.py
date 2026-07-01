@@ -443,6 +443,27 @@ class DiscordPersonaSender:
         thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
         await webhook.delete_message(message_id, thread=thread)
 
+    def owns_webhook(self, webhook_id: int) -> bool:
+        """Return ``True`` iff ``webhook_id`` is one of this sender's persona webhooks.
+
+        The history fetcher uses this to recognize agent turns (R-A3): a fetched
+        message whose ``webhook_id`` is here came from a bridge persona post (its
+        username *is* the agent name under C8), so it is stamped as a
+        :class:`ModelResponse`; everything else is a human turn. Matching by id
+        (not by display name, and not against a live roster) is liveness-
+        independent — a renamed or offline agent's past turns still attribute
+        correctly, and a third-party webhook is never read as an agent.
+
+        The id set is the webhooks this sender has discovered or created, which
+        grows as it posts to each channel on first use. A channel the sender has
+        not posted in yet this process lifetime (e.g. right after a restart, on
+        the first turn before any persona reply lands there) is not yet
+        recognized; agent history there degrades to human-attributed until the
+        first persona send/discovery in that channel. The set is small (one
+        webhook per touched channel), so the linear scan is cheap.
+        """
+        return any(hook.id == webhook_id for hook in self._webhooks.values())
+
     async def _get_or_create_webhook(self, channel_id: int) -> discord.Webhook:
         """Return our webhook for ``channel_id``, discovering or creating as needed."""
         cached = self._webhooks.get(channel_id)

@@ -11,7 +11,7 @@ This page is both the how-to (set one up end to end) and the reference
 *why* behind the design — per-server isolation, the secrets boundary, runtime
 discovery — see the [design note](./design/mcp-reintroduction.md); for where
 the MCP processes sit in the topology, see
-[`architecture.md`](./architecture.md#the-five-processes).
+[`architecture.md`](./architecture.md#the-four-processes).
 
 > Terminology used throughout: an **MCP server** is the external program or
 > endpoint you point calfcord at (the thing in `mcp.json`); a **toolbox** is
@@ -377,7 +377,7 @@ segment and a process-slot suffix, so the constraint is hard.
   design and rationale (isolation, secrets boundary, runtime discovery).
 - [`authoring-agents.md`](./authoring-agents.md#33-tools-optional) — the
   `tools:` frontmatter field, including MCP selectors.
-- [`architecture.md`](./architecture.md#the-five-processes) — where the
+- [`architecture.md`](./architecture.md#the-four-processes) — where the
   `calfkit-mcp` process sits.
 - [`configuration.md`](./configuration.md#mcp-servers-mcpjson) — `mcp.json`
   location and the `CALFCORD_MCP_CONFIG` override.

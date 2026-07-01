@@ -1,48 +1,29 @@
-"""Opt-in Kafka topic-provisioning policy and blind-spot helpers for the runners.
+"""Opt-in Kafka topic-provisioning policy for the runners.
 
-calfkit 0.6.0 auto-provisions topics on broker start (opt-in via
-``ProvisioningConfig`` on ``Client.connect``), letting calfcord run on brokers
-that do not auto-create topics — notably Tansu — but only for what its startup
-ensurer can declare:
+calfkit auto-provisions topics on broker start (opt-in via ``ProvisioningConfig``
+on ``Client.connect``), letting calfcord run on brokers that do not auto-create
+topics — notably Tansu — for everything its startup ensurer can declare:
 
 * The **client reply topic** is auto-provisioned on EVERY ``broker.start()``
   path (a connect-time pre-start hook; calf-ai/calfkit-sdk#180). calfcord no
   longer provisions it anywhere.
-* A **Worker's node topics** are auto-provisioned only on the *managed* run
-  surfaces (``Worker.run()`` / ``start()`` / ``async with``), whose
-  ``_on_startup`` hook declares :func:`~calfkit.provisioning.topics_for_nodes`
-  into the same ensurer. The tools/router/agents runners use ``Worker.run()``
-  and the bridge uses the embedded ``Worker.start()`` — all managed surfaces — so
-  every Worker-hosted process gets its node topics for free.
+* A **Worker's node topics** are auto-provisioned on the *managed* run surfaces
+  (``Worker.run()`` / ``start()`` / ``async with``), whose ``_on_startup`` hook
+  declares :func:`~calfkit.provisioning.topics_for_nodes` into the same ensurer.
+  The **tools and agents runners** use the embedded managed ``Worker.start()``
+  surface, so every Worker-hosted process gets its node topics for free. The
+  **bridge is a pure** :class:`~calfkit.client.Client` (no Worker, no consumers)
+  — it hosts no nodes and so declares no node topics; its only topic is the
+  client reply topic, covered by the pre-start hook above.
 
-Two gaps remain that calfcord fills explicitly via :func:`provision_extra_topics`
-(and, before a bare start, :func:`provision_and_start_broker`):
-
-* **Hand-rolled node topics.** The control-plane probe deliberately decomposes
-  ``Worker.run()`` — wiring a raw ``broker.subscriber(...)`` and then a bare
-  ``broker.start()`` — because it owns a one-shot read (see
-  ``docs/design/calfkit-worker-lifecycle-gaps.md``). The managed ``_on_startup``
-  ensurer never fires for it, so it provisions its (blind-spot-only) topics
-  itself before the bare start. (The bridge USED to be such a caller; it now
-  folds onto the embedded ``Worker.start()`` managed surface, so calfkit
-  auto-provisions its node topics and it only declares its blind spots — below.)
-* **Blind-spot topics** that ``topics_for_nodes()`` cannot see at all: raw
-  FastStream broker subscribers and boot-time publish targets. The per-runner
-  ``*_infra_topics`` sets below name exactly which. On the managed runners these
-  are declared into the client's startup ensurer from a worker ``on_startup``
-  hook so they ride calfkit's single pre-start provisioning pass: the agents
-  runner declares :func:`agent_infra_topics` and the bridge declares
-  :func:`bridge_infra_topics` that way. (The router has no blind-spot topics:
-  since ambient sends use ``reply_to=None``, there is no terminal-callback
-  target to provision — its only topics are node ``subscribe_topics`` /
-  ``publish_topic`` the managed ensurer already covers.)
-
-Why these particular extras (and not the rest of the cross-process contracts in
-``calfcord.topics`` / ``calfcord.control_plane.topics``): every other shared
-topic is also a node ``subscribe_topics``/``publish_topic`` on the process that
-needs it created early, so the ensurer already covers it. Only the raw
-control-plane subscribers and the boot-time publishes (which cannot wait for the
-peer process to create the topic) fall through — those are listed here.
+After the calfkit 0.12 migration removed the bespoke control plane, calfcord has
+no blind-spot topics left to declare: agent presence and the live roster now ride
+calfkit's native mesh (``calf.agents``), which the framework owns end-to-end, and
+A2A is native tool/handoff dispatch over ordinary node topics the managed ensurer
+already covers. So :data:`PROVISIONING` is the only piece every runner still
+needs; :func:`provision_extra_topics` / :func:`provision_and_start_broker` remain
+as general-purpose helpers for any future caller that hand-rolls a raw broker
+subscriber outside the managed Worker lifecycle.
 """
 
 from __future__ import annotations
@@ -53,12 +34,6 @@ from typing import TYPE_CHECKING
 from calfkit import ProvisioningConfig
 from calfkit.provisioning import TopicProvisioner
 
-from calfcord.control_plane.topics import (
-    AGENT_STATE_TOPIC,
-    BRIDGE_DISCOVERY_TOPIC,
-    control_topic_for,
-)
-
 if TYPE_CHECKING:
     from calfkit.client import Client
 
@@ -66,51 +41,10 @@ PROVISIONING = ProvisioningConfig(enabled=True, num_partitions=1, replication_fa
 """Shared opt-in provisioning policy passed to every calfcord ``Client.connect``.
 
 ``enabled`` so calfkit creates referenced topics on a broker without
-auto-creation; ``num_partitions=1`` because ``agent.steps`` ordering REQUIRES a
-single partition (see :data:`calfcord.topics.AGENT_STEPS_TOPIC`) and nothing
-local benefits from more; ``replication_factor=1`` is the single-broker
+auto-creation; ``num_partitions=1`` is the single-partition local/dev default
+(nothing calfcord runs locally benefits from more, and a single partition keeps
+per-key ordering trivially intact); ``replication_factor=1`` is the single-broker
 local/dev default (NOT durable — raise it for a real multi-broker cluster)."""
-
-# The bridge<->agent control-plane pair both sides touch: the bridge subscribes
-# agent.state and publishes bridge.discovery at boot; agents subscribe
-# bridge.discovery and publish agent.state at boot. Shared so the two infra sets
-# that include it cannot drift apart.
-_SHARED_CONTROL_PLANE_TOPICS = (AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC)
-
-
-def bridge_infra_topics() -> list[str]:
-    """Non-node topics the bridge must ensure exist before ``broker.start()``.
-
-    ``agent.state`` is consumed by a raw broker subscriber (the state consumer,
-    not a Worker node). ``bridge.discovery`` is *published* at boot (the
-    discovery ping) possibly before any agent is up, so the bridge cannot rely
-    on an agent having created it.
-
-    Declared into the client's startup ensurer from the bridge's
-    ``Worker.on_startup`` hook (pre-broker-start;
-    :func:`calfcord.bridge.gateway._register_blind_spot_topics`), so they are
-    created in calfkit's single managed provisioning pass alongside the node
-    topics + reply topic, before the raw state consumer's group joins or the
-    discovery ping publishes.
-    """
-    return list(_SHARED_CONTROL_PLANE_TOPICS)
-
-
-def agent_infra_topics(agent_ids: Iterable[str]) -> list[str]:
-    """Non-node topics the agents runner must ensure exist before ``broker.start()``.
-
-    The shared control-plane pair (``bridge.discovery`` subscribed by the raw
-    control sink, ``agent.state`` published at boot before the bridge may be up)
-    plus one ``agent.{id}.control.in`` per hosted agent (each a raw control-sink
-    subscriber).
-
-    Declared into the client's startup ensurer from the agents runner's
-    ``Worker.on_startup`` hook (pre-broker-start), so they are created in
-    calfkit's single managed provisioning pass alongside the node topics +
-    reply topic, before any raw control sink consumes or the presence publish
-    fires.
-    """
-    return [*_SHARED_CONTROL_PLANE_TOPICS, *(control_topic_for(agent_id) for agent_id in agent_ids)]
 
 
 async def provision_extra_topics(server_urls: str | Iterable[str], topics: Iterable[str]) -> None:
@@ -158,28 +92,27 @@ async def provision_and_start_broker(
 ) -> None:
     """Provision ``topics`` the ensurer can't see, then bring the broker up.
 
-    For the **hand-rolled** control-plane probe only: it wires a raw
-    ``broker.subscriber(...)`` and then a bare ``broker.start()``, bypassing the
-    managed Worker lifecycle — so calfkit's ``_on_startup`` ensurer never fires
-    and does NOT provision its topics. On a broker that does not auto-create
-    topics that bare start blocks forever unless every subscribed topic already
-    exists, so the caller passes its blind-spot set here and they are created
-    BEFORE the bare start.
+    For any caller that hand-rolls a raw ``broker.subscriber(...)`` followed by a
+    bare ``broker.start()``, bypassing the managed Worker lifecycle — so calfkit's
+    ``_on_startup`` ensurer never fires and does NOT provision its topics. On a
+    broker that does not auto-create topics that bare start blocks forever unless
+    every subscribed topic already exists, so the caller passes its blind-spot set
+    here and they are created BEFORE the bare start.
 
-    The client reply topic is intentionally NOT included: calfkit 0.6.0's
-    connect-hook auto-provisions it on every start path (calf-ai/calfkit-sdk#180),
-    so the broker.start() below creates it for free.
+    The client reply topic is intentionally NOT included: calfkit's connect-hook
+    auto-provisions it on every start path (calf-ai/calfkit-sdk#180), so the
+    ``broker.start()`` below creates it for free.
 
     Idempotent on an auto-creating broker (every create reports "existing"). The
     ``broker.running`` guard avoids a non-idempotent second ``start()`` if the
     broker was already brought up (e.g. by an earlier lazy first publish).
 
-    The Worker-hosted runners do NOT use this helper: tools/router/agents run
-    via ``Worker.run()`` and the bridge via the embedded ``Worker.start()``,
-    whose managed lifecycle auto-provisions reply + node topics; the router has
-    no blind-spot topics at all, and the agents runner and bridge declare theirs
-    into the startup ensurer from an ``on_startup`` hook — all letting the
-    managed broker start do the provisioning.
+    The production runners do NOT need this helper: the tools/agents runners use
+    the managed ``Worker.start()`` surface (whose lifecycle auto-provisions reply
+    + node topics), and the bridge is a pure :class:`~calfkit.client.Client` that
+    hand-rolls no broker (its reply topic is covered by the connect-time pre-start
+    hook). None of them declare blind-spot topics, so nothing here is needed —
+    this stays a general-purpose helper for a future raw-broker caller.
     """
     await provision_extra_topics(server_urls, topics)
     if not client.broker.running:

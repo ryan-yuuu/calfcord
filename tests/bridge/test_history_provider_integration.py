@@ -7,28 +7,27 @@ messages, see ``calfkit/_vendor/pydantic_ai/_agent_graph.py:1386``)
 surfaces as a clear test failure rather than a silent production bug.
 
 Why this matters: the design intentionally does NOT merge consecutive
-:class:`ModelRequest`s inside :func:`project_history` (see
-``bridge/history.py`` module docstring). The correctness of the
-"boundary between history and staged user_prompt is well-formed"
-invariant rests entirely on pydantic-ai's auto-merge running at one of
-the two call sites (``_agent_graph.py`` lines 213 and 526).
+:class:`ModelRequest`s inside :func:`build_message_history` (see
+``bridge/history.py`` module + function docstrings). The correctness of the
+"boundary between history and staged user_prompt is well-formed" invariant
+rests entirely on pydantic-ai's auto-merge running at one of the two call
+sites (``_agent_graph.py`` lines 213 and 526).
 
 If `_clean_message_history` is ever removed / changed:
     - Anthropic rejects with HTTP 400 ("messages must alternate")
     - OpenAI silently tolerates (no error, but the assistant may produce
       lower-quality output)
 
-Either way, our unit tests in `test_history.py` and `test_ingress_history.py`
-would still pass (they're unit-scoped). This file is the live alarm.
+Either way, our unit tests in `test_history.py` would still pass (they're
+unit-scoped). This file is the live alarm.
 
-The tests construct a ``pydantic_ai.Agent`` and call its ``.run()`` method
-with a hand-crafted ``message_history`` that ENDS in multiple consecutive
-``ModelRequest``s — a shape that pydantic-ai's auto-merge must
-consolidate before sending to the provider. If the auto-merge silently
+The tests build a canonical history via :func:`build_message_history` whose
+tail ENDS in multiple consecutive ``ModelRequest``s — a shape that
+pydantic-ai's auto-merge must consolidate before sending to the provider —
+and feed it to a real ``pydantic_ai.Agent.run``. If the auto-merge silently
 disappears in an upstream release, the Anthropic test fails with a
-``400 messages must alternate`` (or equivalent); the OpenAI test still
-passes but the regression is half-detected (the model output quality
-may degrade).
+``400 messages must alternate`` (or equivalent); the OpenAI test still passes
+but the regression is half-detected (model output quality may degrade).
 
 Run manually::
 
@@ -46,38 +45,34 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelRequest,
 )
 
-from calfcord.bridge.history import HistoryRecord, project_history
+from calfcord.bridge.history import HistoryRecord, build_message_history
 
 pytestmark = pytest.mark.integration
 
 
-def _record(content: str, author: str, agent_id: str | None = None) -> HistoryRecord:
+def _record(content: str, author: str, *, is_agent: bool = False) -> HistoryRecord:
     return HistoryRecord(
         message_id=1,
         created_at=datetime.now(UTC),
         content=content,
         author_display_name=author,
-        author_agent_id=agent_id,
+        is_agent=is_agent,
     )
 
 
-def _projected_history_with_adjacent_users() -> list:
-    """Build a projected history whose tail is multiple consecutive
+def _history_with_adjacent_users() -> list:
+    """Build a canonical history whose tail is multiple consecutive
     ``ModelRequest`` entries (the case pydantic-ai's auto-merge must
     consolidate before the provider mapper sees it).
     """
     records = [
         _record("can you help me?", "ryan"),
-        _record(
-            "sure, what do you need?",
-            "Scribe",
-            agent_id="scribe",
-        ),
+        _record("sure, what do you need?", "Scribe", is_agent=True),
         _record("planning a meeting", "ryan"),
         _record("tuesday afternoon", "ryan"),  # consecutive user
         _record("also need help with the prep", "ryan"),  # consecutive user
     ]
-    return project_history(records, self_agent_id="scribe")
+    return build_message_history(records)
 
 
 def _has_anthropic() -> bool:
@@ -89,9 +84,9 @@ def _has_openai() -> bool:
 
 
 def _assert_history_has_adjacent_user_requests(history: list) -> None:
-    """Sanity check: confirm the projected history actually has the
+    """Sanity check: confirm the built history actually has the
     adjacent-same-role shape this test is supposed to exercise.
-    Without this, a subtle change to ``project_history`` could make
+    Without this, a subtle change to ``build_message_history`` could make
     the test vacuously pass.
     """
     request_runs = 0
@@ -103,7 +98,7 @@ def _assert_history_has_adjacent_user_requests(history: list) -> None:
         else:
             request_runs = 0
     assert max_run >= 2, (
-        "test invariant: projected history must contain >=2 consecutive "
+        "test invariant: built history must contain >=2 consecutive "
         "ModelRequest entries to exercise pydantic-ai's auto-merge path; "
         f"got max consecutive-request run of {max_run}"
     )
@@ -122,7 +117,7 @@ async def test_pydantic_ai_anthropic_auto_merges_adjacent_user_messages() -> Non
     from calfkit._vendor.pydantic_ai import Agent
     from calfkit._vendor.pydantic_ai.models.anthropic import AnthropicModel
 
-    history = _projected_history_with_adjacent_users()
+    history = _history_with_adjacent_users()
     _assert_history_has_adjacent_user_requests(history)
 
     model = AnthropicModel("claude-haiku-4-5")
@@ -151,7 +146,7 @@ async def test_pydantic_ai_openai_handles_adjacent_user_messages() -> None:
     from calfkit._vendor.pydantic_ai import Agent
     from calfkit._vendor.pydantic_ai.models.openai import OpenAIChatModel
 
-    history = _projected_history_with_adjacent_users()
+    history = _history_with_adjacent_users()
     _assert_history_has_adjacent_user_requests(history)
 
     model = OpenAIChatModel("gpt-4o-mini")

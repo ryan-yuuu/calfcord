@@ -49,7 +49,7 @@ class ProviderModel(NamedTuple):
 
 # Substrings that mark a model as the cheap/fast tier of its family. Used to
 # pick a sensible default when a wizard step is flagged ``cheap=True`` (e.g. a
-# router or a summariser, where the flagship is overkill). Order is irrelevant —
+# summariser or classifier, where the flagship is overkill). Order is irrelevant —
 # the first *available* model id containing any of these wins.
 _CHEAP_HINTS = ("haiku", "nano", "mini", "flash", "lite")
 
@@ -61,7 +61,7 @@ _PROVIDER_KEY_VAR: dict[str, str] = {
 }
 
 # The selectable providers, with operator-facing labels, shared by every wizard
-# (`calfcord init`, `calfcord router setup`). Values are the ``provider:`` /
+# (`calfcord init`, `calfcord agent create`). Values are the ``provider:`` /
 # ``CALFKIT_AGENT_DEFAULT_PROVIDER`` literals; the order is the menu order.
 PROVIDERS: list[Choice] = [
     Choice("anthropic", "Anthropic"),
@@ -407,13 +407,14 @@ def configure_provider(
     """Run the provider sub-flow shared by every wizard and return ``(provider, model)``.
 
     Selects a provider (``default_provider`` pre-selects the menu — e.g. the
-    router wizard defaults to the agent provider), ensures its credentials
-    (key prompt or inline Codex OAuth), then selects a model from the live list.
-    ``cheap`` biases the model default toward a fast/cheap model (the router);
+    agent-edit wizard defaults to the agent's current provider), ensures its
+    credentials (key prompt or inline Codex OAuth), then selects a model from the
+    live list. ``cheap`` biases the model default toward a fast/cheap model;
     ``current_model`` pre-selects the operator's existing choice on a re-run.
     The caller decides where to persist the result (an agent ``.md`` vs the
-    ``CALFKIT_ROUTER_*`` env vars), so this never writes the provider/model
-    itself — only the credential side effect of :func:`ensure_credentials`.
+    install's ``CALFKIT_AGENT_DEFAULT_*`` env vars), so this never writes the
+    provider/model itself — only the credential side effect of
+    :func:`ensure_credentials`.
     """
     provider = prompter.select("Model provider?", PROVIDERS, default=default_provider or "anthropic")
     api_key = ensure_credentials(prompter, provider, env_path=env_path, current=current)

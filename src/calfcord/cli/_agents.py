@@ -124,26 +124,19 @@ def existing_agent(agents_dir: Path, name: str) -> AgentDefinition | None:
         return None
 
 
-def display_name_for(name: str) -> str:
-    """Derive a sane default ``display_name`` from the agent's slug stem.
-
-    Title-casing the underscore/dash-split stem ("my_helper" → "My Helper")
-    gives a human-friendly default the operator can refine later, without
-    forcing a separate prompt during first-run setup.
-    """
-    return name.replace("_", " ").replace("-", " ").title()
-
-
-def agent_body(display_name: str) -> str:
+def agent_body(name: str) -> str:
     """Render the generic system-prompt body for a brand-new agent.
 
     A minimal, generic prompt so the agent answers sensibly from the first boot
-    without further editing. Kept separate from the frontmatter so the create
-    path can serialize identity fields through ``frontmatter.dumps`` (which
+    without further editing. Addresses the agent by a human-friendly rendering of
+    its slug ``name`` (underscores/dashes title-cased, "my_helper" → "My Helper")
+    so the greeting reads naturally. Kept separate from the frontmatter so the
+    create path can serialize identity fields through ``frontmatter.dumps`` (which
     YAML-quotes free-text values safely) rather than string interpolation.
     """
+    human = name.replace("_", " ").replace("-", " ").title()
     return (
-        f"You are {display_name}, a helpful AI teammate in this Discord workspace. Answer\n"
+        f"You are {human}, a helpful AI teammate in this Discord workspace. Answer\n"
         "questions and help with tasks clearly and concisely. If you don't know something,\n"
         "say so rather than guessing.\n"
     )
@@ -206,8 +199,8 @@ def write_agent(
 
     Two paths, both validate-before-write so a bad value never lands on disk:
 
-    * **Target exists** — update the agent in place, preserving its body and
-      ``display_name``: rewrite ``description``/``provider``/``model`` via
+    * **Target exists** — update the agent in place, preserving its body:
+      rewrite ``description``/``provider``/``model`` via
       :func:`md_writer._update_fields`, then the tool list via
       :func:`md_writer.update_tools`. Both are validated-atomic, so a bad value
       leaves the file untouched.
@@ -239,11 +232,9 @@ def write_agent(
         md_writer.update_tools(target, tools)
         return target
 
-    display_name = display_name_for(name)
-    body = agent_body(display_name)
+    body = agent_body(name)
     metadata = {
         "name": name,
-        "display_name": display_name,
         "description": description,
         "provider": provider,
         "model": model,
