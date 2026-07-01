@@ -173,14 +173,17 @@ class AgentDefinition(BaseModel):
     def _normalize_empty_peer_list(cls, v: bool | tuple[str, ...]) -> bool | tuple[str, ...]:
         """Treat an empty peer list (``a2a: []`` / ``handoff: []``) as ``False``.
 
-        An empty tuple would otherwise pass :meth:`AgentFactory._build_peers`'s
-        capability guard and construct a bare ``Messaging()`` / ``Handoff()`` —
-        which calfkit rejects (it needs at least one peer name or
-        ``discover=True``), crashing the agent worker at boot with an error that
-        names neither the agent nor the field. "No peers" is unambiguously
-        "capability off" (there is no useful meaning for the tool injected with
-        zero reachable peers), so canonicalize ``()`` → ``False`` here — keeping
-        the field a clean tri-state (``True`` / ``False`` / non-empty tuple).
+        An empty tuple has no useful meaning — the ``message_agent`` / handoff
+        capability injected with zero reachable peers — and if it reached calfkit
+        as a bare ``Messaging()`` / ``Handoff()`` it would be rejected (calfkit
+        needs at least one peer name or ``discover=True``), crashing the agent
+        worker at boot with an error that names neither the agent nor the field.
+        Canonicalizing ``()`` → ``False`` here keeps the field a clean tri-state
+        (``True`` / ``False`` / non-empty tuple) and the persisted/echoed value
+        canonical. :meth:`AgentFactory._build_peers` independently reads the field
+        with a truthiness guard, so the two are defense-in-depth: a hand-built
+        definition that skips validation (``model_construct``) still can't produce
+        a peerless handle.
         """
         if isinstance(v, tuple) and not v:
             return False

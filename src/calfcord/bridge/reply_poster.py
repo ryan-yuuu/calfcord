@@ -116,6 +116,10 @@ class ReplyPoster:
             # funneled to classify_error too (it treats it as a non-retryable drop).
             kind = classify_error(e)
             if kind == "agent_fixable":
+                # classify_error only returns "agent_fixable" for an HTTPException
+                # (a 4xx); assert it so the ReplyOutcome.error: HTTPException | None
+                # contract the handler's build_retry_reminder relies on is explicit.
+                assert isinstance(e, discord.HTTPException)
                 return ReplyOutcome("retry", error=e, failed_text=text)
             # Auth/permission drops are operator-actionable misconfigurations that
             # silently break every reply -> ERROR (so alerting sees them); rate-limit

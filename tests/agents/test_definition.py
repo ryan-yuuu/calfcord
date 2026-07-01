@@ -120,9 +120,9 @@ class TestAgentDefinitionValidators:
         assert d.tools == ("calendar", "totally_made_up_tool")
 
     def test_publish_topic_rejected(self) -> None:
-        """``publish_topic`` is vestigial (the router that used it is gone), so a
-        non-``None`` value is rejected — a stale setting fails loudly instead of
-        silently doing nothing."""
+        """``publish_topic`` (the router that used it is gone) is no longer a
+        declared field, so ``extra="forbid"`` rejects a stale value as an unknown
+        field — a stale setting fails loudly instead of silently doing nothing."""
         with pytest.raises(ValidationError, match="publish_topic"):
             _make_definition(publish_topic="routing.decisions")
 

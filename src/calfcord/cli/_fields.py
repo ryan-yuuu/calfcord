@@ -11,7 +11,7 @@ single source: :data:`FIELDS` is the ordered list every surface consumes, and
 
 Two kinds of field live here:
 
-* **Simple** (``text`` / ``select`` / ``int`` / ``bool``) — a scalar frontmatter
+* **Simple** (``text`` / ``select`` / ``bool``) — a scalar frontmatter
   value written through the one validated-atomic seam,
   :func:`calfcord.agents.md_writer._update_fields`, via :func:`write_simple_field`.
   Validation is delegated to :class:`~calfcord.agents.definition.AgentDefinition`

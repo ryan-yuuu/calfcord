@@ -1148,15 +1148,17 @@ async def test_probe_benign_mesh_unavailable_returns_empty(monkeypatch, reason):
     assert fake.aclosed is True
 
 
-async def test_probe_reader_dead_propagates(monkeypatch):
+async def test_probe_reader_dead_propagates(monkeypatch, caplog):
     """`reader_dead` is terminal — we genuinely can't read the roster, so it must
     PROPAGATE (not mask to []) so the caller degrades visibly and the duplicate
-    guard stays conservative. Connection still closed."""
+    guard stays conservative. It is logged at ERROR, and the connection is still
+    closed."""
     fake = _ProbeFakeClient(get_agents_error=MeshUnavailableError("dead", reason="reader_dead"))
     _patch_probe_client(monkeypatch, fake)
-    with pytest.raises(MeshUnavailableError):
+    with caplog.at_level("ERROR"), pytest.raises(MeshUnavailableError):
         await roster._probe_live_roster(_SERVERS)
     assert fake.aclosed is True
+    assert any("reader died" in r.message and r.levelname == "ERROR" for r in caplog.records)
 
 
 async def test_probe_broker_down_propagates(monkeypatch):

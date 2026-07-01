@@ -10,9 +10,11 @@ topics — notably Tansu — for everything its startup ensurer can declare:
 * A **Worker's node topics** are auto-provisioned on the *managed* run surfaces
   (``Worker.run()`` / ``start()`` / ``async with``), whose ``_on_startup`` hook
   declares :func:`~calfkit.provisioning.topics_for_nodes` into the same ensurer.
-  All runners (tools, agents, and the bridge) use the embedded managed
-  ``Worker.start()`` surface, so every Worker-hosted process gets its node
-  topics for free.
+  The **tools and agents runners** use the embedded managed ``Worker.start()``
+  surface, so every Worker-hosted process gets its node topics for free. The
+  **bridge is a pure** :class:`~calfkit.client.Client` (no Worker, no consumers)
+  — it hosts no nodes and so declares no node topics; its only topic is the
+  client reply topic, covered by the pre-start hook above.
 
 After the calfkit 0.12 migration removed the bespoke control plane, calfcord has
 no blind-spot topics left to declare: agent presence and the live roster now ride

@@ -167,6 +167,16 @@ class TestPeers:
         node = _factory().build_node(_definition(a2a=[], handoff=[]))
         assert node._peers == ()
 
+    def test_factory_guard_holds_when_validation_is_bypassed(self) -> None:
+        """Defense-in-depth: a definition built bypassing the empty-tuple validator
+        (``model_copy`` does not re-validate) keeps ``a2a``/``handoff`` as ``()`` —
+        the factory's OWN truthiness guard (not just the definition normalizer)
+        must still yield no peers rather than a bare, calfkit-rejected handle."""
+        bypassed = _definition().model_copy(update={"a2a": (), "handoff": ()})
+        assert bypassed.a2a == () and bypassed.handoff == ()  # bypass confirmed: still empty tuples
+        node = _factory().build_node(bypassed)
+        assert node._peers == ()
+
     def test_a2a_list_restricts_to_named_peers(self) -> None:
         node = _factory().build_node(_definition(a2a=("scribe", "researcher")))
         assert Messaging("scribe", "researcher") in node._peers
@@ -476,13 +486,15 @@ class TestToolsWiring:
 
 
 class TestPublishTopicValidation:
-    """The surviving model_validator forbids a ``publish_topic`` on any agent.
+    """A stray ``publish_topic`` on any agent is rejected at validation.
 
     This exercises :class:`AgentDefinition` validation directly — no factory
-    build, no name-addressing. ``publish_topic`` was reserved for the built-in
-    router (removed in the 0.12 migration); with no router, every agent emits its
-    reply to the inbound frame's ``callback_topic``, so a ``publish_topic`` would
-    be a silent no-op and is rejected.
+    build, no name-addressing. ``publish_topic`` was a reserved field for the
+    built-in router (both the field AND its dedicated ``_forbid_publish_topic``
+    validator were removed in the 0.12 migration); with no field declared,
+    ``model_config extra="forbid"`` now rejects a stale ``publish_topic:`` as an
+    unknown field (the ``ValidationError`` still names it), so the
+    misconfiguration stays visible without a bespoke validator.
     """
 
     def test_default_no_publish_topic_builds(self) -> None:
@@ -495,8 +507,8 @@ class TestPublishTopicValidation:
         )
 
     def test_publish_topic_raises(self) -> None:
-        """Setting ``publish_topic`` would be a silent no-op; reject at validation
-        so the misconfiguration is visible."""
+        """A stale ``publish_topic`` is rejected as an unknown field (extra="forbid")
+        so the migration's removal of the field fails loudly, not silently."""
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="publish_topic"):

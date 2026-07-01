@@ -27,10 +27,11 @@ Per-call override scope
 Per-call (tier 3) overrides apply to every message the bridge answers.
 The bridge only answers ``@<agent_id>`` mentions (ambient, un-mentioned
 channel messages are no longer answered under the 0.12 caller surface), so
-it always knows the target agent ahead of time and always injects the
-override. Runs the bridge doesn't intercept — native A2A peer consults and
-handoffs — fall back to the tier-2 effort baked in at agent boot, so those
-pick up a ``/thinking-effort`` change only after the agent process restarts.
+it always knows the target agent ahead of time and applies the current
+override when one is set (no override → the run uses the boot-baked tier-2).
+Runs the bridge doesn't intercept — native A2A peer consults and handoffs —
+fall back to the tier-2 effort baked in at agent boot, so those pick up a
+``/thinking-effort`` change only after the agent process restarts.
 """
 
 from __future__ import annotations

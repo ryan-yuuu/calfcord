@@ -249,13 +249,14 @@ def _make(
     overrides: dict[str, str] | None = None,
     reply_outcomes: list[ReplyOutcome] | None = None,
     chunked_ok: bool = True,
+    progress: Any = None,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
     if handles is None:
         handles = [handle if handle is not None else _FakeHandle(result=_result("done", "scribe"))]
     client = _FakeClient(handles)
     fakes = {
         "a2a": _FakeA2A(),
-        "progress": _FakeProgress(),
+        "progress": progress if progress is not None else _FakeProgress(),
         "reply": _FakeReply(reply_outcomes, chunked_ok=chunked_ok),
         "history": _FakeHistory(),
     }
@@ -336,6 +337,22 @@ class TestStreamDrain:
         await handler.handle(_req())
         assert len(fakes["progress"].steps) == 1
         assert fakes["a2a"].projected == []
+
+    async def test_render_fault_in_drain_does_not_lose_terminal_reply(self) -> None:
+        # I-3: a render/normalize/classify fault on a step must be swallowed (logged)
+        # so it can't unwind the drain and cost the user the already-computed reply.
+        class _RaisingProgress(_FakeProgress):
+            async def on_step(self, step: Any, req: MentionRequest) -> None:
+                raise RuntimeError("render boom")
+
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=(_agent_msg("thinking…"),), result=_result("done", "scribe")),
+            progress=_RaisingProgress(),
+        )
+        await handler.handle(_req())
+        # the terminal reply still posts, and finish() still ran (the drain didn't unwind).
+        assert [t for _, t in fakes["reply"].replies] == ["done"]
+        assert fakes["progress"].finished == ["c1"]
 
 
 class TestTerminalErrors:
