@@ -1,6 +1,6 @@
-# Authoring a calfcord Agent
+# Authoring an Agent Disco Agent
 
-How to add a new LLM-backed agent to a calfcord deployment. This is the
+How to add a new LLM-backed agent to an Agent Disco deployment. This is the
 contributor reference for the file-drop workflow under `agents/`; for the
 companion reference on the tools an agent can wield, see
 `docs/authoring-tools.md`. For the calfkit node model that backs each
@@ -15,10 +15,10 @@ is the system prompt fed verbatim to the LLM on every run. The format
 parallels Claude Code's `.claude/agents/*.md` convention so the same
 mental model carries over.
 
-Besides hand-writing the file, the `calfcord agent` command group manages an
+Besides hand-writing the file, the `disco agent` command group manages an
 agent's whole lifecycle — `create`, `list`, `show`, `edit`, `set`, `rename`,
-`delete` — from the terminal. `calfcord init`'s first-run setup also creates an
-agent (the same guided flow as `calfcord agent create`) while it configures the
+`delete` — from the terminal. `disco init`'s first-run setup also creates an
+agent (the same guided flow as `disco agent create`) while it configures the
 install's `.env`. See §9 for the full CLI; the rest of this section is the
 frontmatter reference the CLI reads and writes.
 
@@ -30,13 +30,13 @@ into a calfkit `Agent` node addressed **by name** (no per-channel topic
 subscriptions). The **bridge no longer reads `agents/*.md`** — it resolves
 `@mention`s against calfkit's live agent **mesh** and derives each agent's
 Discord persona from its `name`. So a brand-new `.md` is brought online
-with `calfcord agent start <name>` (after a one-time workspace reload so
+with `disco agent start <name>` (after a one-time workspace reload so
 the supervisor declares its slot — see
-[`using-calfcord.md`](using-calfcord.md#build-your-team-of-agents)); there
+[`using-disco.md`](using-disco.md#build-your-team-of-agents)); there
 is **no bridge restart and no per-agent slash command** — agents are
 invoked by `@<name>` mention, not `/<name>`.
 
-calfcord runs as four process types (`calfkit-bridge`, `calfkit-agent`,
+Agent Disco runs as four process types (`calfkit-bridge`, `calfkit-agent`,
 `calfkit-tools`, and one `calfkit-mcp` per configured MCP server). The
 bridge owns Discord I/O and the two operator slash commands
 (`/thinking-effort`, `/clear`); the agent-runner process loads each
@@ -67,7 +67,7 @@ You are Example, a friendly demo agent. Reply concisely (1-3
 sentences) to whatever the user says.
 ```
 
-Drop the file at `agents/example-bot.md`, bring it online with `calfcord
+Drop the file at `agents/example-bot.md`, bring it online with `disco
 agent start example-bot`, then `@example-bot hi` in any Discord channel the
 bot can see. The webhook reply appears under the `example-bot` persona (the
 webhook username is the agent's `name`; the avatar is a deterministic
@@ -212,21 +212,21 @@ Two rules to remember:
   `mcp/...` lines* still needs a restart (the `tools:` list is baked in at
   boot, like builtins).
 
-The full MCP workflow — `mcp.json` schema, `calfcord mcp add`, lifecycle — is in
+The full MCP workflow — `mcp.json` schema, `disco mcp add`, lifecycle — is in
 [`mcp-tools.md`](mcp-tools.md).
 
 #### Editing the tool list
 
 Besides hand-editing this array, you can edit a deployed agent's tool
-list interactively with `calfcord agent tools [<name>]` (an
+list interactively with `disco agent tools [<name>]` (an
 InquirerPy multi-select over the builtin tool universe — plus `mcp/<server>`
 rows from `mcp.json` and live `mcp/<server>/<tool>` rows from the broker when
 it's reachable; omit `<name>` to pick from a list). It writes an explicit
 `tools:` list back to the `.md`. The same checkbox is reachable as the *Tools*
-row of `calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`
+row of `disco agent edit`, and `disco agent set <name> --tools "a,b,c"`
 sets the list non-interactively — see §9. Because the tool set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
-`calfcord agent restart <name>` — there is no live reload.
+`disco agent restart <name>` — there is no live reload.
 
 ### 3.4 Behavior & peers (optional)
 
@@ -241,7 +241,7 @@ the bridge passes the recent channel history it fetches (bounded by
 Discord's per-call REST cap of ~100 messages), scoped to the thread when
 the message is in a thread and to the channel otherwise. Use `/clear` in a
 channel to draw a context boundary the history fetcher truncates at (see
-§6 / [`using-calfcord.md`](using-calfcord.md)).
+§6 / [`using-disco.md`](using-disco.md)).
 
 `a2a` and `handoff` both **default to `true`**, so out of the box every
 agent can consult and hand off to any peer on the mesh. Set either to a
@@ -361,7 +361,7 @@ posts the reply. Consequences:
 
 - **There is no per-agent channel allowlist.** An agent answers
   `@mention`s in any channel the bot can see; scope where it can be
-  reached with Discord's own channel permissions, not with calfcord
+  reached with Discord's own channel permissions, not with Agent Disco
   config.
 - **There is no `state/agents/<name>.json` and no bootstrap-channel env
   var.** The old per-agent channel-subscription state was removed with the
@@ -399,7 +399,7 @@ ramp anchors `low` / `medium` / `high` to the budgets Claude Code's
 `think` / `megathink` / `ultrathink` keywords trigger; `minimal` uses
 the API's documented floor of 1024 budget tokens; `xhigh` is a
 calfkit-specific step between `high` and `max`. OpenAI's
-`reasoning_effort` tops out at `high`, so the upper three calfcord
+`reasoning_effort` tops out at `high`, so the upper three Agent Disco
 tiers all map to it.
 
 Omitting the field entirely skips the override — the agent uses
@@ -420,8 +420,8 @@ default).
 Two scopes to keep straight:
 
 - The **frontmatter `thinking_effort`** is the boot-time default. Change it
-  with `calfcord agent set <name> --thinking-effort <tier>` (or hand-edit),
-  then `calfcord agent restart <name>` to apply. This default is what
+  with `disco agent set <name> --thinking-effort <tier>` (or hand-edit),
+  then `disco agent restart <name>` to apply. This default is what
   **native A2A consults and handoffs use** — they run inside the agent
   runtime with its own settings.
 - The **`/thinking-effort` override** rides only the bridge's own
@@ -429,7 +429,7 @@ Two scopes to keep straight:
 
 ### 6.2 Field-ordering note
 
-When `calfcord agent set` / `edit` rewrite the `.md` (via
+When `disco agent set` / `edit` rewrite the `.md` (via
 `calfcord/agents/md_writer.py`), python-frontmatter's PyYAML `safe_dump`
 alphabetizes the frontmatter keys and discards comments. Treat any
 comments in `agents/agent.template.md` as documentation only — they don't
@@ -444,8 +444,8 @@ The agent runner logs to stdout, which the supervisor captures to
 `-f`):
 
 ```bash
-calfcord logs example-bot -f       # one agent
-calfcord logs -f                   # all components, merged
+disco logs example-bot -f       # one agent
+disco logs -f                   # all components, merged
 ```
 
 In a compose deployment the same stream is reachable as `docker compose
@@ -482,7 +482,7 @@ override if you want this in production.
   `agent 'foo' declares unknown tool(s) ['my_tool']; known tools: [...]`.
   Either fix the name or add the tool to the explicit `ALL_TOOLS` list in
   `src/calfcord/tools/__init__.py` and restart the tools host
-  (`calfcord tools stop && calfcord tools start`, or `uv run calfkit-tools` in dev).
+  (`disco tools stop && disco tools start`, or `uv run calfkit-tools` in dev).
 - **Removed field in a stale `.md`.** `display_name`, `avatar_url`,
   `history_turns`, and `role` were dropped in the calfkit 0.12 migration.
   Because the model is `extra="forbid"`, any of them (or a typo like
@@ -560,7 +560,7 @@ advertises an `AgentCard` carrying its `name` and `description`. The
 factory wires your frontmatter `description` straight into that card, so
 **your `description` is the LLM-facing pitch** other agents read when
 choosing whom to consult. Be specific about what the agent is good at.
-There is no calfcord phonebook and no `deps["phonebook"]` anymore — the
+There is no Agent Disco phonebook and no `deps["phonebook"]` anymore — the
 directory is calfkit's.
 
 ### 8.3 The audit channel
@@ -575,7 +575,7 @@ projection design.
 
 ## 9. Managing agents from the CLI
 
-Every field in §3 can be hand-edited in the `.md`, but the `calfcord
+Every field in §3 can be hand-edited in the `.md`, but the `disco
 agent` command group does the same work — create, inspect, edit, and
 remove agents — from the terminal, writing the same `agents/<name>.md`
 files (under `~/.calfcord/agents/` on a native install). Each command
@@ -584,17 +584,17 @@ accepts is a value the agent will boot with.
 
 | Command | What it does |
 | ------- | ------------ |
-| `calfcord agent create [<name>]` | Guided wizard: name, description, provider + API key, a model **picked from a live list** fetched from the provider, a **tools checkbox** (all builtins pre-selected), and an optional "edit the system prompt now? (opens `$EDITOR`)" step. Writes `~/.calfcord/agents/<name>.md`. |
-| `calfcord agent list [--json]` | Table of every agent (name, provider·model, tool count, description), or a JSON array with `--json`. |
-| `calfcord agent show <name> [--json]` | One agent's full config plus a system-prompt preview; `--json` emits the complete config (full body included). |
-| `calfcord agent edit [<name>]` | Interactive field menu — pick a field, edit it with the right widget; each change is written immediately. Omit `<name>` to pick from a list. |
-| `calfcord agent set <name> --… …` | The non-interactive, scriptable equivalent of `edit` — one or more `--flag value` updates. |
-| `calfcord agent tools [<name>]` | The tool-list checkbox of §3.3 (also reachable as the *Tools* row of `edit`). |
-| `calfcord agent rename <old> <new>` | Renames the `.md` and its `name:` field. (There is no per-agent slash command or channel-subscription state to move — see §5.) |
-| `calfcord agent delete <name> [--yes]` | Removes the `.md`; confirms first, skip with `--yes`. |
+| `disco agent create [<name>]` | Guided wizard: name, description, provider + API key, a model **picked from a live list** fetched from the provider, a **tools checkbox** (all builtins pre-selected), and an optional "edit the system prompt now? (opens `$EDITOR`)" step. Writes `~/.calfcord/agents/<name>.md`. |
+| `disco agent list [--json]` | Table of every agent (name, provider·model, tool count, description), or a JSON array with `--json`. |
+| `disco agent show <name> [--json]` | One agent's full config plus a system-prompt preview; `--json` emits the complete config (full body included). |
+| `disco agent edit [<name>]` | Interactive field menu — pick a field, edit it with the right widget; each change is written immediately. Omit `<name>` to pick from a list. |
+| `disco agent set <name> --… …` | The non-interactive, scriptable equivalent of `edit` — one or more `--flag value` updates. |
+| `disco agent tools [<name>]` | The tool-list checkbox of §3.3 (also reachable as the *Tools* row of `edit`). |
+| `disco agent rename <old> <new>` | Renames the `.md` and its `name:` field. (There is no per-agent slash command or channel-subscription state to move — see §5.) |
+| `disco agent delete <name> [--yes]` | Removes the `.md`; confirms first, skip with `--yes`. |
 
-`calfcord agent create` does not prune the seeded starter — adding an
-agent never deletes another. (`calfcord init`'s first-run setup runs the
+`disco agent create` does not prune the seeded starter — adding an
+agent never deletes another. (`disco init`'s first-run setup runs the
 same create flow and *does* replace a pristine seed; that prune is
 init's alone.)
 
@@ -625,10 +625,10 @@ agent's identity or existence, so they are their own commands.
 
 These commands edit the `.md` on disk; the running agent bakes its
 config at boot (the same one-shot constraint behind the "restart required"
-notes in §3.3 and §6). So **run `calfcord agent restart <name>`** after any
+notes in §3.3 and §6). So **run `disco agent restart <name>`** after any
 edit to apply it. A *newly created* agent additionally needs a one-time
-workspace reload (`calfcord stop && calfcord start`) so the supervisor
-declares its slot before `calfcord agent start <name>` — but there is **no
+workspace reload (`disco stop && disco start`) so the supervisor
+declares its slot before `disco agent start <name>` — but there is **no
 bridge slash-command re-sync**, since agents are invoked by `@mention`, not
 `/<name>`. Each command prints the matching restart hint on success.
 
@@ -636,6 +636,6 @@ The same boot-time rule covers credentials and `.env`: a changed API key,
 model, or provider in `.env` is read only at boot too, so it also needs a
 restart — not just `.md` edits. When the change touches a key several
 agents share (e.g. `ANTHROPIC_API_KEY`), restart them all at once with
-**`calfcord agent restart --all`** (this host's running agents). See
+**`disco agent restart --all`** (this host's running agents). See
 [configuration.md](./configuration.md#applying-changes) for the full
 change → command mapping.

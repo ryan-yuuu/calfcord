@@ -89,7 +89,7 @@ def is_valid_server_name(name: str) -> bool:
     the pattern, so the grammar cannot drift between the two call sites.
 
     The intended consumers are the ``mcp.json`` loader and the
-    ``calfcord mcp add`` writer, which key server config by this name: a
+    ``disco mcp add`` writer, which key server config by this name: a
     configured server whose name is not a legal server segment would be
     unreachable by any valid ``mcp/...`` selector (and could not name a
     Kafka topic segment or roster process). Validating here lets both

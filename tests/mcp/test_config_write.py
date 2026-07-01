@@ -1,6 +1,6 @@
 """Unit tests for :mod:`calfcord.mcp.config_write` — mcp.json mutation.
 
-The writer backs ``calfcord mcp add`` / ``mcp remove``. Pinned contracts:
+The writer backs ``disco mcp add`` / ``mcp remove``. Pinned contracts:
 
 * validate-before-write: a rejected entry leaves the file byte-identical;
 * unrelated top-level keys and sibling servers survive a mutation verbatim;

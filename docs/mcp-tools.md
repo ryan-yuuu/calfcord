@@ -1,8 +1,8 @@
 # MCP tools
 
 Model Context Protocol (MCP) servers let your agents call tools that live
-*outside* calfcord — a GitHub server, a docs search endpoint, anything that
-speaks MCP. calfcord hosts each configured server as its own roster process,
+*outside* Agent Disco — a GitHub server, a docs search endpoint, anything that
+speaks MCP. Agent Disco hosts each configured server as its own roster process,
 advertises the tools that server publishes onto the message bus, and lets any
 agent grant itself those tools with one line of frontmatter.
 
@@ -14,8 +14,8 @@ the MCP processes sit in the topology, see
 [`architecture.md`](./architecture.md#the-four-processes).
 
 > Terminology used throughout: an **MCP server** is the external program or
-> endpoint you point calfcord at (the thing in `mcp.json`); a **toolbox** is
-> the calfkit node calfcord runs to host it; a **slot** is that toolbox's
+> endpoint you point Agent Disco at (the thing in `mcp.json`); a **toolbox** is
+> the calfkit node Agent Disco runs to host it; a **slot** is that toolbox's
 > Process Compose process (`mcp-<server>`).
 
 ## The shape of it
@@ -23,7 +23,7 @@ the MCP processes sit in the topology, see
 - You declare servers in **`mcp.json`** (the same `{"mcpServers": {...}}`
   schema Cursor and Claude Code use). One entry per server.
 - Each server runs as **its own process** — slot `mcp-<server>`, command
-  `calfcord run mcp <server>` — that hosts exactly one calfkit toolbox. One
+  `disco run mcp <server>` — that hosts exactly one calfkit toolbox. One
   process per server is deliberate: a toolbox whose server is unreachable
   fails its own worker at boot, and MCP server configs (operator-supplied
   commands and URLs) are the most misconfiguration-prone config in the system,
@@ -36,7 +36,7 @@ the MCP processes sit in the topology, see
   those selectors against the advertisement **per turn** — runtime discovery,
   no schemas committed to the repo, no agent restart when a server's tool list
   changes.
-- Only the `mcp-<server>` processes (and the `calfcord mcp` CLI) ever read
+- Only the `mcp-<server>` processes (and the `disco mcp` CLI) ever read
   `mcp.json`. Agents read the advertisement from the broker, so on a
   distributed deploy the agent hosts hold no MCP config and no MCP secrets.
 
@@ -47,19 +47,19 @@ The whole flow is: **add** the server to `mcp.json`, **start** its process,
 
 ### 1. Add the server
 
-`calfcord mcp add` with no transport flag drops you into a short wizard — name,
+`disco mcp add` with no transport flag drops you into a short wizard — name,
 transport (stdio or HTTP), command or URL, an env/header loop, a JSON preview,
 then an optional start:
 
 ```bash
-calfcord mcp add
+disco mcp add
 ```
 
 Or do it non-interactively (scripting / CI). A stdio server launched by a local
 command:
 
 ```bash
-calfcord mcp add github \
+disco mcp add github \
   --command "npx -y @modelcontextprotocol/server-github" \
   --env GITHUB_TOKEN          # bare NAME means env GITHUB_TOKEN=$GITHUB_TOKEN
 ```
@@ -67,7 +67,7 @@ calfcord mcp add github \
 An HTTP (Streamable HTTP) server:
 
 ```bash
-calfcord mcp add docs \
+disco mcp add docs \
   --url https://docs.example.com/mcp \
   --header "Authorization=Bearer \$DOCS_TOKEN"
 ```
@@ -87,25 +87,25 @@ them as `$VAR` — see the [reference](#mcpjson-reference) below.
 ### 2. Start its process
 
 ```bash
-calfcord mcp start github
+disco mcp start github
 ```
 
 This brings the `mcp-github` slot online; the toolbox connects to the server,
 lists its tools, and advertises them. Confirm it is up and advertising:
 
 ```bash
-calfcord mcp list           # transport summary + best-effort running state
-calfcord logs mcp-github -f # follow the toolbox's own log
+disco mcp list           # transport summary + best-effort running state
+disco logs mcp-github -f # follow the toolbox's own log
 ```
 
-> **New-server caveat.** A server added to `mcp.json` *after* `calfcord start`
+> **New-server caveat.** A server added to `mcp.json` *after* `disco start`
 > has no declared supervisor slot yet — exactly like a brand-new agent `.md`.
-> `calfcord mcp start <server>` will print a hint to that effect; reload the
+> `disco mcp start <server>` will print a hint to that effect; reload the
 > workspace once so the generated supervisor config picks up the new slot:
 >
 > ```bash
-> calfcord stop && calfcord start
-> calfcord mcp start github
+> disco stop && disco start
+> disco mcp start github
 > ```
 >
 > An already-declared server needs no reload. See
@@ -124,7 +124,7 @@ or use the interactive editor, which offers an `mcp/<server>` row per
 configured server plus live per-tool rows when the broker is reachable:
 
 ```bash
-calfcord agent tools scribe
+disco agent tools scribe
 ```
 
 See [Selector grammar](#selector-grammar) for `mcp/<server>` vs.
@@ -137,7 +137,7 @@ selector in the `.md`* needs an agent restart to take effect — the same rule a
 adding a builtin tool:
 
 ```bash
-calfcord agent restart scribe
+disco agent restart scribe
 ```
 
 (This is distinct from a server's tool list *changing* — that needs no agent
@@ -267,16 +267,16 @@ tools they had until the slot recovers.
 
 ## Lifecycle and reload
 
-The `calfcord mcp` verbs mirror the agent roster verbs, so the muscle memory
+The `disco mcp` verbs mirror the agent roster verbs, so the muscle memory
 carries over:
 
 ```bash
-calfcord mcp start <server>      # bring a server online (start of a running slot = restart in place)
-calfcord mcp stop <server>       # take it offline
-calfcord mcp restart <server>    # reload after editing its mcp.json entry
-calfcord mcp start --all         # the "re-pick up mcp.json" sweep — see below
-calfcord mcp stop --all          # stop every RUNNING mcp- slot on this host
-calfcord mcp restart --all       # restart every RUNNING mcp- slot on this host
+disco mcp start <server>      # bring a server online (start of a running slot = restart in place)
+disco mcp stop <server>       # take it offline
+disco mcp restart <server>    # reload after editing its mcp.json entry
+disco mcp start --all         # the "re-pick up mcp.json" sweep — see below
+disco mcp stop --all          # stop every RUNNING mcp- slot on this host
+disco mcp restart --all       # restart every RUNNING mcp- slot on this host
 ```
 
 A few semantics to keep straight:
@@ -288,11 +288,11 @@ A few semantics to keep straight:
   server in `mcp.json` and (re)starts each — the way to pick up newly added
   entries across the board. `stop --all` / `restart --all` instead operate on
   the *running* `mcp-` slots (they act on what exists, not what is configured).
-- **A server added after `calfcord start` needs a one-time workspace reload.**
+- **A server added after `disco start` needs a one-time workspace reload.**
   The supervisor config is derived from `mcp.json` at `start`, so a server you
-  added afterward has no declared slot. `calfcord mcp start <server>` detects
+  added afterward has no declared slot. `disco mcp start <server>` detects
   this (a `4xx` from the supervisor) and prints the reload hint:
-  `calfcord stop && calfcord start`. After that one reload, the slot exists and
+  `disco stop && disco start`. After that one reload, the slot exists and
   the ordinary verbs apply. Removing a server is the mirror image — the slot
   disappears on the next reload.
 
@@ -308,24 +308,24 @@ host and the agents elsewhere:
 
 ```bash
 # On the MCP host — where mcp.json and its secrets live:
-calfcord mcp add github --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
-calfcord stop && calfcord start     # declare the new mcp-github slot
-calfcord mcp start github
+disco mcp add github --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
+disco stop && disco start     # declare the new mcp-github slot
+disco mcp start github
 
 # On an agent host — no mcp.json, no GITHUB_TOKEN, just the selector in the .md:
-calfcord agent restart scribe       # scribe's tools: includes mcp/github
+disco agent restart scribe       # scribe's tools: includes mcp/github
 ```
 
 The capability view even surfaces servers *other* hosts run, so
-`calfcord agent tools` on the agent host can still offer the github server's
+`disco agent tools` on the agent host can still offer the github server's
 live per-tool rows. The toolbox is an ordinary calfkit node, so two hosts
 running the same server are competing consumers on its dispatch topic — a
 legitimate scale-out, not a split-brain (unlike duplicate agents). See
 [`distributed-deployment.md`](./distributed-deployment.md) for the broader
 multi-host story.
 
-`calfcord deploy k8s` renders one `Deployment` per configured server
-(`calfkit-mcp <server>`). `calfcord deploy docker` does **not** yet cover MCP
+`disco deploy k8s` renders one `Deployment` per configured server
+(`calfkit-mcp <server>`). `disco deploy docker` does **not** yet cover MCP
 servers — run those on a native or systemd host alongside a Docker broker, or
 add the services to your compose file by hand.
 
@@ -340,25 +340,25 @@ add the services to your compose file by hand.
 (bad command, unreachable URL, auth rejected by the server) is there:
 
 ```bash
-calfcord logs mcp-<server>
+disco logs mcp-<server>
 ```
 
 A toolbox whose server is unreachable fails its worker at boot by design, so
 the supervisor will keep retrying it; the log names the cause.
 
-**`calfcord mcp start <server>` prints a workspace-reload hint.** The server
-isn't a declared slot yet (you added it after `calfcord start`). Run
-`calfcord stop && calfcord start` once, then start it. See
+**`disco mcp start <server>` prints a workspace-reload hint.** The server
+isn't a declared slot yet (you added it after `disco start`). Run
+`disco stop && disco start` once, then start it. See
 [Lifecycle and reload](#lifecycle-and-reload).
 
 **An agent isn't seeing the tools.** Walk the chain:
 
-1. Is the server running and advertising? `calfcord mcp list` shows running
-   state; `calfcord logs mcp-<server>` confirms it listed tools and advertised.
+1. Is the server running and advertising? `disco mcp list` shows running
+   state; `disco logs mcp-<server>` confirms it listed tools and advertised.
    If it's down, the agent degrades that turn silently — start the server.
 2. Does the agent's `.md` actually declare the selector, and did you restart
    the agent after adding it? A new `mcp/...` line needs
-   `calfcord agent restart <name>` ([step 4](#4-restart-the-agent)).
+   `disco agent restart <name>` ([step 4](#4-restart-the-agent)).
 3. For an `mcp/<server>/<tool>` selector, does the server advertise a tool by
    exactly that name? The LLM-facing name is the server's own — check the
    toolbox log's tool listing.

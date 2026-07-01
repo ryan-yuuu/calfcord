@@ -1,4 +1,4 @@
-"""Tests for ``calfcord agent create`` — the reusable agent-creation flow.
+"""Tests for ``disco agent create`` — the reusable agent-creation flow.
 
 The flow is pure logic over an injected :class:`Prompter`, so these tests never
 touch a TTY or InquirerPy. A scripted :class:`FakePrompter` dequeues one answer
@@ -144,7 +144,7 @@ def test_run_prints_created_and_next_step(tmp_path: Path, capsys: pytest.Capture
     out = capsys.readouterr().out
     assert "Created agent 'scribe'." in out
     # The exact next-step shape: sentence:, blank line, two-space-indented command.
-    assert "Bring scribe online:\n\n  calfcord agent start scribe" in out
+    assert "Bring scribe online:\n\n  disco agent start scribe" in out
 
 
 def test_run_passes_name_default_through(tmp_path: Path) -> None:

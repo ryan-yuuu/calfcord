@@ -1,4 +1,4 @@
-"""``calfcord agent set`` / ``rename`` / ``delete`` — non-interactive agent mutation.
+"""``disco agent set`` / ``rename`` / ``delete`` — non-interactive agent mutation.
 
 The write-side commands. ``set`` applies one or more ``--field value``
 edits to an agent's ``.md`` through the *validated* write paths the rest of the
@@ -58,7 +58,7 @@ _PROVIDER_MODEL_KEYS = ("provider", "model")
 
 
 def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
-    """``calfcord agent set <name> --field value …``: apply validated edits.
+    """``disco agent set <name> --field value …``: apply validated edits.
 
     ``updates`` maps a field key (``description``, ``tools``, ``provider`` /
     ``model``, ``system_prompt``, …) to its raw string value; ``main.py`` parses
@@ -128,11 +128,11 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
     try:
         provider = parse_agent_md(md_path).provider
     except (ValueError, OSError):
-        print(f"Restart {name} to apply:\n\n  calfcord agent restart {name}")
+        print(f"Restart {name} to apply:\n\n  disco agent restart {name}")
     else:
         print(
             f"Restart {name} to apply (and any other agents on {provider} if the "
-            f"provider/key changed):\n\n  calfcord agent restart {name}"
+            f"provider/key changed):\n\n  disco agent restart {name}"
         )
     return 0
 
@@ -260,7 +260,7 @@ def _rewritten_md(old_md: Path, new_stem: str, new_md: Path) -> str:
 
 
 def run_rename(agents_dir: Path, old: str, new: str) -> int:
-    """``calfcord agent rename <old> <new>``: rename an agent.
+    """``disco agent rename <old> <new>``: rename an agent.
 
     Thin wrapper over :func:`rename_agent` that maps any ``ValueError``/``OSError``
     to an ``error:`` line + return 1 (per the CLI convention — no traceback
@@ -274,8 +274,8 @@ def run_rename(agents_dir: Path, old: str, new: str) -> int:
         print(f"error: {e}")
         return 1
     print(
-        f"Renamed {old!r} -> {slug_stem(new)!r}. Restart `calfcord calfkit-agent` and "
-        f"`calfcord calfkit-bridge` (the /<name> slash command and agent id changed)."
+        f"Renamed {old!r} -> {slug_stem(new)!r}. Restart `disco calfkit-agent` and "
+        f"`disco calfkit-bridge` (the /<name> slash command and agent id changed)."
     )
     return 0
 
@@ -303,7 +303,7 @@ def run_delete(
     *,
     yes: bool = False,
 ) -> int:
-    """``calfcord agent delete <name>``: confirm, then delete the agent.
+    """``disco agent delete <name>``: confirm, then delete the agent.
 
     A missing agent prints an ``error:`` line and returns 1. Unless ``yes`` is
     set, the operator must confirm via the injected :class:`Prompter` (default
@@ -325,5 +325,5 @@ def run_delete(
         return 0
 
     delete_agent(agents_dir, name)
-    print(f"Deleted {name!r}. Restart `calfcord calfkit-agent` (and `calfcord calfkit-bridge`).")
+    print(f"Deleted {name!r}. Restart `disco calfkit-agent` (and `disco calfkit-bridge`).")
     return 0

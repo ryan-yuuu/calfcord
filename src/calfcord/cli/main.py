@@ -1,8 +1,8 @@
 """``calfcord-cli`` argparse entry point — the management command dispatcher.
 
-The native ``calfcord`` shim translates user-facing management subcommands
-(``calfcord init``, ``calfcord agent ...``) into ``calfcord-cli <subcommand>``
-and execs them through the same locked venv as the runners. ``prog="calfcord"``
+The native ``disco`` shim translates user-facing management subcommands
+(``disco init``, ``disco agent ...``) into ``calfcord-cli <subcommand>``
+and execs them through the same locked venv as the runners. ``prog="disco"``
 so ``--help`` reads as the command the user actually types. Future verbs
 register additional subparsers; the shim only needs to know the top-level verb
 (``init`` / ``doctor`` / ``agent`` / ``tools``) to dispatch them here.
@@ -43,8 +43,8 @@ from calfcord.supervisor import component, lifecycle, mcp_roster, roster
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="calfcord",
-        description="Manage a calfcord install (configure, inspect).",
+        prog="disco",
+        description="Manage an Agent Disco install (configure, inspect).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Guided first-run configuration of the install's .env.")
@@ -65,7 +65,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # plumbing in doctor.run.
 
     # ``agent`` is a verb group, not a leaf: ``required=True`` on its
-    # sub-parsers makes a bare ``calfcord agent`` print help + exit non-zero
+    # sub-parsers makes a bare ``disco agent`` print help + exit non-zero
     # rather than silently no-op.
     agent_p = sub.add_parser("agent", help="Create, inspect, and edit agents.")
     agent_sub = agent_p.add_subparsers(dest="agent_command", required=True)
@@ -128,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # clocking in/out of the running office. It has NO config
     # surface here, so it is a ``start|stop|restart`` group whose whole veneer is
     # the dispatch to the generic ``component_start/stop`` with the slot name.
-    # ``required=True`` makes a bare ``calfcord tools`` print help + exit non-zero
+    # ``required=True`` makes a bare ``disco tools`` print help + exit non-zero
     # rather than silently no-op, so the group can grow further verbs later.
     # ``--all`` is a forward-compatible SYNONYM for the bare verb here: a singleton
     # is one process per host, so ``--all`` targets that one instance — it
@@ -244,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument("-o", "--output", help="Write the manifest to PATH instead of stdout.")
 
     # Hidden internal subcommand: the Process Compose readiness exec probe runs
-    # ``calfcord _healthcheck <component>`` on the agent/tools hosts. No ``help=``
+    # ``disco _healthcheck <component>`` on the agent/tools hosts. No ``help=``
     # so it stays out of the user-facing command listing (design §4.2 / §13.2).
     health_p = sub.add_parser("_healthcheck")
     health_p.add_argument("component", help="The component to probe (broker, bridge, an agent id, ...).")
@@ -285,7 +285,7 @@ def _require_home(command: str, *, detail: str = _SUPERVISOR_HOME_DETAIL) -> Pat
     home = _resolve_home()
     if home is None:
         print(
-            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME (or run the installer) so {detail}"
+            f"error: `disco {command}` needs a native install — set CALFCORD_HOME (or run the installer) so {detail}"
         )
     return home
 
@@ -416,7 +416,7 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
 
 def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Dispatch a ``calfcord agent <verb>`` command, resolving the install paths once."""
+    """Dispatch a ``disco agent <verb>`` command, resolving the install paths once."""
     # Roster verbs drive the supervisor, not the agents *files*, so they short-
     # circuit BEFORE the disk-path resolution the file verbs share — and keep the
     # *running* view (`ps`) distinct from the *defined* view (`list`). They take the
@@ -458,7 +458,7 @@ def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
 def _run_healthcheck(component: str) -> int:
     """Run the readiness probe for ``component`` and return its exit code.
 
-    The Process Compose exec probe shells out to ``calfcord _healthcheck
+    The Process Compose exec probe shells out to ``disco _healthcheck
     <component>`` on the substrate hosts (design §4.2 / §13.2). Only the two
     components that emit a real signal are probeable: the ``broker`` (metadata
     reachability built from ``CALF_HOST_URL``, the same default the runners use)
@@ -484,7 +484,7 @@ def _run_healthcheck(component: str) -> int:
 
 
 def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Dispatch a ``calfcord mcp <verb>`` lifecycle command.
+    """Dispatch a ``disco mcp <verb>`` lifecycle command.
 
     The same install-scoped supervisor surface as the agent roster
     (:func:`_run_agent_roster`), driving the per-server ``mcp-<server>``
@@ -585,7 +585,7 @@ def _run_lifecycle(command: str) -> int:
     # ``start`` additionally needs the shim launcher every supervised process
     # execs under, the broker URL, and the roster to declare.
     _, agents_dir = init.resolve_paths(home)
-    launcher = str(home / "shims" / "calfcord")
+    launcher = str(home / "shims" / "disco")
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     # MCP servers are roster slots too: enumerate mcp.json (no-secrets reader)
     # so the generated project declares one disabled mcp-<server> slot each. An
@@ -643,7 +643,7 @@ def _run_component(name: str, verb: str) -> int:
 
 
 def _run_logs(component: str | None, *, follow: bool) -> int:
-    """Dispatch ``calfcord logs [component] [-f]`` to the log-tail module.
+    """Dispatch ``disco logs [component] [-f]`` to the log-tail module.
 
     The supervisor writes each process's stdout/stderr under
     ``$CALFCORD_HOME/state/logs/`` (the §13.2 ``log_location`` contract), so this
@@ -663,10 +663,10 @@ def _run_logs(component: str | None, *, follow: bool) -> int:
 
 
 def _run_deploy(target: str, *, output: str | None) -> int:
-    """Dispatch ``calfcord deploy <target> [--output PATH]`` to the manifest module.
+    """Dispatch ``disco deploy <target> [--output PATH]`` to the manifest module.
 
     The rendered manifests reference the install's shim launcher
-    (``<home>/shims/calfcord``), home paths, and ``config/.env``, so this is
+    (``<home>/shims/disco``), home paths, and ``config/.env``, so this is
     install-scoped: a dev run (no ``CALFCORD_HOME``) has no shim to emit, and refuses
     with the same actionable native-install message rather than rendering a manifest
     that points at nothing. The roster + ``.env`` come off disk via the seams
@@ -689,7 +689,7 @@ def _run_deploy(target: str, *, output: str | None) -> int:
 
 
 def _run_tool_alias(args: argparse.Namespace) -> int:
-    """Dispatch ``calfcord tools alias <add|list|remove>`` to its handlers.
+    """Dispatch ``disco tools alias <add|list|remove>`` to its handlers.
 
     Edits the install ``.env`` (``CALFCORD_TOOLS_ALIAS``). Works in a native
     install or a dev tree — unlike ``deploy`` it only touches ``.env``, so it
@@ -728,7 +728,7 @@ def _run_tool_alias(args: argparse.Namespace) -> int:
 def _apply_alias_restart() -> None:
     """Restart the tools host + running agents so a just-written alias applies.
 
-    The ``--restart`` actuation for ``calfcord tools alias add/remove`` (ADR-0007):
+    The ``--restart`` actuation for ``disco tools alias add/remove`` (ADR-0007):
     gated on a running workspace, then restart both roles that read
     ``CALFCORD_TOOLS_ALIAS`` at boot. On a dev tree (no ``$CALFCORD_HOME``) or a
     closed workspace it just notes the change applies on next start — the

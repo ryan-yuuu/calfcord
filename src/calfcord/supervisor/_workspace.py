@@ -22,7 +22,7 @@ from calfcord.supervisor.client import ProcessComposeClient
 # The single hint shown when an op needs a running workspace and there isn't one.
 # Centralized so every lifecycle surface (substrate, agent roster, components)
 # speaks with exactly one voice.
-WORKSPACE_NOT_RUNNING_HINT = "workspace not running (start it with: calfcord start)"
+WORKSPACE_NOT_RUNNING_HINT = "workspace not running (start it with: disco start)"
 
 
 def resolve_client(

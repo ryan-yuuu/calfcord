@@ -2,7 +2,7 @@
 
 Several verbs consult the configured MCP server names with the same policy —
 an *invalid* config fails the verb with the actionable loader message, not
-just the server's own boot (``calfcord start``, ``mcp start --all``,
+just the server's own boot (``disco start``, ``mcp start --all``,
 ``deploy k8s``). This is that one policy, in one place; the tolerant
 surfaces (logs, the tools editor, init's live finish) own their distinct
 degrade behaviors at their call sites.

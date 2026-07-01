@@ -23,7 +23,7 @@ class DiscordSettings(BaseSettings):
                                                 slash command sync. ``None`` means
                                                 global sync (~1h propagation).
     - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional, legacy) Auto-discovered by
-                                                ``calfcord init`` and written to
+                                                ``disco init`` and written to
                                                 ``.env``, but no longer consumed —
                                                 per-agent channel subscriptions
                                                 were removed in the calfkit 0.12
@@ -58,7 +58,7 @@ class DiscordSettings(BaseSettings):
     )
     default_channel_id: int | None = Field(
         default=None,
-        description="Default channel ID auto-discovered by `calfcord init` (legacy). No longer "
+        description="Default channel ID auto-discovered by `disco init` (legacy). No longer "
         "consumed: per-agent channel subscriptions were removed in the calfkit 0.12 migration.",
     )
     owner_user_id: int | None = Field(

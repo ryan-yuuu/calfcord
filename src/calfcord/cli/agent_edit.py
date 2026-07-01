@@ -1,4 +1,4 @@
-"""``calfcord agent edit [<name>]`` — the interactive field-menu editor.
+"""``disco agent edit [<name>]`` — the interactive field-menu editor.
 
 The workhorse of the editing surface: resolve an agent, then loop a menu
 of its editable fields (sourced from :data:`calfcord.cli._fields.FIELDS`, the one
@@ -270,7 +270,7 @@ def _edit_field(
 
 
 def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | None = None) -> int:
-    """``calfcord agent edit [<name>]``: loop a field menu over one agent.
+    """``disco agent edit [<name>]``: loop a field menu over one agent.
 
     Resolves the agent (given ``name`` must exist; omitted ``name`` prompts a
     picker; an empty agents dir is an error), then loops: show each editable
@@ -334,6 +334,6 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
         # each iteration), so it reflects the just-applied provider.
         print(
             f"Restart {agent_name} to apply (and any other agents on {defn.provider} "
-            f"if the provider/key changed):\n\n  calfcord agent restart {agent_name}"
+            f"if the provider/key changed):\n\n  disco agent restart {agent_name}"
         )
     return 0

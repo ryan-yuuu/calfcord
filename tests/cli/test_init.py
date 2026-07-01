@@ -1,4 +1,4 @@
-"""Tests for ``calfcord init``'s **agent-creation** phase + ``write_agent`` branches.
+"""Tests for ``disco init``'s **agent-creation** phase + ``write_agent`` branches.
 
 The reworked ``init`` is a *composer*: its Discord sub-flow, broker step, and
 ends-live finish are exercised end to end in ``test_init_wizard.py`` (which

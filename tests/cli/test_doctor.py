@@ -1,4 +1,4 @@
-"""Tests for ``calfcord doctor`` (src/calfcord/cli/doctor.py)."""
+"""Tests for ``disco doctor`` (src/calfcord/cli/doctor.py)."""
 
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ def test_missing_env_fails_with_init_hint(monkeypatch, tmp_path, capsys):
     rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
     out = capsys.readouterr().out
     assert rc == 1
-    assert "calfcord init" in out
+    assert "disco init" in out
 
 
 def test_appid_non_numeric_fails(monkeypatch, tmp_path, capsys):
@@ -269,7 +269,7 @@ def test_token_never_leaks_across_paths(monkeypatch, tmp_path, capsys):
 # freshness) always runs; a fresh beat then adds a single informational "roster"
 # line pointing at the native mesh view. The calfkit 0.12 migration removed the
 # bespoke control-plane deep-probe + local↔org drift checks (roster liveness rides
-# the native mesh now — see ``calfcord status``). The heartbeat reader / clock are
+# the native mesh now — see ``disco status``). The heartbeat reader / clock are
 # injected so no real heartbeat file is needed (§4.4 / §12.1 / §13.3).
 
 _NOW = datetime(2026, 6, 6, 12, 0, 0, tzinfo=UTC)
@@ -325,7 +325,7 @@ def test_daemon_down_skips_runtime_section(monkeypatch, tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "calfcord start" in out  # the next-step hint for a closed workspace
+    assert "disco start" in out  # the next-step hint for a closed workspace
     # The runtime roster line never renders when the daemon is down.
     assert "roster" not in out.lower()
 
@@ -370,7 +370,7 @@ def test_fresh_daemon_reports_roster_hint(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "MyBot" in out  # the bridge identity is surfaced
-    assert "calfcord status" in out  # the roster hint points at the mesh view
+    assert "disco status" in out  # the roster hint points at the mesh view
     assert "✗" not in out
 
 
@@ -427,14 +427,14 @@ def test_default_read_beat_resolves_from_disk_daemon_down(monkeypatch, tmp_path,
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "calfcord start" in out  # closed-workspace next-step hint
+    assert "disco start" in out  # closed-workspace next-step hint
 
 
 def test_default_seams_report_roster_hint_from_disk_beat(monkeypatch, tmp_path, capsys):
     # A real fresh on-disk beat + the default seams: the deep control-plane probe
     # was removed in the calfkit 0.12 migration (roster liveness rides the native
     # mesh now), so doctor defaults `now` / `read_beat_fn`, reads the real beat, and
-    # emits the single informational "roster" line pointing at `calfcord status`.
+    # emits the single informational "roster" line pointing at `disco status`.
     from calfcord.health.heartbeat import write_beat
 
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
@@ -453,7 +453,7 @@ def test_default_seams_report_roster_hint_from_disk_beat(monkeypatch, tmp_path, 
     out = capsys.readouterr().out
     assert rc == 0
     assert "DiskBot" in out  # the real on-disk beat was read by the default reader
-    assert "calfcord status" in out  # the roster hint replaces the deleted deep probe
+    assert "disco status" in out  # the roster hint replaces the deleted deep probe
 
 
 class _FrozenDatetime(datetime):

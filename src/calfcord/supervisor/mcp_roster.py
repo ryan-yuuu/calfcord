@@ -3,7 +3,7 @@
 Each ``mcp.json`` server runs as its own Process Compose slot (see
 :func:`calfcord.supervisor.compose.build_compose_project`), so the verbs
 here are the agent-roster shape — including the not-declared reload path: a
-server added to ``mcp.json`` *after* ``calfcord start`` has no declared
+server added to ``mcp.json`` *after* ``disco start`` has no declared
 slot, exactly like a brand-new agent ``.md``, and gets the same
 workspace-reload hint instead of a raw 4xx.
 
@@ -39,11 +39,11 @@ _PC_RUNNING = "Running"
 
 
 def _reload_hint(server: str) -> str:
-    """The not-declared message: a server added after ``calfcord start``."""
+    """The not-declared message: a server added after ``disco start``."""
     return (
         f"mcp server {server} is not in the running workspace. A server added "
-        "to mcp.json after `calfcord start` needs a workspace reload: run "
-        "`calfcord stop` then `calfcord start` (an in-place update would "
+        "to mcp.json after `disco start` needs a workspace reload: run "
+        "`disco stop` then `disco start` (an in-place update would "
         "bounce the broker and bridge)."
     )
 
@@ -214,7 +214,7 @@ async def mcp_start_all(
     the sweep; the exit code aggregates (0 only if every server succeeded).
     """
     if not servers:
-        print("no MCP servers configured; add one with `calfcord mcp add`")
+        print("no MCP servers configured; add one with `disco mcp add`")
         return 0
     home = os.fspath(home)
     client = resolve_client(client, home)

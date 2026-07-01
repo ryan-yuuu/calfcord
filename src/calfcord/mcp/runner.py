@@ -7,7 +7,7 @@ server is unreachable, and server entries are operator-supplied
 commands/URLs — the config most likely to be wrong. Per-server processes
 keep one bad entry from taking down every other MCP tool, let the
 supervisor restart/back off each server independently, and make
-``calfcord mcp restart <server>`` reload just that server's entry.
+``disco mcp restart <server>`` reload just that server's entry.
 
 This is the **only** process type that reads ``mcp.json`` (transport +
 credentials). On startup the toolbox connects to its MCP server, lists its

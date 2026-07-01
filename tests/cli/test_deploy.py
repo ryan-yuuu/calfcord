@@ -1,4 +1,4 @@
-"""Golden tests for the ``calfcord deploy`` manifest generators.
+"""Golden tests for the ``disco deploy`` manifest generators.
 
 The three render functions are pure: roster + home + launcher (+ broker URL) in,
 manifest text out — no filesystem, no broker, no supervisor. So the tests assert
@@ -10,7 +10,7 @@ file output are both covered.
 
 The hard contracts pinned here (design §11.6 honesty + §12.3 secrets):
 
-* the systemd unit models how ``calfcord start`` actually launches the
+* the systemd unit models how ``disco start`` actually launches the
   supervisor (``Type=forking`` detached-return; ExecStart/ExecStop invoke the
   install shim, never a reconstructed ``up`` argv);
 * the k8s manifests are *reference* artifacts (annotated as such) that honour the
@@ -29,7 +29,7 @@ import yaml
 from calfcord.cli import deploy
 
 _HOME = "/srv/calfcord"
-_LAUNCHER = "/srv/calfcord/shims/calfcord"
+_LAUNCHER = "/srv/calfcord/shims/disco"
 _AGENTS = ["assistant", "scribe"]
 _BROKER = "broker.example.com:9092"
 
@@ -50,7 +50,7 @@ def _systemd_ini() -> configparser.ConfigParser:
 
 
 def test_systemd_models_the_detached_return_as_forking() -> None:
-    # `calfcord start` forks a detached supervisor and returns 0 once healthy
+    # `disco start` forks a detached supervisor and returns 0 once healthy
     # (findings.start_model), so Type=forking is the faithful service type.
     assert _systemd_ini()["Service"]["Type"] == "forking"
 
@@ -192,7 +192,7 @@ def test_k8s_external_broker_passes_through_verbatim() -> None:
     "server_urls",
     # A multi-broker bootstrap list is the operator's explicit cross-host target,
     # not a single loopback to rewrite — and is not a single URL `urlsplit` can
-    # parse, so it must flow through verbatim (never crash `calfcord deploy k8s`).
+    # parse, so it must flow through verbatim (never crash `disco deploy k8s`).
     ["127.0.0.1:9092,host2:9092", "broker-a:9092,broker-b:9092"],
 )
 def test_k8s_multi_broker_bootstrap_passes_through_verbatim(server_urls: str) -> None:
@@ -204,7 +204,7 @@ def test_k8s_multi_broker_bootstrap_passes_through_verbatim(server_urls: str) ->
     # A loopback host with an UNPARSEABLE port — `urlsplit(...).port` raises
     # ValueError on a non-integer or out-of-range port. The resolver must fall
     # back to a verbatim passthrough, never let that ValueError crash
-    # `calfcord deploy`. (The plain non-loopback `host:9092` case is covered by
+    # `disco deploy`. (The plain non-loopback `host:9092` case is covered by
     # the external-broker test; these pin the loopback ValueError branch.)
     ["localhost:abc", "localhost:65536", "localhost:-1"],
 )

@@ -6,7 +6,7 @@ quickly, then explains the cause and the fix.
 
 - [Lifecycle & daemon](#lifecycle--daemon)
   - [Substrate is up but nothing replies in Discord](#substrate-is-up-but-nothing-replies-in-discord)
-  - [`calfcord start` times out at the readiness gate](#calfcord-start-times-out-at-the-readiness-gate)
+  - [`disco start` times out at the readiness gate](#disco-start-times-out-at-the-readiness-gate)
   - [`status` shows "process up, Discord disconnected"](#status-shows-process-up-discord-disconnected)
   - [Everything's green but the agent still doesn't reply](#everythings-green-but-the-agent-still-doesnt-reply)
   - [`status` says an agent's process is up, but it isn't registered](#status-says-an-agents-process-is-up-but-it-isnt-registered)
@@ -25,29 +25,29 @@ For the lifecycle model these entries assume (substrate vs. roster), see
 
 ## Lifecycle & daemon
 
-calfcord runs as two layers: a **substrate** (broker + bridge) that `calfcord
+Agent Disco runs as two layers: a **substrate** (broker + bridge) that `disco
 start` brings up in the background, and a **roster** (agents, tools, MCP servers)
-that you clock in on demand with `calfcord agent start <name>` and friends.
+that you clock in on demand with `disco agent start <name>` and friends.
 Most "it's running but quiet" reports come from confusing the two — the office
 is open, but no teammate has clocked in yet. The entries below are ordered the
 way you'll meet them: from "I started the substrate and expected a reply" down
 to multi-host drift.
 
-Your first two tools for any of these are `calfcord status` (the glanceable org
-board — substrate + roster health) and `calfcord logs [component] [-f]` (per-
+Your first two tools for any of these are `disco status` (the glanceable org
+board — substrate + roster health) and `disco logs [component] [-f]` (per-
 component supervisor logs, also on disk at `$CALFCORD_HOME/state/logs/<name>.log`).
-When `status` looks green but behavior is still wrong, `calfcord doctor` confirms
+When `status` looks green but behavior is still wrong, `disco doctor` confirms
 the config and that the bridge daemon is truly alive (not a wedged zombie), and
-`calfcord agent ps` shows which agents the live mesh sees.
+`disco agent ps` shows which agents the live mesh sees.
 
 ### Substrate is up but nothing replies in Discord
 
-**Symptom.** `calfcord start` printed its success banner, `calfcord status`
+**Symptom.** `disco start` printed its success banner, `disco status`
 shows the broker and bridge healthy, the bot shows **online** in Discord — but
-`@assistant hello` gets no answer. `calfcord status` shows an **empty roster**
+`@assistant hello` gets no answer. `disco status` shows an **empty roster**
 (no agents online).
 
-**What it means.** This is working as designed, not a fault. `calfcord start`
+**What it means.** This is working as designed, not a fault. `disco start`
 brings up **only the substrate** (broker + bridge). It deliberately does *not*
 auto-start any agent — "nothing runs that you didn't start" is a trust property.
 The bot is online because the *bridge* is connected to Discord, but no teammate
@@ -56,21 +56,21 @@ has clocked in to actually answer.
 **Resolution.** Clock an agent in:
 
 ```bash
-calfcord agent start assistant   # use any name from `calfcord agent list`
-calfcord status                  # the agent now shows under the roster
+disco agent start assistant   # use any name from `disco agent list`
+disco status                  # the agent now shows under the roster
 ```
 
 Then `@assistant hello` will get a reply. `start`'s own success banner names
-this next step for you (`→ calfcord agent start assistant`); if you arrived here
+this next step for you (`→ disco agent start assistant`); if you arrived here
 by reopening the workspace, that banner is the prompt you skipped.
 
-> `calfcord agent list` shows agents **defined** on disk; `calfcord agent ps`
+> `disco agent list` shows agents **defined** on disk; `disco agent ps`
 > shows agents **running** right now. An empty `agent ps` with a non-empty
 > `agent list` is exactly this case: defined, but not clocked in.
 
-### `calfcord start` times out at the readiness gate
+### `disco start` times out at the readiness gate
 
-**Symptom.** `calfcord start` hangs for a while, then exits non-zero with a
+**Symptom.** `disco start` hangs for a while, then exits non-zero with a
 readiness/health-gate timeout — the **bridge never reached healthy**. It tears
 the substrate back down rather than leaving a half-open office.
 
@@ -84,28 +84,28 @@ Discord handshake.
 Discord but the gateway never finishes coming up, the usual culprit is that the
 bot's **privileged gateway intents are disabled**. In the Discord Developer
 Portal → your app → **Bot**, enable **Message Content Intent** and **Server
-Members Intent**, then re-run `calfcord start`.
+Members Intent**, then re-run `disco start`.
 
 **Other causes to rule out, in order:**
 
 ```bash
-calfcord doctor                  # checks config, broker reachability, token + app id
+disco doctor                  # checks config, broker reachability, token + app id
 ```
 
 - **Bad / revoked bot token or wrong app id** — `doctor` flags both. Fix in
-  `.env` (or re-run `calfcord init`'s Discord step), then `calfcord start`.
+  `.env` (or re-run `disco init`'s Discord step), then `disco start`.
 - **Broker not reachable.** The gate treats broker TCP as a fast-fail
   precondition; `doctor` reports it. If the broker can't be reached, fix
   `CALF_HOST_URL` / the broker first.
 - **Network egress blocked to Discord** (corporate proxy / firewall). The
   process is up but the gateway handshake never completes — same timeout.
 
-`calfcord logs bridge -f` while you retry shows exactly where the bridge stalls
+`disco logs bridge -f` while you retry shows exactly where the bridge stalls
 (token rejected vs. intents-gated vs. no network).
 
 ### `status` shows "process up, Discord disconnected"
 
-**Symptom.** `calfcord status` shows the bridge process **up** but flags it as
+**Symptom.** `disco status` shows the bridge process **up** but flags it as
 **Discord disconnected** (not "healthy"). The bot may appear offline in Discord,
 or appear online but answer nothing.
 
@@ -120,14 +120,14 @@ would miss — a silent-but-running bridge.
 
 - **Transient drop** (network blip, brief Discord outage): the bridge
   reconnects on its own and `status` returns to healthy. Watch it with
-  `calfcord logs bridge -f`.
+  `disco logs bridge -f`.
 - **Won't recover** (token revoked / invalidated): the connection can't come
-  back on its own. Run `calfcord doctor` to confirm the token/app-id, fix the
+  back on its own. Run `disco doctor` to confirm the token/app-id, fix the
   credential, then restart the substrate:
 
   ```bash
-  calfcord stop
-  calfcord start
+  disco stop
+  disco start
   ```
 
 A **healthy** bridge in `status` means "process up *and* connected to Discord" —
@@ -136,7 +136,7 @@ its PID is alive.
 
 ### Everything's green but the agent still doesn't reply
 
-**Symptom.** `calfcord status` is all green — broker healthy, bridge connected,
+**Symptom.** `disco status` is all green — broker healthy, bridge connected,
 the agent shows online in the roster — yet `@assistant hello` still gets no
 reply.
 
@@ -151,9 +151,9 @@ removed in the calfkit 0.12 migration). Diagnose from the logs of the specific
 turn:
 
 ```bash
-calfcord doctor                   # confirm config + that the bridge daemon is truly alive (not a zombie)
-calfcord logs bridge -f           # watch the bridge accept the @mention and start the run
-calfcord logs <agent> -f          # watch the agent receive the call and reply
+disco doctor                   # confirm config + that the bridge daemon is truly alive (not a zombie)
+disco logs bridge -f           # watch the bridge accept the @mention and start the run
+disco logs <agent> -f          # watch the agent receive the call and reply
 ```
 
 The bridge logs each `@mention` with a `correlation_id`; the agent logs the LLM
@@ -164,7 +164,7 @@ for a Discord permission / rate-limit error.
 
 ### `status` says an agent's process is up, but it isn't registered
 
-**Symptom.** `calfcord agent ps` (or `status`) flags an agent as **"process up
+**Symptom.** `disco agent ps` (or `status`) flags an agent as **"process up
 but not registered"** / wedged — the supervisor shows the process running
 locally, but the agent never joined the live org and doesn't answer.
 
@@ -182,8 +182,8 @@ registered"). That's drift, and it's why a bare process check would lie.
 **Resolution.**
 
 ```bash
-calfcord logs <agent> -f          # find why it never registered (broker URL? auth? crash loop?)
-calfcord agent restart <agent>    # reload it after fixing config / .md
+disco logs <agent> -f          # find why it never registered (broker URL? auth? crash loop?)
+disco agent restart <agent>    # reload it after fixing config / .md
 ```
 
 Common roots: the agent points at the wrong broker (`CALF_HOST_URL` mismatch
@@ -198,7 +198,7 @@ agent's `.md`, `agent restart <agent>` is also how you reload it.
 
 ### I changed my API key / `.env` but nothing changed
 
-**Symptom.** You edited a value in `.env` (or ran `calfcord agent set`) — a new
+**Symptom.** You edited a value in `.env` (or ran `disco agent set`) — a new
 API key, a different model, a changed broker URL — but the running component still
 behaves the old way: the same key is rejected, the old model still answers, the
 agent still points at the old broker.
@@ -212,60 +212,60 @@ setting to take effect.
 **Resolution.** Restart only what reads the value you changed:
 
 ```bash
-calfcord agent restart <name>     # one agent's key / model / provider changed
-calfcord agent restart --all      # a key SEVERAL agents share (e.g. ANTHROPIC_API_KEY) — this host's agents
-calfcord tools restart            # something the tools host reads changed
+disco agent restart <name>     # one agent's key / model / provider changed
+disco agent restart --all      # a key SEVERAL agents share (e.g. ANTHROPIC_API_KEY) — this host's agents
+disco tools restart            # something the tools host reads changed
 ```
 
 For a **workspace-wide value the whole roster reads** (e.g. `CALF_HOST_URL`),
 recycle the substrate *and* bring the roster back up on the new value:
 
 ```bash
-calfcord stop && calfcord start   # stop tears EVERYTHING down; start brings up the substrate (broker + bridge) ONLY
-calfcord agent start --all        # ...then bring every defined agent back up on the new value
+disco stop && disco start   # stop tears EVERYTHING down; start brings up the substrate (broker + bridge) ONLY
+disco agent start --all        # ...then bring every defined agent back up on the new value
 ```
 
-> `calfcord stop` tears the **whole** workspace down (broker + bridge **and**
-> every agent and singleton), and `calfcord start` brings up the **substrate
+> `disco stop` tears the **whole** workspace down (broker + bridge **and**
+> every agent and singleton), and `disco start` brings up the **substrate
 > only** — it does not bring the roster back. So `stop && start` leaves you with
 > the substrate up but **no agents running**: use `agent start --all` (every
 > *defined* agent), not `agent restart --all` (which would be a no-op, since
-> nothing is running to restart). Add `calfcord tools start` for the tools host
-> (and `calfcord mcp start --all` for MCP servers). That's the boot-time gotcha
+> nothing is running to restart). Add `disco tools start` for the tools host
+> (and `disco mcp start --all` for MCP servers). That's the boot-time gotcha
 > to watch for. The full change → command mapping lives in
 > [configuration.md](./configuration.md#applying-changes).
 
 ### Nothing survives a reboot
 
-**Symptom.** After a machine reboot (or logging out), `calfcord status` shows
-everything down; the bot is offline and no agents are running. `calfcord start`
+**Symptom.** After a machine reboot (or logging out), `disco status` shows
+everything down; the bot is offline and no agents are running. `disco start`
 brings it all back.
 
 **What it means.** This is expected. The substrate daemon is **session-scoped**,
-not a system service — `calfcord start` launches it in the background of your
+not a system service — `disco start` launches it in the background of your
 session, and `init` doesn't install anything that survives a reboot. There is no
 hidden persistence; reboot non-survival is honest, and `status` reflects reality
 (nothing is running).
 
 **Resolution.**
 
-- **Occasional / dev use:** just re-run `calfcord start`, then clock your agents
-  back in with `calfcord agent start <name>`.
+- **Occasional / dev use:** just re-run `disco start`, then clock your agents
+  back in with `disco agent start <name>`.
 - **Always-on / production:** graduate to a system-managed unit so the substrate
   comes back automatically on boot. Generate a manifest:
 
   ```bash
-  calfcord deploy systemd            # render a systemd unit to stdout
-  calfcord deploy systemd -o calfcord.service   # ...or to a file
+  disco deploy systemd            # render a systemd unit to stdout
+  disco deploy systemd -o disco.service   # ...or to a file
   ```
 
-  `calfcord deploy` also renders `k8s` and `docker` manifests. This is the
+  `disco deploy` also renders `k8s` and `docker` manifests. This is the
   Altitude-3 / production path — see
   [distributed-deployment.md](./distributed-deployment.md).
 
 ### `agent start` refused: "already running in the organization"
 
-**Symptom.** `calfcord agent start X` refuses to start and prints that agent
+**Symptom.** `disco agent start X` refuses to start and prints that agent
 `X` is **already running in the organization** — even though `X` isn't running
 on *this* host.
 
@@ -281,12 +281,12 @@ the bridge having to reject anything.
 **Resolution.** Decide where the agent should actually run.
 
 - **It should run here, not there:** stop it on the other host first
-  (`calfcord agent stop X` on that host), then `calfcord agent start X` here.
+  (`disco agent stop X` on that host), then `disco agent start X` here.
 - **It's already running where you want it:** nothing to do — it's live. Confirm
-  with `calfcord agent ps` (the logical view is org-wide, so it lists the agent
+  with `disco agent ps` (the logical view is org-wide, so it lists the agent
   even though it runs on another box).
 - **You genuinely want a second instance:** you can't share one agent *name*
-  across hosts — give the second one a distinct name (`calfcord agent rename` /
+  across hosts — give the second one a distinct name (`disco agent rename` /
   create a new agent) so each has its own identity in the org.
 
 > **Known limitation.** The mesh read is point-in-time, so two *simultaneous*
@@ -421,7 +421,7 @@ If `status` shows the access token *not* expired but requests still 401 with
 
 **Symptom.** Bringing a Codex-backed agent online fails immediately with
 `CodexNotLoggedInError`, before any Discord traffic is served — whether you
-clocked it in natively (`calfcord agent start <name>`) or via a container
+clocked it in natively (`disco agent start <name>`) or via a container
 (`docker compose up agent`).
 
 **What it means.** An agent declares `provider: openai-codex` but no cached
@@ -438,7 +438,7 @@ Then bring the agent online again:
 
 ```bash
 # Native (single-host) — clock the teammate back in:
-calfcord agent start <name>        # or `calfcord agent restart <name>` if it's stuck
+disco agent start <name>        # or `disco agent restart <name>` if it's stuck
 
 # Containerized — the credential file is bind-mounted from the host:
 docker compose up agent

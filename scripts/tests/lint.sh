@@ -20,8 +20,8 @@ CALFCORD_HOME="$tmp" "$B" -c "source '$ROOT/scripts/install.sh'; write_shims"
 # exceptions carry inline `# shellcheck disable=` directives.
 sc() { shellcheck --severity=warning --shell=bash "$@"; }
 sc "$ROOT/scripts/install.sh"
-sc "$tmp/shims/calfcord"
-sc "$tmp/shims/calfcord-self"
+sc "$tmp/shims/disco"
+sc "$tmp/shims/disco-self"
 sc "$ROOT/scripts/tests/test_installer.sh"
 sc "$ROOT/scripts/tests/lint.sh"
 echo "shellcheck: clean"

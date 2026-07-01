@@ -1,4 +1,4 @@
-"""Tests for the resumable, ends-live ``calfcord init`` wizard (§4.6 / §11 / §12.6).
+"""Tests for the resumable, ends-live ``disco init`` wizard (§4.6 / §11 / §12.6).
 
 The reworked ``init`` is *one continuous, resumable* guided session that COMPOSES
 the existing seams (provider/model/agent via ``agent_create``, Discord
@@ -697,7 +697,7 @@ def test_live_finish_reply_timeout_downgrades_to_try_yourself(
     out = capsys.readouterr().out
     assert rc == 0
     assert "@scribe hello" in out
-    assert "calfcord doctor" in out
+    assert "disco doctor" in out
 
 
 def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
@@ -726,7 +726,7 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     out = capsys.readouterr().out
     assert rc == 0  # clean return — the org is live, detection is advisory
     assert "@scribe hello" in out
-    assert "calfcord doctor" in out
+    assert "disco doctor" in out
 
 
 def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
@@ -885,8 +885,8 @@ def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.C
     assert finish.start_calls == []
     assert finish.agent_calls == []
     # The honest manual path is named.
-    assert "calfcord start" in out
-    assert "calfcord agent start scribe" in out
+    assert "disco start" in out
+    assert "disco agent start scribe" in out
 
 
 def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -898,7 +898,7 @@ def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.
     out = capsys.readouterr().out
     assert rc == 0
     assert finish.start_calls == []
-    assert "calfcord start" in out
+    assert "disco start" in out
 
 
 def test_dev_mode_states_reboot_non_survival(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1070,7 +1070,7 @@ def test_empty_token_on_rerun_keeps_existing_secret(tmp_path: Path) -> None:
 
 def test_live_finish_passes_configured_mcp_servers(tmp_path: Path, monkeypatch) -> None:
     """The live finish enumerates mcp.json (the same no-secrets seam
-    ``calfcord start`` uses) so the workspace declares the mcp-<server>
+    ``disco start`` uses) so the workspace declares the mcp-<server>
     slots from the first boot."""
     config = tmp_path / "config"
     config.mkdir()
@@ -1085,7 +1085,7 @@ def test_live_finish_passes_configured_mcp_servers(tmp_path: Path, monkeypatch) 
 
 def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
     """Onboarding must reach a live org even when mcp.json is broken: warn and
-    start with no MCP slots (the strict readers — `calfcord start`, `mcp
+    start with no MCP slots (the strict readers — `disco start`, `mcp
     start` — surface the config error for fixing)."""
     config = tmp_path / "config"
     config.mkdir()

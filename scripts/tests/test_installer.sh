@@ -28,8 +28,8 @@ SB="$BASE/stubbin"; mkdir -p "$SB"
 LIB="$ROOT/scripts/install.sh"
 
 CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; write_shims" || fail "write_shims"
-C="$TD/shims/calfcord"
-CS="$TD/shims/calfcord-self"
+C="$TD/shims/disco"
+CS="$TD/shims/disco-self"
 export CALFCORD_HOME="$TD"
 
 A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -51,7 +51,7 @@ marker "$Bsha" "$A"
 # version reflects the parsed marker
 "$B" "$CS" version 2>&1 | grep -q "bbbbbbbbbbbb" && pass "version shows marker commit" || fail "version"
 
-# `calfcord self ...` routes to calfcord-self
+# `disco self ...` routes to the disco-self shim
 "$B" "$C" self version 2>&1 | grep -q "bbbbbbbbbbbb" && pass "self routing" || fail "self routing"
 
 # a metacharacter-laden ref is DATA (parsed), never executed
@@ -80,7 +80,7 @@ printf '%s' "$out" | grep -Fq \
 
 # Lifecycle/process-supervisor verbs route to the calfcord-cli argparse entry
 # point (same family as init|agent|tools|mcp|doctor), NOT the bare `uv run`
-# passthrough — otherwise `calfcord start` would try to exec a nonexistent
+# passthrough — otherwise `disco start` would try to exec a nonexistent
 # `start` console script. `_healthcheck` is the process-compose readiness probe
 # command. Each must land as `... -- calfcord-cli <verb> ...`.
 for verb in start stop status _healthcheck logs explain deploy; do
@@ -135,13 +135,13 @@ printf '%s' "$out" | grep -Fq \
 # Day-to-day lifecycle verbs are advertised in the shim's help text so returning
 # users discover them (help -> stdout, exit 0).
 help="$("$B" "$C" --help 2>&1)"
-for tok in "calfcord start" "calfcord stop" "calfcord status" \
-           "calfcord logs" "calfcord explain" "calfcord deploy"; do
+for tok in "disco start" "disco stop" "disco status" \
+           "disco logs" "disco explain" "disco deploy"; do
   printf '%s' "$help" | grep -Fq "$tok" \
     && pass "usage lists '$tok'" || fail "usage missing '$tok': $help"
 done
 
-# `calfcord broker` execs the bundled native tansu binary directly (NOT via uv),
+# `disco broker` execs the bundled native tansu binary directly (NOT via uv),
 # supplying ephemeral-storage + localhost:9092 defaults via env and passing
 # extra args through. Stub the binary so this stays network-free.
 printf '#!/usr/bin/env bash\necho "TANSU $*"\necho "SE=$STORAGE_ENGINE"\necho "AL=$ADVERTISED_LISTENER_URL"\n' > "$TD/bin/tansu"; chmod +x "$TD/bin/tansu"
@@ -241,6 +241,17 @@ resolve_check "Not Found" die                              && pass "resolve_sha 
 H2="$BASE/home2"; mkdir -p "$H2"; : > "$H2/.bash_profile"
 CALFCORD_HOME="$TD" HOME="$H2" PATH="/usr/bin:/bin" "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
 grep -q "$TD/shims" "$H2/.bash_profile" && pass "ensure_path writes ~/.bash_profile" || fail "bash_profile"
+
+# Clean cutover: a re-run removes any pre-rename command shims left on PATH so
+# no stale command survives (there is no compat alias). Legacy names are
+# composed from a base var to keep this file free of stale command references.
+legacy="calfcord"
+: > "$TD/shims/$legacy"; : > "$TD/shims/$legacy-self"
+CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; write_shims" || fail "write_shims re-run"
+{ [ ! -e "$TD/shims/$legacy" ] && [ ! -e "$TD/shims/$legacy-self" ] \
+  && [ -x "$C" ] && [ -x "$CS" ]; } \
+  && pass "clean cutover: legacy shims removed, disco shims present" \
+  || fail "clean cutover: legacy shims remain"
 
 echo "----"; [ "$FAIL" -eq 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
 exit "$FAIL"

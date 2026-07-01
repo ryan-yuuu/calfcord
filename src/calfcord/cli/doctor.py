@@ -1,4 +1,4 @@
-"""``calfcord doctor`` — a non-interactive preflight for an install.
+"""``disco doctor`` — a non-interactive preflight for an install.
 
 Answers "will the four processes actually boot?" before the operator starts them, instead of
 letting a missing token / unreachable broker / missing app id / unparseable agent surface only as a
@@ -121,13 +121,13 @@ def _discord_username(token: str, *, client_factory: Callable[[], httpx.Client] 
 
 def _check_config(env_path: Path) -> Result:
     if not env_path.is_file():
-        return Result("config", "fail", f"no config at {env_path} — run `calfcord init`")
+        return Result("config", "fail", f"no config at {env_path} — run `disco init`")
     try:
         values = read_env(env_path)
     except (OSError, ValueError) as exc:  # unreadable / non-UTF-8 / malformed — don't let it crash doctor
         return Result("config", "fail", f"config at {env_path} is unreadable: {exc}")
     if not values:
-        return Result("config", "warn", f"{env_path} has no values yet — fill it in (or run `calfcord init`)")
+        return Result("config", "warn", f"{env_path} has no values yet — fill it in (or run `disco init`)")
     return Result("config", "ok", str(env_path))
 
 
@@ -194,7 +194,7 @@ def _check_agents(agents_dir: Path) -> Result:
 #
 # The five checks above are STATIC — they answer "will the processes boot?" from
 # config alone, with no running daemon. When the workspace IS open (the substrate
-# started detached via ``calfcord start``) doctor adds a RUNTIME section that proves
+# started detached via ``disco start``) doctor adds a RUNTIME section that proves
 # the daemon is actually alive — the "green light that lies" the design (§12.1)
 # exists to catch: a fresh-but-silent bridge whose heartbeat has gone stale.
 #
@@ -203,7 +203,7 @@ def _check_agents(agents_dir: Path) -> Result:
 # signal). A closed workspace is a valid read-only state, never a failure: doctor
 # says so and stops. Roster liveness and local↔org drift moved onto the native mesh
 # in the calfkit 0.12 migration (the bespoke control-plane probe was deleted), so
-# the runtime section reports daemon liveness plus a pointer to ``calfcord status``.
+# the runtime section reports daemon liveness plus a pointer to ``disco status``.
 
 # The bridge heartbeat names the daemon; its presence gates the whole runtime section.
 _DAEMON_COMPONENT = "bridge"
@@ -225,7 +225,7 @@ def _check_daemon_alive(beat: Heartbeat, *, now: datetime) -> Result:
     return Result(
         "daemon",
         "fail",
-        "bridge heartbeat is stale (wedged/zombie) — restart: `calfcord stop && calfcord start`",
+        "bridge heartbeat is stale (wedged/zombie) — restart: `disco stop && disco start`",
     )
 
 
@@ -262,7 +262,7 @@ async def _gather_runtime(
         Result(
             "roster",
             "ok",
-            "agent roster is read from the mesh — check who's online with `calfcord status`",
+            "agent roster is read from the mesh — check who's online with `disco status`",
         )
     )
     return results
@@ -313,7 +313,7 @@ def run(
     elif home is not None and not daemon_up:
         # The install has a home but the workspace is closed: not a failure, but
         # always name the next step so a returning user is never stranded (§12.6).
-        print("\nworkspace not running — open it with: `calfcord start`")
+        print("\nworkspace not running — open it with: `disco start`")
 
     failures = sum(1 for r in all_results if r.status == "fail")
     warnings = sum(1 for r in all_results if r.status == "warn")

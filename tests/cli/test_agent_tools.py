@@ -1,4 +1,4 @@
-"""Tests for the ``calfcord agent tools`` interactive editor.
+"""Tests for the ``disco agent tools`` interactive editor.
 
 The flow is pure logic over an injected :class:`Prompter`, so these tests never
 touch a TTY or InquirerPy. A :class:`FakePrompter` records the checkbox

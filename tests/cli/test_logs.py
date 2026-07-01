@@ -1,4 +1,4 @@
-"""Tests for ``calfcord logs [component] [-f]`` (``calfcord.cli.logs``).
+"""Tests for ``disco logs [component] [-f]`` (``calfcord.cli.logs``).
 
 ``logs`` tails the per-process supervisor logs Process Compose writes under
 ``$CALFCORD_HOME/state/logs/<name>.log`` (the §13.2 ``log_location`` contract).
@@ -116,7 +116,7 @@ def test_tail_missing_logs_dir_points_at_start(tmp_path: Path) -> None:
 
     logs_mod.tail(tmp_path, agents_dir=tmp_path / "agents", component=None, out=out)
 
-    assert any("calfcord start" in line for line in lines)
+    assert any("disco start" in line for line in lines)
 
 
 # --- valid name, no file yet (never clocked in) ----------------------------
@@ -359,7 +359,7 @@ def test_tail_all_with_non_utf8_bytes_does_not_crash(tmp_path: Path) -> None:
 def test_supervisor_log_stem_agrees_with_lifecycle_filename() -> None:
     # logs.py and lifecycle.py must name the supervisor's own log identically; a
     # drift between the stem logs reads and the filename lifecycle writes would
-    # make `calfcord logs process-compose` silently miss the file. Both must
+    # make `disco logs process-compose` silently miss the file. Both must
     # derive from the single shared stem compose.py owns, so the stem + ".log"
     # reconstructs lifecycle's filename exactly.
     from calfcord.supervisor import compose, lifecycle

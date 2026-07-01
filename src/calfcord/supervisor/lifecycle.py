@@ -90,7 +90,7 @@ _DOWN_TIMEOUT_SECONDS = 20
 _LOCK_FILENAME = "calfcord-lifecycle.lock"
 _COMPOSE_FILENAME = "process-compose.yaml"
 # Derive from the single shared stem so the writer (this module's ``up -L``) and
-# the reader (``calfcord logs``) can never drift apart (review #19).
+# the reader (``disco logs``) can never drift apart (review #19).
 _SUPERVISOR_LOG_FILENAME = f"{SUPERVISOR_LOG_STEM}.log"
 
 # Substrate processes, for the status board's substrate-vs-roster split.
@@ -124,7 +124,7 @@ def resolve_pc_binary() -> str:
     raise RuntimeError(
         "process-compose binary not found "
         "(checked $CALFCORD_PROCESS_COMPOSE_BIN, $CALFCORD_HOME/bin/process-compose, "
-        "and PATH); re-run the calfcord installer to bootstrap it, or set "
+        "and PATH); re-run the Agent Disco installer to bootstrap it, or set "
         "$CALFCORD_PROCESS_COMPOSE_BIN to a process-compose v1.110.0 binary."
     )
 
@@ -172,7 +172,7 @@ def lifecycle_lock(home: str | os.PathLike[str]):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             raise RuntimeError(
-                f"another calfcord start/stop is in progress for {home} "
+                f"another disco start/stop is in progress for {home} "
                 f"(could not acquire {path})"
             ) from exc
         try:
@@ -393,16 +393,16 @@ async def start(
             belongs = await _supervisor_belongs_to_home(client, home)
             if belongs is False:
                 print(
-                    f"error: another calfcord install is already using REST port "
+                    f"error: another Agent Disco install is already using REST port "
                     f"{pc_port_for(home)} on this host (a port collision between "
                     "two $CALFCORD_HOME installs). Stop the other install, or run "
                     "this one under a different $CALFCORD_HOME, then re-run "
-                    "`calfcord start`."
+                    "`disco start`."
                 )
                 return 1
             print(
                 "workspace already open (broker + bridge). "
-                "Next: calfcord agent start <name>"
+                "Next: disco agent start <name>"
             )
             return 0
 
@@ -414,7 +414,7 @@ async def start(
         if not await probe():
             print(
                 f"error: broker not reachable at {server_urls}; "
-                "start it with `calfcord broker`, then re-run `calfcord start`."
+                "start it with `disco broker`, then re-run `disco start`."
             )
             return 1
 
@@ -459,7 +459,7 @@ async def start(
         # detached supervisor is already up, so a raise here (a PC reconcile error
         # / transport failure) must NOT be left bare: an unhandled exception would
         # orphan the supervisor and dump a traceback — and since `start` is the
-        # wizard's start_fn, it would crash `calfcord init`. Fail like the
+        # wizard's start_fn, it would crash `disco init`. Fail like the
         # readiness-gate path below: tear the substrate back down via the BLOCKING
         # seam (a racy detached `down` could let a retried `start` collide with a
         # supervisor still stopping), report actionably, and return non-zero.
@@ -470,7 +470,7 @@ async def start(
                 spawn_blocking([binary, "down", "-p", str(port)])
             print(
                 "error: workspace failed to prime; tore it down. "
-                f"See {log_path} or run: calfcord doctor"
+                f"See {log_path} or run: disco doctor"
             )
             return 1
 
@@ -488,13 +488,13 @@ async def start(
                 "error: bridge did not become ready within "
                 f"{ready_timeout_s:g}s; tore down the workspace. "
                 "Likely the broker could not be reached or Discord privileged "
-                f"intents are off. See {log_path} or run: calfcord doctor"
+                f"intents are off. See {log_path} or run: disco doctor"
             )
             return 1
 
     print(
         "workspace open (broker + bridge). No agents running yet "
-        "-> calfcord agent start <name>"
+        "-> disco agent start <name>"
     )
     return 0
 
@@ -544,7 +544,7 @@ async def status(
     client = _resolve_client(client, home)
 
     if not await _supervisor_is_up(client):
-        print("workspace not running (start it with: calfcord start)")
+        print("workspace not running (start it with: disco start)")
         return 0
 
     processes = _process_rows(await client.list_processes())
@@ -562,7 +562,7 @@ async def status(
     else:
         print("  (none running)")
     # Reboot non-survival, stated honestly (§12.6): the daemon is session-scoped.
-    print("note: the workspace does not survive a reboot; re-run `calfcord start`.")
+    print("note: the workspace does not survive a reboot; re-run `disco start`.")
     return 0
 
 

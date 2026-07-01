@@ -10,7 +10,7 @@ host runs detached, in dev, or under a future supervisor swap.
 The shape is the §13.2 Phase-0 contract, pinned against Process Compose
 ``v1.110.0`` (config schema ``version: "0.5"``):
 
-* **Substrate** (``broker``, ``bridge``) autostarts under ``calfcord start``;
+* **Substrate** (``broker``, ``bridge``) autostarts under ``disco start``;
   **roster** (every agent + ``tools``) is declared
   ``disabled`` and waits for an explicit ``... start`` (a ``POST /process/start``).
   "Nothing runs that the user did not start" is a trust property, so the split is
@@ -170,7 +170,7 @@ def build_compose_project(
     never take down sibling servers and each restarts independently. ``home``
     is ``$CALFCORD_HOME`` — only the per-process ``state/logs/<name>.log`` paths
     use it. ``launcher`` is the shim prefix every ``command`` is built on
-    (e.g. ``$CALFCORD_HOME/shims/calfcord``); the generator never reconstructs
+    (e.g. ``$CALFCORD_HOME/shims/disco``); the generator never reconstructs
     ``uv run`` flags or inlines secrets.
 
     Returns a plain ``dict`` (serialize with :func:`render_compose`). See the

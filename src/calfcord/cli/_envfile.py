@@ -1,4 +1,4 @@
-"""Minimal, position-preserving dotenv reader/writer for ``calfcord init``.
+"""Minimal, position-preserving dotenv reader/writer for ``disco init``.
 
 The install's ``config/.env`` is the *seeded* ``.env.example``: it is
 heavily commented and its ordering is meaningful documentation for the

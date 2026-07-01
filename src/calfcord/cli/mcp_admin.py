@@ -1,11 +1,11 @@
-"""``calfcord mcp add|list|remove`` — manage the ``mcp.json`` server registry.
+"""``disco mcp add|list|remove`` — manage the ``mcp.json`` server registry.
 
 ``add`` is dual-mode, picked by the flags:
 
 * **Wizard** (no ``--command``/``--url``): an InquirerPy flow over the
   injected :class:`Prompter` seam — name, transport, command/URL,
   env/header loop, a JSON preview confirm, then an optional start. This is
-  the onboarding-grade path (``calfcord mcp add`` and you're done).
+  the onboarding-grade path (``disco mcp add`` and you're done).
 * **Flags** (``--command``/``--url`` given): non-interactive, scripting
   parity with the old ``calfcord-mcp-add`` (``--env NAME`` is shorthand for
   ``NAME=$NAME``).
@@ -154,14 +154,14 @@ def run_add(
     )
     if not wants_start:
         print(
-            f"next: `calfcord mcp start {name}` (a server new to this workspace "
-            "needs `calfcord stop && calfcord start` first to declare its slot)"
+            f"next: `disco mcp start {name}` (a server new to this workspace "
+            "needs `disco stop && disco start` first to declare its slot)"
         )
         return 0
     if home is None:
         print(
             "cannot start it from here (no CALFCORD_HOME — dev run); "
-            f"run `calfcord mcp start {name}` from the install."
+            f"run `disco mcp start {name}` from the install."
         )
         return 0
 
@@ -181,7 +181,7 @@ def _add_from_flags(
 ) -> tuple[str, dict[str, Any]]:
     """Build the entry from the non-interactive flags (cross-validated)."""
     if server is None:
-        raise McpConfigError("give the server name (calfcord mcp add <server> --command ...)")
+        raise McpConfigError("give the server name (disco mcp add <server> --command ...)")
     if command is not None and url is not None:
         raise McpConfigError("--command and --url are mutually exclusive")
     if env and url is not None:
@@ -278,7 +278,7 @@ def run_list(*, config_path: Path, home: Path | None) -> int:
         print(f"error: {exc}")
         return 1
     if not entries:
-        print(f"no MCP servers configured in {config_path}; add one with `calfcord mcp add`")
+        print(f"no MCP servers configured in {config_path}; add one with `disco mcp add`")
         return 0
 
     running = _running_servers(home)
@@ -338,7 +338,7 @@ def run_remove(
         print(f"error: {exc}")
         return 1
     print(
-        f"removed MCP server {server!r}. If it is running, `calfcord mcp stop {server}` "
+        f"removed MCP server {server!r}. If it is running, `disco mcp stop {server}` "
         "stops it; the slot disappears on the next workspace reload."
     )
     return 0

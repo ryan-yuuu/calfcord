@@ -1,4 +1,4 @@
-"""Tests for ``calfcord agent set`` / ``rename`` / ``delete``.
+"""Tests for ``disco agent set`` / ``rename`` / ``delete``.
 
 These commands mutate an agent's ``agents/<name>.md``, so the tests seed real
 files and re-parse / re-stat to assert the on-disk effect. The contracts that
@@ -101,7 +101,7 @@ def test_set_success_prints_next_step_block(tmp_path: Path, capsys) -> None:
     assert "Updated scribe (description)." in out
     assert (
         "Restart scribe to apply (and any other agents on anthropic if the "
-        "provider/key changed):\n\n  calfcord agent restart scribe"
+        "provider/key changed):\n\n  disco agent restart scribe"
     ) in out
 
 
@@ -137,7 +137,7 @@ def test_set_success_survives_unparsable_md_on_provider_reread(
     assert "Updated scribe (description)." in out
     # The restart hint still appears (so the operator knows to apply the change),
     # naming the agent and the roster `restart` verb.
-    assert "calfcord agent restart scribe" in out
+    assert "disco agent restart scribe" in out
 
 
 def test_set_tools_writes_exactly_those(tmp_path: Path) -> None:

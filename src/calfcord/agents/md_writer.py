@@ -1,6 +1,6 @@
 """Atomic mutation of frontmatter fields in an ``agents/<name>.md`` file.
 
-The Discord ``/thinking-effort`` slash command and the ``calfcord agent
+The Discord ``/thinking-effort`` slash command and the ``disco agent
 tools`` editor both persist their values into the agent's declarative
 ``.md`` file rather than a parallel state file, so ``agents/<name>.md`` is
 the single source of truth for an agent's declared defaults. This module

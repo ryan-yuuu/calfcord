@@ -13,7 +13,7 @@ Two strictly separated halves, mirroring the deployment boundary:
 * **Server path** (the host running the MCP servers):
   :mod:`calfcord.mcp.config` loads ``mcp.json`` (commands, URLs,
   credentials) and :mod:`calfcord.mcp.runner` hosts one
-  :class:`calfkit.mcp.mcp_toolbox.MCPToolbox` per ``calfcord run mcp
+  :class:`calfkit.mcp.mcp_toolbox.MCPToolbox` per ``disco run mcp
   <server>`` process.
 
 This package deliberately re-exports nothing: importing a submodule states

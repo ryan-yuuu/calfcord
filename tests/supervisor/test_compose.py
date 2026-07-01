@@ -21,7 +21,7 @@ import yaml
 from calfcord.supervisor.compose import build_compose_project, render_compose
 
 _HOME = "/srv/calfcord"
-_LAUNCHER = "/srv/calfcord/shims/calfcord"
+_LAUNCHER = "/srv/calfcord/shims/disco"
 _AGENTS = ["assistant", "scribe"]
 
 

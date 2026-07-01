@@ -13,10 +13,10 @@ Values may reference environment variables as ``$VAR`` / ``${VAR}``
 an unset reference fails the load naming the variable. Literal values are
 also legal — the file lives next to ``config/.env`` with the same 0600
 expectations — but ``$VAR`` keeps secrets out of the file and is what the
-``calfcord mcp add`` wizard nudges toward.
+``disco mcp add`` wizard nudges toward.
 
 Deployment boundary: only the ``calfkit-mcp`` runner and the
-``calfcord mcp`` CLI read this module. Agents resolve MCP tools from the
+``disco mcp`` CLI read this module. Agents resolve MCP tools from the
 broker's capability view (:mod:`calfcord.mcp.agent_select`) and never need
 this file on their host — pinned by ``tests/mcp/test_import_isolation.py``.
 
@@ -161,7 +161,7 @@ def load_mcp_servers(path: Path) -> dict[str, MCPToolboxNode]:
     """
     if not path.exists():
         raise McpConfigError(
-            f"MCP config not found at {path} — create it (or run 'calfcord mcp add') first"
+            f"MCP config not found at {path} — create it (or run 'disco mcp add') first"
         )
     servers: dict[str, MCPToolboxNode] = {}
     for name, entry in _validated_entries(path):
@@ -178,17 +178,17 @@ def load_one_server(path: Path, name: str) -> MCPToolboxNode:
     design, so another server's unset secret must not fail this one's boot.
 
     Raises :class:`McpConfigError` for a missing/invalid file, an empty
-    registry (pointing at ``calfcord mcp add``), or an unknown name (listing
+    registry (pointing at ``disco mcp add``), or an unknown name (listing
     what IS configured).
     """
     if not path.exists():
         raise McpConfigError(
-            f"MCP config not found at {path} — create it (or run 'calfcord mcp add') first"
+            f"MCP config not found at {path} — create it (or run 'disco mcp add') first"
         )
     entries = dict(_validated_entries(path))
     if not entries:
         raise McpConfigError(
-            f"no MCP servers configured in {path}; add one with 'calfcord mcp add'"
+            f"no MCP servers configured in {path}; add one with 'disco mcp add'"
         )
     entry = entries.get(name)
     if entry is None:

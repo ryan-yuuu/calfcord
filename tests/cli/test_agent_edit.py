@@ -1,4 +1,4 @@
-"""Tests for ``calfcord agent edit`` — the interactive field-menu editor.
+"""Tests for ``disco agent edit`` — the interactive field-menu editor.
 
 The menu is pure logic over an injected :class:`Prompter`, so these tests never
 touch a TTY, InquirerPy, or a real ``$EDITOR`` subprocess. A scripted
@@ -201,7 +201,7 @@ def test_restart_hint_printed_only_when_changed(tmp_path: Path, capsys: pytest.C
     out = capsys.readouterr().out
     assert (
         "Restart scribe to apply (and any other agents on anthropic if the "
-        "provider/key changed):\n\n  calfcord agent restart scribe"
+        "provider/key changed):\n\n  disco agent restart scribe"
     ) in out
     assert parse_agent_md(md).description == "Changed."
 

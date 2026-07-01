@@ -1,7 +1,7 @@
 """Filesystem heartbeat: write/read/freshness for the runner liveness probe.
 
 A long-lived runner refreshes ``<home>/state/health/<component>.json`` every few
-seconds; the ``calfcord _healthcheck`` exec probe (run by Process Compose on the
+seconds; the ``disco _healthcheck`` exec probe (run by Process Compose on the
 agent/tools hosts) reads it to gate readiness. The contract (design §4.2 / §12.1):
 
 * the beat carries ``{component, pid, started_at, last_beat, status, identity}``;

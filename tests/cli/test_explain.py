@@ -1,4 +1,4 @@
-"""Tests for ``calfcord explain topology`` (src/calfcord/cli/explain.py).
+"""Tests for ``disco explain topology`` (src/calfcord/cli/explain.py).
 
 ``explain`` is a pure teaching command: no supervisor, no broker, no install
 home. These tests pin the *content contract* (it must name the substrate, the

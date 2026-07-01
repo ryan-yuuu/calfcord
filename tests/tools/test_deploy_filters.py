@@ -272,7 +272,7 @@ class TestToolNameRegex:
 
 # --------------------------------------------------------------------------
 # parse_alias_csv / serialize_alias_map — the shared CSV grammar used by both
-# the runtime (_resolve_alias_map) and the calfcord tools alias CLI.
+# the runtime (_resolve_alias_map) and the disco tools alias CLI.
 # --------------------------------------------------------------------------
 
 

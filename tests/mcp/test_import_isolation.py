@@ -4,7 +4,7 @@ The agent path (definition parsing, the factory, the agent runner) resolves
 ``mcp/...`` selectors from the broker's capability view and must run on
 hosts that have no ``mcp.json`` and none of the secrets inside it. The only
 modules allowed to read that file are the ``calfkit-mcp`` runner and the
-``calfcord mcp`` CLI. A stray import of :mod:`calfcord.mcp.config` from the
+``disco mcp`` CLI. A stray import of :mod:`calfcord.mcp.config` from the
 agent path would silently re-couple agent hosts to the config file (and its
 ``$VAR`` environment), so this test imports the agent path in a clean
 interpreter and asserts the loader never came along.

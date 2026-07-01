@@ -1,6 +1,6 @@
 # Security Policy
 
-calfcord ships agents with shell, filesystem, and web-fetch tools that
+Agent Disco ships agents with shell, filesystem, and web-fetch tools that
 take LLM-supplied input. The deployment model assumes a trusted shared
 workspace (see `README.md` → **Security**). Real-world deployments
 will find ways to break those assumptions; this doc is how to report
@@ -43,7 +43,7 @@ and the impact you observed.
 
 ## What's in scope
 
-The four calfcord processes:
+The four Agent Disco processes:
 
 - **`calfkit-bridge`** — Discord gateway, registry loader, normalizer,
   outbox / persona webhook posting.
@@ -91,9 +91,9 @@ The deployment plumbing around those processes is also in scope:
 - **Denial-of-service via expensive LLM prompts or tool calls** where
   the operator controls the bot's exposure. If the issue requires
   exposing the bot to the open internet without rate-limiting, the
-  hardening belongs in the operator's deployment, not in calfcord.
+  hardening belongs in the operator's deployment, not in Agent Disco.
 
 ## License note
 
-calfcord is released under Apache-2.0. Vulnerability reports and any
+Agent Disco is released under Apache-2.0. Vulnerability reports and any
 patches submitted with them are accepted under the same terms.

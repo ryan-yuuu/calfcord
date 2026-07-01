@@ -51,7 +51,7 @@ from calfcord.providers.codex.token_store import (
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="calfkit-auth", description="Authentication for calfcord LLM providers.")
+    parser = argparse.ArgumentParser(prog="calfkit-auth", description="Authentication for Agent Disco LLM providers.")
     sub = parser.add_subparsers(dest="provider", required=True)
 
     codex = sub.add_parser("codex", help="OpenAI ChatGPT subscription auth (Codex models).")

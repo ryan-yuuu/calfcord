@@ -9,7 +9,7 @@
 Distributed by design: agents and tools are independently deployable anywhere. Agents deployed on your laptop, home desktop, and cloud VM all seamlessly collaborate with eachother.
 
 <!-- Demo image, save to docs/assets/demo.gif, then uncomment the line below. -->
-<!-- ![Calfcord demo](docs/assets/demo.gif) -->
+<!-- ![Agent Disco demo](docs/assets/demo.gif) -->
 > _📸 Demo coming soon
 
 ## What you get
@@ -43,7 +43,7 @@ When it finishes, **restart your terminal**.
 **3. Run the guided setup.**
 
 ```bash
-calfcord init
+disco init
 ```
 
 It walks you through picking a provider + model, setting up your first agent, and setting up your discord connection.
@@ -70,17 +70,17 @@ one laptop or twenty hosts.
 A handful of commands cover everyday use:
 
 ```bash
-calfcord status                 # who's online — the org board
-calfcord agent create <name>    # define a new teammate (a Markdown file)
-calfcord agent start  <name>    #   ...then bring it online in the live org
-calfcord logs -f                # tail the workspace as it runs
-calfcord stop                   # close the workspace
-calfcord start                  #   ...and reopen it later (substrate only)
+disco status                 # who's online — the org board
+disco agent create <name>    # define a new teammate (a Markdown file)
+disco agent start  <name>    #   ...then bring it online in the live org
+disco logs -f                # tail the workspace as it runs
+disco stop                   # close the workspace
+disco start                  #   ...and reopen it later (substrate only)
 ```
 
-`calfcord start` brings up just the **workspace** (broker + bridge); teammates
+`disco start` brings up just the **workspace** (broker + bridge); teammates
 (agents, tools) clock in on demand with `... start`. The full
-task-by-task guide is [`docs/using-calfcord.md`](./docs/using-calfcord.md).
+task-by-task guide is [`docs/using-disco.md`](./docs/using-disco.md).
 
 ## Going further — I want to…
 
@@ -93,15 +93,15 @@ Pick your next move by goal:
 | Use my ChatGPT Plus/Pro subscription (Codex) | [`docs/codex-auth.md`](./docs/codex-auth.md) |
 | Have agents talk to each other (A2A) | [`docs/a2a-threads.md`](./docs/a2a-threads.md) |
 | Run agents across machines / go to production | [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) |
-| Understand how it works | [`docs/architecture.md`](./docs/architecture.md) (or run `calfcord explain topology`) |
-| See everything I can do, task by task | [`docs/using-calfcord.md`](./docs/using-calfcord.md) |
+| Understand how it works | [`docs/architecture.md`](./docs/architecture.md) (or run `disco explain topology`) |
+| See everything I can do, task by task | [`docs/using-disco.md`](./docs/using-disco.md) |
 | Configure every setting | [`docs/configuration.md`](./docs/configuration.md) |
 | Review security / threat model | [`docs/security.md`](./docs/security.md) |
 | Fix something that's broken | [`docs/troubleshooting.md`](./docs/troubleshooting.md) |
 
 ## Define your own agent
 
-The installer stores agents `~/.calfcord/agents/`. Your agents live there and survive `calfcord self update`. This section
+The installer stores agents `~/.calfcord/agents/`. Your agents live there and survive `disco self update`. This section
 is the guide for adding *more* agents by hand.
 
 An agent is one Markdown file. Drop a new one into `~/.calfcord/agents/`:
@@ -122,52 +122,52 @@ You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sente
 The frontmatter declares identity and runtime hints; the body is the system
 prompt. The persona (Discord name + avatar) is derived from `name`, and the
 filename must match it. Agents can consult and hand off to each other by default
-(`a2a`/`handoff`). Drop the file in, bring it online with `calfcord agent start
+(`a2a`/`handoff`). Drop the file in, bring it online with `disco agent start
 scribe`, then talk to it by `@`-mentioning it in a channel.
 
 Prefer not to hand-write the file? The full lifecycle is on the CLI:
-`calfcord agent create | list | show | edit | set | rename | delete` (plus
-`calfcord agent tools` for just the tool list). `create` is a guided wizard,
+`disco agent create | list | show | edit | set | rename | delete` (plus
+`disco agent tools` for just the tool list). `create` is a guided wizard,
 `edit` an interactive field menu, and `set` its scriptable equivalent. After
-editing a *running* agent, apply the change with `calfcord agent restart
+editing a *running* agent, apply the change with `disco agent restart
 <name>`.
 
 Full field reference (providers, models, tool scoping, thinking effort) and the
-`calfcord agent` CLI →
+`disco agent` CLI →
 [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 
 ## How it works
 
-Calfcord runs in two layers, so you can scale the team without touching the
+Agent Disco runs in two layers, so you can scale the team without touching the
 wiring:
 
 - **The workspace (substrate)** — the always-on background office: the **broker**
   (a local message bus) and the **`calfkit-bridge`** (the single Discord
-  gateway). `calfcord start` brings this up.
+  gateway). `disco start` brings this up.
 - **The agent roster** — teammates that chat in the running workspace.
-  Each maps to one of calfcord's worker process types:
-  - **`calfkit-agent`** — runs the agent(s). `calfcord agent start <name>`.
-  - **`calfkit-tools`** — runs the tool(s). `calfcord tools start`.
+  Each maps to one of Agent Disco's worker process types:
+  - **`calfkit-agent`** — runs the agent(s). `disco agent start <name>`.
+  - **`calfkit-tools`** — runs the tool(s). `disco tools start`.
   - **`calfkit-mcp`** — hosts one MCP server from `mcp.json` and advertises its
-    tools on the bus, one process per server. `calfcord mcp start <server>`.
+    tools on the bus, one process per server. `disco mcp start <server>`.
 
 Every one of these is an independent microservice talking over the broker, so
 any of them can run on any host. Move the roster onto other machines and point
 them all at one shared broker URL — same config, same commands, no rewrite. Run
-`calfcord explain topology` for the one-screen version, or see
+`disco explain topology` for the one-screen version, or see
 [`docs/architecture.md`](./docs/architecture.md).
 
 ## Configuration
 
-`calfcord init` (from the [quick start](#quick-start)) writes
+`disco init` (from the [quick start](#quick-start)) writes
 `~/.calfcord/config/.env` with the essentials. To edit settings later, re-run
-`calfcord init` or open that file directly;
+`disco init` or open that file directly;
 [`docs/configuration.md`](./docs/configuration.md) is the complete
 environment-variable reference.
 
 ## Documentation
 
-- [`docs/using-calfcord.md`](./docs/using-calfcord.md) — what you can do after the quick start, each task with its command.
+- [`docs/using-disco.md`](./docs/using-disco.md) — what you can do after the quick start, each task with its command.
 - [`docs/discord-setup.md`](./docs/discord-setup.md) — create the Discord app (~5 min).
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — every agent frontmatter field.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — add a built-in tool.
@@ -179,7 +179,7 @@ environment-variable reference.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent messaging + handoff (native `message_agent`).
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
 - [`docs/troubleshooting.md`](./docs/troubleshooting.md) — diagnose and fix common problems.
-- [`docs/installation.md`](./docs/installation.md) — install, configure (`calfcord init`), and run calfcord; the `calfcord` CLI, updates/rollback.
+- [`docs/installation.md`](./docs/installation.md) — install, configure (`disco init`), and run Agent Disco; the `disco` CLI, updates/rollback.
 - [`docs/design/`](./docs/design/) — historical design notes.
 
 ## Contributing

@@ -1,4 +1,4 @@
-"""Resumable setup checkpoint for ``calfcord init`` (§12.7).
+"""Resumable setup checkpoint for ``disco init`` (§12.7).
 
 ``init`` is *one continuous, resumable* session: a crash, a Ctrl-C, or the
 unavoidable browser detour to authorize the Discord bot must resume ("Welcome

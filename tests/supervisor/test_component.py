@@ -168,7 +168,7 @@ async def test_component_start_workspace_down(tmp_path, capsys):
     assert client.restart_calls == []
     out = capsys.readouterr().out
     assert "workspace not running" in out
-    assert "calfcord start" in out
+    assert "disco start" in out
 
 
 # --- component_stop ---------------------------------------------------------

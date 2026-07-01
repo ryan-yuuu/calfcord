@@ -70,7 +70,7 @@ def parse_alias_csv(raw: str) -> dict[str, str]:
     """Parse a ``src1=dst1,src2=dst2`` alias string into a ``{src: dst}`` dict.
 
     The shared grammar for ``CALFCORD_TOOLS_ALIAS`` — used by both the runtime
-    (:func:`_resolve_alias_map`) and the ``calfcord tools alias`` CLI.
+    (:func:`_resolve_alias_map`) and the ``disco tools alias`` CLI.
 
     Empty / whitespace-only → ``{}``; empty chunks (a trailing/double comma)
     are skipped. Parsed strictly: a malformed entry, empty side, a ``dst`` that
@@ -168,7 +168,7 @@ def validate_alias(
     aliasable_names: Collection[str],
     existing: Mapping[str, str],
 ) -> None:
-    """Validate a proposed ``src``→``dst`` alias for ``calfcord tools alias add``.
+    """Validate a proposed ``src``→``dst`` alias for ``disco tools alias add``.
 
     Raises :class:`ValueError` (an operator-facing message) on the first rule
     violated; returns ``None`` when the alias is valid. ``tool_names`` is the

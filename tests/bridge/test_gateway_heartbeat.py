@@ -89,7 +89,7 @@ class TestOnReadyWritesFirstBeat:
     """``_on_ready`` writes the first ``bridge`` heartbeat to the resolved home."""
 
     async def test_writes_fresh_bridge_beat_under_resolved_home(self, tmp_path, monkeypatch) -> None:
-        # The beat must land where ``calfcord _healthcheck bridge`` reads it:
+        # The beat must land where ``disco _healthcheck bridge`` reads it:
         # ``$CALFCORD_HOME/state/health/bridge.json``.
         monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
         gateway = _gateway()

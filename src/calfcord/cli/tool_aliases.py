@@ -1,4 +1,4 @@
-"""Handlers for ``calfcord tools alias`` — operator-managed tool aliases.
+"""Handlers for ``disco tools alias`` — operator-managed tool aliases.
 
 Aliasing (``CALFCORD_TOOLS_ALIAS``, e.g. ``terminal`` → ``terminal_eu`` for
 multi-host routing) is install config: these handlers are a validated editor of
@@ -7,7 +7,7 @@ reads at boot. There is no runtime change — the var is already consumed by
 ``apply_deploy_filters``. See ``docs/design/tool-alias-cli.md`` and
 [ADR-0007](../../../docs/adr/0007-tool-alias-cli-config.md).
 
-Mirrors the ``calfcord mcp add/list/remove`` idiom in
+Mirrors the ``disco mcp add/list/remove`` idiom in
 :mod:`calfcord.cli.mcp_admin`.
 """
 
@@ -41,8 +41,8 @@ def _write_aliases(env_path: Path, aliases: Mapping[str, str]) -> None:
 def _print_restart_hint() -> None:
     print(
         "restart the tools host and agents to apply: "
-        "`calfcord tools restart` and `calfcord agent restart --all` "
-        "(or `calfcord stop && calfcord start`)."
+        "`disco tools restart` and `disco agent restart --all` "
+        "(or `disco stop && disco start`)."
     )
 
 
@@ -101,7 +101,7 @@ def run_alias_list(*, env_path: Path) -> int:
     if not aliases:
         print(
             f"no tool aliases configured in {env_path}; add one with "
-            "`calfcord tools alias add <tool> <new-name>`"
+            "`disco tools alias add <tool> <new-name>`"
         )
         return 0
     for src, dst in sorted(aliases.items()):

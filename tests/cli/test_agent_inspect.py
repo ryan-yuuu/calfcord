@@ -1,4 +1,4 @@
-"""Tests for ``calfcord agent list`` / ``show`` (read-only inspection).
+"""Tests for ``disco agent list`` / ``show`` (read-only inspection).
 
 Both commands are pure functions of an ``agents_dir`` (plus a name) with no
 prompter, so these tests seed real ``.md`` files and assert on captured stdout.

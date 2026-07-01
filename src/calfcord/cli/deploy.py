@@ -1,4 +1,4 @@
-"""``calfcord deploy <systemd|k8s|docker>`` — Altitude-3 graduation manifests.
+"""``disco deploy <systemd|k8s|docker>`` — Altitude-3 graduation manifests.
 
 calfcord's day-one supervisor is Process Compose (single host, generated YAML the
 operator never edits). ``deploy`` is the *graduation* surface (design §2 / §6 /
@@ -11,7 +11,7 @@ broker, exactly like the distributed primitive (§12.5).
 Three targets, each with a different honesty posture (§11.6):
 
 * **systemd** — a *real, correct-by-construction* unit for the single-host
-  substrate. ``calfcord start`` forks a detached supervisor and returns 0 once the
+  substrate. ``disco start`` forks a detached supervisor and returns 0 once the
   bridge is healthy (findings.start_model), which is precisely ``Type=forking``;
   the unit runs the install **shim** (``<shim> start`` / ``<shim> stop``) — the
   single seam that owns the ``up`` flags, the derived REST port, the priming
@@ -22,7 +22,7 @@ Three targets, each with a different honesty posture (§11.6):
   ConfigMap with the shared ``CALF_HOST_URL``, and one Deployment per process type
   (bridge / tools) plus one per *defined* agent, all on the shipped
   calfcord image running the ``calfkit-*`` console scripts the compose uses. NOT
-  ``calfcord start`` (there is no in-pod supervisor); each process type is its own
+  ``disco start`` (there is no in-pod supervisor); each process type is its own
   workload dialing the shared broker — the Altitude-3 distributed shape. Secrets
   arrive via a ``Secret`` reference, never inlined (§12.3).
 * **docker** — the shipped ``docker-compose.yml`` is hand-tuned (Codex auth
@@ -105,7 +105,7 @@ def _resolve_config_host_url(server_urls: str) -> str:
     # host:port (e.g. "localhost:9092"), so prepend a dummy scheme to parse it.
     # ``.port`` raises ValueError on a non-integer/out-of-range port; an
     # unparseable value is not a loopback we can confidently rewrite, so fall back
-    # to the verbatim passthrough rather than crash ``calfcord deploy``.
+    # to the verbatim passthrough rather than crash ``disco deploy``.
     try:
         parsed = urlsplit(f"//{candidate}")
         host = (parsed.hostname or "").lower()
@@ -134,7 +134,7 @@ _VALID_TARGETS = ("systemd", "k8s", "docker")
 def render_systemd(*, home: str, launcher: str) -> str:
     """Render a systemd unit for the single-host substrate.
 
-    Models how ``calfcord start`` actually launches the supervisor: it forks a
+    Models how ``disco start`` actually launches the supervisor: it forks a
     detached process-compose that outlives the CLI and returns 0 once the bridge
     is healthy — exactly the ``Type=forking`` contract (findings.start_model). The
     unit runs the install **shim** (``<launcher> start`` / ``<launcher> stop``),
@@ -142,7 +142,7 @@ def render_systemd(*, home: str, launcher: str) -> str:
     priming reconcile and the readiness gate; reconstructing the ``up`` argv here
     would duplicate the §13.2 contract and drift. ``CALFCORD_HOME`` is exported so
     the shim and ``pc_port_for`` resolve the same home. ``Restart=on-failure`` only
-    reacts to the *fork* (the ``calfcord start`` ExecStart) exiting non-zero — with
+    reacts to the *fork* (the ``disco start`` ExecStart) exiting non-zero — with
     ``Type=forking`` and no ``PIDFile=`` systemd cannot track the detached
     process-compose, so a crash *inside* the supervised tree is not auto-recovered
     here (process-compose's own per-process restarts cover that); an
@@ -157,20 +157,20 @@ def render_systemd(*, home: str, launcher: str) -> str:
     # Plain text (not configparser.write, which lowercases nothing but emits its
     # own quirks): a systemd unit is hand-readable and the operator edits it.
     return (
-        "# calfcord substrate — systemd USER unit (REFERENCE: validate paths for your host).\n"
+        "# Agent Disco substrate — systemd USER unit (REFERENCE: validate paths for your host).\n"
         "#\n"
-        "# Models `calfcord start`: it forks a detached process-compose supervisor and\n"
+        "# Models `disco start`: it forks a detached process-compose supervisor and\n"
         "# returns 0 once the bridge is healthy, so Type=forking is the faithful type.\n"
         "# ExecStart/ExecStop run the install shim — the single seam that owns the\n"
         "# process-compose `up` flags, the home-derived REST port, and the readiness gate.\n"
-        "# Install for the current login session: systemctl --user enable --now calfcord\n"
+        "# Install for the current login session: systemctl --user enable --now disco\n"
         "# (a --user unit already runs as that login user — system-only owner directives\n"
         "# do not apply and are intentionally omitted).\n"
         "# Restart=on-failure only catches the `start` fork exiting non-zero; with\n"
         "# Type=forking and no PIDFile= systemd can't track the detached supervisor, so a\n"
         "# crash inside the tree is handled by process-compose's per-process restarts.\n"
         "[Unit]\n"
-        "Description=calfcord substrate (broker + bridge)\n"
+        "Description=Agent Disco substrate (broker + bridge)\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
         "\n"
@@ -242,7 +242,7 @@ def render_k8s(
     their own loopback), a broker Service + Deployment, and one Deployment per
     process type (bridge / tools) plus one per *defined* agent —
     each running a ``calfkit-*`` console script on the shipped image, dialing the
-    shared broker. This is the Altitude-3 distributed shape, NOT ``calfcord start``
+    shared broker. This is the Altitude-3 distributed shape, NOT ``disco start``
     (no in-pod supervisor). The roster is sorted so the document order never
     depends on ``.md`` glob order.
 
@@ -254,10 +254,10 @@ def render_k8s(
     roster = sorted(agent_ids)
 
     header = (
-        "# calfcord — REFERENCE Kubernetes manifests (Altitude-3 distributed deploy).\n"
+        "# Agent Disco — REFERENCE Kubernetes manifests (Altitude-3 distributed deploy).\n"
         "# A starting point to validate per cluster — NOT a turnkey production install.\n"
         "# Each process type is its own Deployment dialing the shared broker (no in-pod\n"
-        "# supervisor; this is the distributed primitive, not `calfcord start`).\n"
+        "# supervisor; this is the distributed primitive, not `disco start`).\n"
         "#\n"
         "# Before applying, create the secrets the bridge/agents need (out of band):\n"
         f"#   kubectl create secret generic {_K8S_SECRET_NAME} --from-env-file=.env\n"
@@ -397,7 +397,7 @@ def render_docker(*, repo_compose_path: str, agent_ids: list[str]) -> str:
     roster = sorted(agent_ids)
 
     lines = [
-        "# calfcord — Docker deployment.",
+        "# Agent Disco — Docker deployment.",
         "#",
         "# The shipped docker-compose.yml is hand-tuned (Codex auth mounts, the A2A",
         "# channel override, depends_on healthchecks) — do NOT regenerate it. Use it",
@@ -407,7 +407,7 @@ def render_docker(*, repo_compose_path: str, agent_ids: list[str]) -> str:
     ]
 
     if not roster:
-        lines.append("# No agents are defined yet — `calfcord agent create` first, then re-run.")
+        lines.append("# No agents are defined yet — `disco agent create` first, then re-run.")
         return "\n".join(lines) + "\n"
 
     lines += [
@@ -458,9 +458,9 @@ def run(
     """Render ``target``'s manifest to stdout (or ``out_path``) and return a code.
 
     The thin veneer over the pure render functions: it resolves the launcher
-    (``<home>/shims/calfcord`` — the same shim every supervised ``command`` is
+    (``<home>/shims/disco`` — the same shim every supervised ``command`` is
     built on), enumerates the roster via :func:`detect_agents` (the exact seam
-    ``calfcord start`` uses, so the manifest's roster equals what ``start``
+    ``disco start`` uses, so the manifest's roster equals what ``start``
     declares), and reads ``.env`` only to *preflight* (never to inline secret
     values). Output goes to stdout by default; ``out_path`` writes the manifest to
     a file instead. An unknown ``target`` returns non-zero with an error rather
@@ -472,7 +472,7 @@ def run(
         return 1
 
     roster = detect_agents(agents_dir)
-    launcher = str(home / "shims" / "calfcord")
+    launcher = str(home / "shims" / "disco")
 
     if target == "systemd":
         # Preflight: a substrate unit only makes sense once a broker is configured.
@@ -480,7 +480,7 @@ def run(
         if not read_env(env_path).get("CALF_HOST_URL"):
             print(
                 "# note: CALF_HOST_URL is not set in this install's .env yet — the substrate "
-                "won't start until it is (run `calfcord init` or `calfcord self set-broker`)."
+                "won't start until it is (run `disco init` or `disco self set-broker`)."
             )
         manifest = render_systemd(home=str(home), launcher=launcher)
     elif target == "k8s":
