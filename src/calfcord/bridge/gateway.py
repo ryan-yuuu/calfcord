@@ -262,10 +262,7 @@ class DiscordIngressGateway:
         bot_user = self._client.user
         assert bot_user is not None, "on_ready fires after authentication completes"
         self._bot_user_id = bot_user.id
-        self._message_normalizer = MessageNormalizer(
-            bot_user_id=bot_user.id,
-            human_owner_id=self._settings.owner_user_id,
-        )
+        self._message_normalizer = MessageNormalizer(human_owner_id=self._settings.owner_user_id)
         logger.info("gateway ready as %s (id=%s)", bot_user, bot_user.id)
 
         # Discord is connected as of on_ready — record liveness + identity, then

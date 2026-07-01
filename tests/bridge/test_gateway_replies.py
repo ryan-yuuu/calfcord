@@ -76,7 +76,7 @@ def _ready(gateway: DiscordIngressGateway) -> None:
     ``_on_message`` no-ops until the normalizer + bot user id are set on ready;
     setting them directly is how we exercise intake in isolation (no client.user).
     """
-    gateway._message_normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+    gateway._message_normalizer = MessageNormalizer(_OWNER_USER_ID)
     gateway._bot_user_id = _BOT_USER_ID
 
 

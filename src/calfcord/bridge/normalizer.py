@@ -77,12 +77,7 @@ def _resolve_avatar_url(author: Any) -> str | None:
 class MessageNormalizer:
     """Translates ``discord.Message`` events into :class:`WireMessage`."""
 
-    def __init__(
-        self,
-        bot_user_id: int,
-        human_owner_id: int | None,
-    ) -> None:
-        self._bot_user_id = bot_user_id
+    def __init__(self, human_owner_id: int | None) -> None:
         self._human_owner_id = human_owner_id
 
     def normalize(self, message: Any) -> WireMessage:

@@ -78,14 +78,14 @@ class TestNormalizeMentionAndKind:
     keeps the original content verbatim (the ``@`` prefix is NOT stripped)."""
 
     def test_plain_message_is_kind_message(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(content="hello world"))
         assert wire.kind == "message"
         assert wire.slash_target is None
         assert wire.content == "hello world"
 
     def test_mention_is_kind_slash_with_first_target(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(content="@scribe book a haircut"))
         assert wire.kind == "slash"
         assert wire.slash_target == "scribe"
@@ -93,12 +93,12 @@ class TestNormalizeMentionAndKind:
         assert wire.content == "@scribe book a haircut"
 
     def test_slash_target_is_lower_cased(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(content="@SCRIBE hi"))
         assert wire.slash_target == "scribe"
 
     def test_first_of_multiple_mentions_is_the_target(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(content="@scribe please loop in @echo"))
         assert wire.kind == "slash"
         assert wire.slash_target == "scribe"
@@ -106,7 +106,7 @@ class TestNormalizeMentionAndKind:
     def test_unknown_mention_is_a_valid_wire_not_an_error(self, fake_message) -> None:
         # The registry gate is gone (C6): an unrecognized ``@mention`` normalizes
         # cleanly; the mesh roster decides at dispatch whether it is reachable.
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(content="@nobody_here hi"))
         assert wire.kind == "slash"
         assert wire.slash_target == "nobody_here"
@@ -117,14 +117,14 @@ class TestNormalizeChannelAndThread:
     ``source_channel_id`` preserves the un-flattened id for history fetching."""
 
     def test_top_level_message_source_equals_channel(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(channel_id=200))
         assert wire.channel_id == 200
         assert wire.source_channel_id == 200
         assert wire.thread_id is None
 
     def test_thread_message_collapses_to_parent_channel(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(channel_id=500, thread_parent_id=200))
         # channel_id is the flattened parent; source_channel_id is the thread itself.
         assert wire.channel_id == 200, "thread messages must route on the parent channel id"
@@ -132,7 +132,7 @@ class TestNormalizeChannelAndThread:
         assert wire.thread_id == 500
 
     def test_wire_carries_message_and_guild_ids(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         msg = fake_message(message_id=777, guild_id=42)
         wire = normalizer.normalize(msg)
         assert wire.message_id == 777
@@ -145,19 +145,19 @@ class TestNormalizeAuthor:
     (now always ``None``) ``agent_id``."""
 
     def test_human_owner_is_flagged(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(author_id=_OWNER_USER_ID, author_name="ryan"))
         assert wire.author.is_human_owner is True
         assert wire.author.is_bot is False
         assert wire.author.is_webhook is False
 
     def test_non_owner_human_is_not_owner(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(author_id=_OWNER_USER_ID + 1))
         assert wire.author.is_human_owner is False
 
     def test_owner_unset_means_no_one_is_owner(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, human_owner_id=None)
+        normalizer = MessageNormalizer(human_owner_id=None)
         wire = normalizer.normalize(fake_message(author_id=_OWNER_USER_ID))
         assert wire.author.is_human_owner is False
 
@@ -165,7 +165,7 @@ class TestNormalizeAuthor:
         # A persona webhook post used to resolve ``agent_id`` from a registry; the
         # registry is gone, so ``agent_id`` is always ``None`` (history recognizes
         # agent turns by bot-owned ``webhook_id`` instead, R-A3).
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(
             fake_message(author_display_name="Aksel (Scheduler)", author_is_bot=True, webhook_id=777)
         )
@@ -177,7 +177,7 @@ class TestNormalizeAuthor:
         assert wire.author.is_human_owner is False
 
     def test_bot_own_non_webhook_message(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(
             fake_message(author_id=_BOT_USER_ID, author_name="calfkit-bot", author_is_bot=True, webhook_id=None)
         )
@@ -187,7 +187,7 @@ class TestNormalizeAuthor:
         assert wire.author.is_human_owner is False
 
     def test_display_name_and_avatar_round_trip(self, fake_message) -> None:
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(fake_message(author_display_name="Alice A.", author_avatar_url="https://cdn/x.png"))
         assert wire.author.display_name == "Alice A."
         assert wire.author.avatar_url == "https://cdn/x.png"
@@ -208,7 +208,7 @@ class TestNormalizeAuthor:
             content="hi",
             created_at=datetime.now(UTC),
         )
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         wire = normalizer.normalize(message)
         assert wire.author.avatar_url is None
 
@@ -217,6 +217,6 @@ class TestNormalizeGuards:
     def test_dm_raises(self, fake_message) -> None:
         # DMs have no guild; callers filter them out, but the normalizer enforces
         # it defensively.
-        normalizer = MessageNormalizer(_BOT_USER_ID, _OWNER_USER_ID)
+        normalizer = MessageNormalizer(_OWNER_USER_ID)
         with pytest.raises(ValueError, match="DM"):
             normalizer.normalize(fake_message(guild_id=None))
