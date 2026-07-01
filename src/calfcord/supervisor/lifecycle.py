@@ -100,6 +100,76 @@ _SUPERVISOR_LOG_FILENAME = f"{SUPERVISOR_LOG_STEM}.log"
 # Substrate processes, for the status board's substrate-vs-roster split.
 _SUBSTRATE = frozenset({"broker", "bridge"})
 
+# The bridge's per-process log — where process-compose captures the bridge
+# process's own stdout/stderr, beside the supervisor log (``compose._log_location``
+# renders ``<home>/state/logs/<name>.log``). When the readiness gate times out the
+# actual cause (e.g. a discord.py crash traceback) lands here, not in the
+# supervisor log, so this is the file :func:`_diagnose_start_failure` reads.
+_BRIDGE_LOG_FILENAME = "bridge.log"
+
+# How much of the bridge log's TAIL the diagnosis reads. A crashing bridge prints
+# its traceback last, so the tail carries the signal; bounding the read keeps a
+# runaway/rotated log from being slurped whole into memory. 64 KiB comfortably
+# spans a discord.py traceback plus surrounding noise.
+_LOG_TAIL_BYTES = 64 * 1024
+
+# Known bridge-startup failure signatures, matched against the log tail, most
+# specific first. Each maps a discord.py exception name to an actionable, cause-
+# specific fix that replaces the generic "broker down or intents off" guess.
+# ``PrivilegedIntentsRequired`` is the common first-run miss: **Message Content**
+# is the only privileged intent the bridge requests, so name it exactly rather
+# than "intents" generically. ``LoginFailure`` ("Improper token") means the token
+# itself was rejected.
+_START_FAILURE_SIGNATURES: tuple[tuple[str, str], ...] = (
+    (
+        "PrivilegedIntentsRequired",
+        "the bridge crashed because the Message Content privileged intent is off. "
+        "Enable it under Developer Portal -> your app -> Bot -> Privileged Gateway "
+        "Intents (toggle Message Content on) and Save, then re-run `disco start`.",
+    ),
+    (
+        "LoginFailure",
+        "the Discord bot token was rejected -- re-run `disco init` to re-enter it.",
+    ),
+)
+
+
+def _read_log_tail(path: str, *, max_bytes: int = _LOG_TAIL_BYTES) -> str | None:
+    """Return the last ``max_bytes`` of ``path`` as text, or ``None`` if unreadable.
+
+    Bounded (seeks to the tail rather than reading the whole file) so a large or
+    rotated log cannot blow up memory. A missing/unreadable file yields ``None``
+    instead of raising — diagnosis is best-effort and must never itself fail the
+    caller. Bytes are decoded leniently (``errors="replace"``) since a truncated
+    tail may slice a multibyte sequence.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+            data = handle.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def _diagnose_start_failure(log_dir: str) -> str | None:
+    """Diagnose the likeliest bridge-startup failure from its per-process log.
+
+    Reads only the TAIL of ``<log_dir>/bridge.log`` and returns a cause-specific,
+    actionable message for the first known signature it matches, or ``None`` when
+    the log is missing/unreadable or carries no recognised signature (the caller
+    then falls back to the generic hint). Pure and total: it never raises.
+    """
+    tail = _read_log_tail(os.path.join(log_dir, _BRIDGE_LOG_FILENAME))
+    if tail is None:
+        return None
+    for signature, message in _START_FAILURE_SIGNATURES:
+        if signature in tail:
+            return message
+    return None
+
 
 def resolve_pc_binary() -> str:
     """Locate the ``process-compose`` binary, or raise an actionable error.
@@ -506,12 +576,25 @@ async def start(
             # supervisor still shutting down (§13.3).
             with contextlib.suppress(Exception):
                 spawn_blocking([binary, "down", "-p", str(port)])
-            print(
-                "error: bridge did not become ready within "
-                f"{ready_timeout_s:g}s; tore down the workspace. "
-                "Likely the broker could not be reached or Discord privileged "
-                f"intents are off. See {log_path} or run: disco doctor"
-            )
+            # Diagnose from the bridge's OWN log (the supervisor log only records
+            # the readiness timeout; the real cause — e.g. a discord.py crash — is
+            # in <home>/state/logs/bridge.log). If a known signature matches, print
+            # the cause-specific fix instead of guessing; otherwise keep the generic
+            # message unchanged. The log pointer is retained either way.
+            diagnosis = _diagnose_start_failure(os.path.dirname(log_path))
+            if diagnosis is not None:
+                print(
+                    "error: bridge did not become ready within "
+                    f"{ready_timeout_s:g}s; tore down the workspace. "
+                    f"{diagnosis} See {log_path} or run: disco doctor"
+                )
+            else:
+                print(
+                    "error: bridge did not become ready within "
+                    f"{ready_timeout_s:g}s; tore down the workspace. "
+                    "Likely the broker could not be reached or Discord privileged "
+                    f"intents are off. See {log_path} or run: disco doctor"
+                )
             return 1
 
     print(

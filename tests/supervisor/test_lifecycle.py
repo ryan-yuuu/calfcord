@@ -721,6 +721,166 @@ async def test_start_running_but_not_ready_bridge_times_out_and_tears_down(
     assert "bridge" in out
 
 
+# --- start-failure diagnosis (bridge-log signature matching) ----------------
+
+
+# A trimmed but faithful discord.py PrivilegedIntentsRequired traceback, of the
+# shape process-compose captures into <home>/state/logs/bridge.log when the
+# Message Content portal toggle is off.
+_PRIVILEGED_INTENTS_TRACEBACK = """\
+Traceback (most recent call last):
+  File "/h/.venv/lib/python3.13/site-packages/discord/client.py", line 700, in connect
+    await self.ws.poll_event()
+discord.errors.PrivilegedIntentsRequired: Shard ID None is requesting privileged \
+intents that have not been explicitly enabled in the developer portal. \
+It is recommended to go to https://discord.com/developers/applications/ and \
+explicitly enable the privileged intents within your application's page. \
+If this is not possible, then consider disabling the privileged intents instead.
+"""
+
+# discord.py's LoginFailure on a bad token.
+_LOGIN_FAILURE_TRACEBACK = """\
+Traceback (most recent call last):
+  File "/h/.venv/lib/python3.13/site-packages/discord/client.py", line 600, in login
+    data = await self.http.static_login(token.strip())
+discord.errors.LoginFailure: Improper token has been passed.
+"""
+
+
+def _write_bridge_log(home: str, contents: str) -> str:
+    """Write a fake bridge per-process log at <home>/state/logs/bridge.log."""
+    logs_dir = os.path.join(home, "state", "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    Path(os.path.join(logs_dir, "bridge.log")).write_text(contents, encoding="utf-8")
+    return logs_dir
+
+
+def test_diagnose_start_failure_names_message_content_for_privileged_intents(
+    tmp_path,
+) -> None:
+    # The single most common first-run miss: the Message Content portal toggle is
+    # off, so the bridge dies with PrivilegedIntentsRequired. The diagnosis must
+    # name the EXACT fix (Message Content specifically — it is the only requested
+    # privileged intent), not a generic "intents are off".
+    logs_dir = _write_bridge_log(_home(tmp_path), _PRIVILEGED_INTENTS_TRACEBACK)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "Message Content" in msg
+    assert "Privileged Gateway Intents" in msg
+    assert "disco start" in msg
+
+
+def test_diagnose_start_failure_names_token_for_login_failure(tmp_path) -> None:
+    # A rejected bot token surfaces as discord.py LoginFailure ("Improper token").
+    # The diagnosis must point at re-running `disco init` to re-enter it.
+    logs_dir = _write_bridge_log(_home(tmp_path), _LOGIN_FAILURE_TRACEBACK)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "token" in msg.lower()
+    assert "disco init" in msg
+
+
+def test_diagnose_start_failure_returns_none_when_log_missing(tmp_path) -> None:
+    # No bridge log at all (the process never wrote one) => no diagnosis, never a
+    # raise — the caller falls back to the generic hint.
+    logs_dir = os.path.join(_home(tmp_path), "state", "logs")
+    assert lifecycle._diagnose_start_failure(logs_dir) is None
+
+
+def test_diagnose_start_failure_returns_none_on_unknown_failure(tmp_path) -> None:
+    # A bridge log with no recognised signature must yield None so the caller keeps
+    # the existing generic message unchanged.
+    logs_dir = _write_bridge_log(_home(tmp_path), "some unrelated shutdown noise\n")
+    assert lifecycle._diagnose_start_failure(logs_dir) is None
+
+
+def test_diagnose_start_failure_reads_only_the_tail(tmp_path) -> None:
+    # The signature sits at the very START of a multi-hundred-KB log, well outside
+    # the ~64KB tail window. Reading only the tail must miss it (=> None), proving
+    # the diagnosis never slurps an unbounded log into memory.
+    filler = "x" * (lifecycle._LOG_TAIL_BYTES * 4)
+    logs_dir = _write_bridge_log(
+        _home(tmp_path), _PRIVILEGED_INTENTS_TRACEBACK + filler
+    )
+    assert lifecycle._diagnose_start_failure(logs_dir) is None
+
+    # But the same signature WITHIN the tail window is still found, so the tail
+    # bound does not blind the common case (the traceback is the last thing a
+    # crashing bridge prints).
+    logs_dir2 = _write_bridge_log(
+        _home(tmp_path / "within"), filler + _PRIVILEGED_INTENTS_TRACEBACK
+    )
+    assert lifecycle._diagnose_start_failure(logs_dir2) is not None
+
+
+async def test_start_readiness_timeout_diagnoses_privileged_intents(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    # End to end: the bridge never becomes Ready AND its per-process log carries
+    # the PrivilegedIntentsRequired traceback. The not-ready branch must surface
+    # the specific fix (Message Content) instead of the generic guess, while still
+    # pointing at the supervisor log.
+    home = _home(tmp_path)
+    _write_bridge_log(home, _PRIVILEGED_INTENTS_TRACEBACK)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        bridge_states=[{"status": "Pending", "is_ready": "Not Ready"}] * 1000,
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        agent_ids=[],
+        client=client,
+        spawn=_RecordingSpawn(),
+        spawn_blocking=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        ready_timeout_s=10,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "Message Content" in out
+    # Still points the user at the log for the full traceback.
+    assert "process-compose.log" in out
+
+
+async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    # No bridge log signature to match => the not-ready branch prints the existing
+    # generic message unchanged (broker / privileged intents guess + log pointer).
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        bridge_states=[{"status": "Pending", "is_ready": "Not Ready"}] * 1000,
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        agent_ids=[],
+        client=client,
+        spawn=_RecordingSpawn(),
+        spawn_blocking=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        ready_timeout_s=10,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out.lower()
+    assert "likely the broker could not be reached" in out
+    assert "process-compose.log" in out
+
+
 async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
     tmp_path, capsys, fake_pc_bin
 ) -> None:
